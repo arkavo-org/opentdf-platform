@@ -4,7 +4,7 @@ import (
 	"io"
 	"os"
 
-	"github.com/opentdf/platform/sdk"
+	"github.com/arkavo-org/opentdf-platform/sdk"
 	"github.com/spf13/cobra"
 )
 

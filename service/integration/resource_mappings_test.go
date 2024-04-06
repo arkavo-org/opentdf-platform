@@ -7,10 +7,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/opentdf/platform/protocol/go/common"
-	"github.com/opentdf/platform/protocol/go/policy/resourcemapping"
-	"github.com/opentdf/platform/service/internal/db"
-	"github.com/opentdf/platform/service/internal/fixtures"
+	"github.com/arkavo-org/opentdf-platform/protocol/go/common"
+	"github.com/arkavo-org/opentdf-platform/protocol/go/policy/resourcemapping"
+	"github.com/arkavo-org/opentdf-platform/service/internal/db"
+	"github.com/arkavo-org/opentdf-platform/service/internal/fixtures"
 	"github.com/stretchr/testify/suite"
 )
 
