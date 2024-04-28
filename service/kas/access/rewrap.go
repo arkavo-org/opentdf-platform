@@ -25,7 +25,6 @@ import (
 
 	kaspb "github.com/arkavo-org/opentdf-platform/protocol/go/kas"
 	"github.com/arkavo-org/opentdf-platform/sdk"
-	"github.com/arkavo-org/opentdf-platform/service/internal/auth"
 	"github.com/arkavo-org/opentdf-platform/service/kas/tdf3"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
@@ -49,8 +48,7 @@ type entityInfo struct {
 }
 
 const (
-	ErrUser     = Error("request error")
-	ErrInternal = Error("internal error")
+	ErrUser = Error("request error")
 )
 
 func err400(s string) error {
@@ -65,14 +63,6 @@ func err403(s string) error {
 	return errors.Join(ErrUser, status.Error(codes.PermissionDenied, s))
 }
 
-func err404(s string) error {
-	return errors.Join(ErrUser, status.Error(codes.NotFound, s))
-}
-
-func err503(s string) error {
-	return errors.Join(ErrInternal, status.Error(codes.Unavailable, s))
-}
-
 func generateHMACDigest(ctx context.Context, msg, key []byte) ([]byte, error) {
 	mac := hmac.New(sha256.New, key)
 	_, err := mac.Write(msg)
@@ -84,33 +74,12 @@ func generateHMACDigest(ctx context.Context, msg, key []byte) ([]byte, error) {
 }
 
 func verifySignedRequestToken(ctx context.Context, in *kaspb.RewrapRequest) (*RequestBody, error) {
-	// get dpop public key from context
-	dpopJWK := auth.GetJWKFromContext(ctx)
-
 	var token jwt.Token
 	var err error
-	if dpopJWK == nil {
-		slog.InfoContext(ctx, "no DPoP key provided")
-		// if we have no DPoP key it's for one of two reasons:
-		// 1. auth is disabled so we can't get a DPoP JWK
-		// 2. auth is enabled _but_ we aren't requiring DPoP
-		// in either case letting the request through makes sense
-		token, err = jwt.Parse([]byte(in.GetSignedRequestToken()), jwt.WithValidate(false))
-		if err != nil {
-			slog.WarnContext(ctx, "unable to verify parse token", "err", err)
-			return nil, err401("could not parse token")
-		}
-	} else {
-		// verify and validate the request token
-		token, err = jwt.Parse([]byte(in.GetSignedRequestToken()),
-			jwt.WithKey(dpopJWK.Algorithm(), dpopJWK),
-			jwt.WithValidate(true),
-		)
-		// we have failed to verify the signed request token
-		if err != nil {
-			slog.WarnContext(ctx, "unable to verify request token", "err", err)
-			return nil, err401("unable to verify request token")
-		}
+	token, err = jwt.Parse([]byte(in.GetSignedRequestToken()), jwt.WithValidate(false))
+	if err != nil {
+		slog.WarnContext(ctx, "unable to verify parse token", "err", err)
+		return nil, err401("could not parse token")
 	}
 	rb, exists := token.Get("requestBody")
 	if !exists {
