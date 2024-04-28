@@ -41,6 +41,8 @@ func (p *Provider) LegacyPublicKey(ctx context.Context, in *kaspb.LegacyPublicKe
 			return nil, errors.Join(ErrConfig, status.Error(codes.Internal, "configuration error"))
 		}
 	}
+	// workaround for Error code 75497574.  [ec_key_pair.cpp:650] Failed to create X509 cert struct.error:04800066:PEM routines::bad end line
+	cert += "\n"
 	return &wrapperspb.StringValue{Value: cert}, nil
 }
 
