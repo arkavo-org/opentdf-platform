@@ -2,7 +2,10 @@ package security
 
 import (
 	"crypto"
+	"crypto/ecdsa"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -34,14 +37,15 @@ type StandardRSACrypto struct {
 }
 
 type StandardECCrypto struct {
-	Identifier string
-	// ecPublicKey  *ecdh.PublicKey
-	// ecPrivateKey *ecdh.PrivateKey
+	Identifier       string
+	ecPublicKey      *ecdsa.PublicKey
+	ecPrivateKey     *ecdsa.PrivateKey
+	ecCertificatePEM string
 }
 
 type StandardCrypto struct {
 	rsaKeys []StandardRSACrypto
-	// ecKeys  []StandardECCrypto
+	ecKeys  []StandardECCrypto
 }
 
 // NewStandardCrypto Create a new instance of standard crypto
@@ -74,6 +78,56 @@ func NewStandardCrypto(cfg StandardConfig) (*StandardCrypto, error) {
 			asymEncryption: asymEncryption,
 		})
 	}
+	for id, kasInfo := range cfg.ECKeys {
+		slog.Info("cfg.ECKeys", "id", id, "kasInfo", kasInfo)
+		privatePemData, err := os.ReadFile(kasInfo.PrivateKeyPath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to rsa private key file: %w", err)
+		}
+		// this returns a certificate not a PUBLIC KEY
+		publicPemData, err := os.ReadFile(kasInfo.PublicKeyPath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to rsa public key file: %w", err)
+		}
+		//block, _ := pem.Decode(publicPemData)
+		//if block == nil {
+		//	return nil, errors.New("failed to decode PEM block containing public key")
+		//}
+		//ecPublicKey, err := x509.ParsePKIXPublicKey(block.Bytes)
+		//if err != nil {
+		//	return nil, fmt.Errorf("failed to parse EC public key: %w", err)
+		//}
+		block, _ := pem.Decode(privatePemData)
+		if block == nil {
+			return nil, errors.New("failed to decode PEM block containing private key")
+		}
+		ecPrivateKey, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse EC private key: %w", err)
+		}
+		//var ecdsaPublicKey *ecdsa.PublicKey
+		//switch pub := ecPublicKey.(type) {
+		//case *ecdsa.PublicKey:
+		//	fmt.Println("pub is of type ECDSA:", pub)
+		//	ecdsaPublicKey = pub
+		//default:
+		//	panic("unknown type of public key")
+		//}
+		var ecdsaPrivateKey *ecdsa.PrivateKey
+		switch priv := ecPrivateKey.(type) {
+		case *ecdsa.PrivateKey:
+			fmt.Println("pub is of type ECDSA:", priv)
+			ecdsaPrivateKey = priv
+		default:
+			panic("unknown type of public key")
+		}
+		standardCrypto.ecKeys = append(standardCrypto.ecKeys, StandardECCrypto{
+			Identifier: id,
+			//ecPublicKey:      ecdsaPublicKey,
+			ecPrivateKey:     ecdsaPrivateKey,
+			ecCertificatePEM: string(publicPemData),
+		})
+	}
 
 	return standardCrypto, nil
 }
@@ -95,7 +149,22 @@ func (s StandardCrypto) RSAPublicKey(keyID string) (string, error) {
 }
 
 func (s StandardCrypto) ECPublicKey(string) (string, error) {
-	return "", ErrCertNotFound
+	if len(s.ecKeys) == 0 {
+		return "", ErrCertNotFound
+	}
+	// this endpoint returns certificate
+	ecKey := s.ecKeys[0]
+	return ecKey.ecCertificatePEM, nil
+	//publicKeyBytes, err := x509.MarshalPKIXPublicKey(ecKey.ecPublicKey)
+	//if err != nil {
+	//	return "", ErrPublicKeyMarshal
+	//}
+	//pemEncoded := pem.EncodeToMemory(&pem.Block{
+	//	Type:  "PUBLIC KEY",
+	//	Bytes: publicKeyBytes,
+	//})
+	//return string(pemEncoded), nil
+
 }
 
 func (s StandardCrypto) RSADecrypt(_ crypto.Hash, keyID string, _ string, ciphertext []byte) ([]byte, error) {

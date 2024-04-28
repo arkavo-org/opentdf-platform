@@ -50,3 +50,4 @@ sensitive.txt.tdf
 /server.crt
 /server.json
 /server.key
+/service/kas-ec-public.pem
