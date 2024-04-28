@@ -76,7 +76,7 @@ func generateHMACDigest(ctx context.Context, msg, key []byte) ([]byte, error) {
 func verifySignedRequestToken(ctx context.Context, in *kaspb.RewrapRequest) (*RequestBody, error) {
 	var token jwt.Token
 	var err error
-	token, err = jwt.Parse([]byte(in.GetSignedRequestToken()), jwt.WithValidate(false))
+	token, err = jwt.Parse([]byte(in.GetSignedRequestToken()), jwt.WithValidate(false), jwt.WithVerify(false))
 	if err != nil {
 		slog.WarnContext(ctx, "unable to verify parse token", "err", err)
 		return nil, err401("could not parse token")
