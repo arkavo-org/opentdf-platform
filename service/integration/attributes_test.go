@@ -215,7 +215,7 @@ func (s *AttributesSuite) Test_CreateAttribute_WithInvalidRuleFails() {
 }
 
 func (s *AttributesSuite) Test_UnsafeUpdateAttribute_ReplaceValuesOrder() {
-	// TODO: write test when unsafe behaviors are implemented [https://github.com/opentdf/platform/issues/115]
+	// TODO: write test when unsafe behaviors are implemented [https://github.com/arkavo-org/opentdf-platform/issues/115]
 	s.T().Skip("Unsafe service behaviors not yet implemented.")
 }
 

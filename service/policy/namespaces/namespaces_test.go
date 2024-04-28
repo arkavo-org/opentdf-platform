@@ -3,9 +3,9 @@ package namespaces
 import (
 	"testing"
 
+	"github.com/arkavo-org/opentdf-platform/protocol/go/common"
+	"github.com/arkavo-org/opentdf-platform/protocol/go/policy/namespaces"
 	"github.com/bufbuild/protovalidate-go"
-	"github.com/opentdf/platform/protocol/go/common"
-	"github.com/opentdf/platform/protocol/go/policy/namespaces"
 	"github.com/stretchr/testify/require"
 )
 

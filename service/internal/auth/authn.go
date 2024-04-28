@@ -14,7 +14,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/arkavo-org/opentdf-platform/service/internal/db"
 	"github.com/lestrrat-go/jwx/v2/jwa"
 	"github.com/lestrrat-go/jwx/v2/jwk"
 	"github.com/lestrrat-go/jwx/v2/jws"

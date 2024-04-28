@@ -4,13 +4,12 @@ import (
 	"context"
 	"fmt"
 	"net/url"
-	"os"
+	"strings"
 
 	kaspb "github.com/arkavo-org/opentdf-platform/protocol/go/kas"
 	"github.com/arkavo-org/opentdf-platform/service/kas/access"
 	"github.com/arkavo-org/opentdf-platform/service/pkg/serviceregistry"
 	"github.com/grpc-ecosystem/grpc-gateway/v2/runtime"
-	"net/url"
 )
 
 func NewRegistration() serviceregistry.Registration {

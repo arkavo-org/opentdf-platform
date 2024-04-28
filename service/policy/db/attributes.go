@@ -9,12 +9,12 @@ import (
 	"strings"
 
 	sq "github.com/Masterminds/squirrel"
+	"github.com/arkavo-org/opentdf-platform/protocol/go/common"
+	"github.com/arkavo-org/opentdf-platform/protocol/go/policy"
+	"github.com/arkavo-org/opentdf-platform/protocol/go/policy/attributes"
+	"github.com/arkavo-org/opentdf-platform/service/internal/db"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-	"github.com/opentdf/platform/protocol/go/common"
-	"github.com/opentdf/platform/protocol/go/policy"
-	"github.com/opentdf/platform/protocol/go/policy/attributes"
-	"github.com/opentdf/platform/service/internal/db"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 )
@@ -521,7 +521,7 @@ func (c PolicyDBClient) CreateAttribute(ctx context.Context, r *attributes.Creat
 	return a, nil
 }
 
-// TODO: uncomment this and consume when unsafe protos/service is implemented [https://github.com/opentdf/platform/issues/115]
+// TODO: uncomment this and consume when unsafe protos/service is implemented [https://github.com/arkavo-org/opentdf-platform/issues/115]
 // func unsafeUpdateAttributeSql(id string, updateName string, updateRule string, replaceValuesOrder []string, metadata []byte) (string, []interface{}, error) {
 // 	t := Tables.Attributes
 // 	sb := db.NewStatementBuilder().Update(t.Name())

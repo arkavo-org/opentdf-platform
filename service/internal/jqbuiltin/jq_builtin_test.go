@@ -3,7 +3,7 @@ package jqbuiltin_test
 import (
 	"testing"
 
-	"github.com/opentdf/platform/service/internal/jqbuiltin"
+	"github.com/arkavo-org/opentdf-platform/service/internal/jqbuiltin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

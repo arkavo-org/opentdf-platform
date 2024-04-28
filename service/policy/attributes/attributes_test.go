@@ -4,9 +4,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/arkavo-org/opentdf-platform/protocol/go/policy"
+	"github.com/arkavo-org/opentdf-platform/protocol/go/policy/attributes"
 	"github.com/bufbuild/protovalidate-go"
-	"github.com/opentdf/platform/protocol/go/policy"
-	"github.com/opentdf/platform/protocol/go/policy/attributes"
 	"github.com/stretchr/testify/require"
 )
 

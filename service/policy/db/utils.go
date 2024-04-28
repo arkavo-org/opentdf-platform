@@ -3,7 +3,7 @@ package db
 import (
 	"log/slog"
 
-	"github.com/opentdf/platform/protocol/go/common"
+	"github.com/arkavo-org/opentdf-platform/protocol/go/common"
 	"google.golang.org/protobuf/encoding/protojson"
 )
 

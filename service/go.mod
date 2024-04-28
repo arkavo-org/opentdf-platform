@@ -1,6 +1,11 @@
-module github.com/opentdf/platform/service
+module github.com/arkavo-org/opentdf-platform/service
 
 go 1.22
+
+replace (
+	github.com/arkavo-org/opentdf-platform/protocol/go => ../protocol/go
+	github.com/arkavo-org/opentdf-platform/sdk => ../sdk
+)
 
 require (
 	github.com/Masterminds/squirrel v1.5.4
@@ -20,10 +25,9 @@ require (
 	github.com/lestrrat-go/jwx/v2 v2.0.21
 	github.com/miekg/pkcs11 v1.1.1
 	github.com/open-policy-agent/opa v0.63.0
-	github.com/opentdf/platform/lib/fixtures v0.2.0
-	github.com/opentdf/platform/lib/ocrypto v0.1.0
-	github.com/opentdf/platform/protocol/go v0.2.0
-	github.com/opentdf/platform/sdk v0.2.0
+	github.com/arkavo-org/opentdf-platform/lib/ocrypto v0.0.0-00010101000000-000000000000
+	github.com/arkavo-org/opentdf-platform/protocol/go v0.0.0-00010101000000-000000000000
+	github.com/arkavo-org/opentdf-platform/sdk v0.0.0-00010101000000-000000000000
 	github.com/pressly/goose/v3 v3.19.1
 	github.com/spf13/cobra v1.8.0
 	github.com/spf13/viper v1.18.2

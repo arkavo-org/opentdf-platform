@@ -14,8 +14,8 @@ import (
 	"os"
 	"testing"
 
-	kaspb "github.com/opentdf/platform/protocol/go/kas"
-	"github.com/opentdf/platform/service/internal/security"
+	kaspb "github.com/arkavo-org/opentdf-platform/protocol/go/kas"
+	"github.com/arkavo-org/opentdf-platform/service/internal/security"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

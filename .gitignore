@@ -39,3 +39,14 @@ tmp-gen/
 *.zip
 sensitive.txt.tdf
 /act.env
+/service/kas-cert.pem
+/service/kas-ec-cert.pem
+/service/kas-ec-private.pem
+/service/kas-private.pem
+/ca.crt
+/pep.crt
+/pep.json
+/pep.key
+/server.crt
+/server.json
+/server.key

@@ -164,7 +164,7 @@ func (as AuthorizationService) GetDecisions(ctx context.Context, req *authorizat
 func (as AuthorizationService) GetEntitlements(ctx context.Context, req *authorization.GetEntitlementsRequest) (*authorization.GetEntitlementsResponse, error) {
 	slog.DebugContext(ctx, "getting entitlements")
 	// Scope is required for because of performance.  Remove and handle 360 no scope
-	// https://github.com/opentdf/platform/issues/365
+	// https://github.com/arkavo-org/opentdf-platform/issues/365
 	if req.GetScope() == nil {
 		slog.ErrorContext(ctx, "requires scope")
 		return nil, errors.New(db.ErrTextFqnMissingValue)

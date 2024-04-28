@@ -308,7 +308,7 @@ func (c PolicyDBClient) DeactivateNamespace(ctx context.Context, id string) (*po
 
 func deleteNamespaceSql(id string) (string, []interface{}, error) {
 	t := Tables.Namespaces
-	// TODO: handle delete cascade, dangerous deletion via special rpc [https://github.com/opentdf/platform/issues/115]
+	// TODO: handle delete cascade, dangerous deletion via special rpc [https://github.com/arkavo-org/opentdf-platform/issues/115]
 	return db.NewStatementBuilder().
 		Delete(t.Name()).
 		Where(sq.Eq{t.Field("id"): id}).

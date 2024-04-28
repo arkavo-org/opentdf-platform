@@ -6,7 +6,7 @@ import (
 	"errors"
 	"io"
 
-	"github.com/opentdf/platform/lib/ocrypto"
+	"github.com/arkavo-org/opentdf-platform/lib/ocrypto"
 )
 
 const (

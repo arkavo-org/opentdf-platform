@@ -4,8 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/opentdf/platform/protocol/go/common"
-	"github.com/opentdf/platform/protocol/go/policy"
+	"github.com/arkavo-org/opentdf-platform/protocol/go/common"
+	"github.com/arkavo-org/opentdf-platform/protocol/go/policy"
 	"google.golang.org/protobuf/encoding/protojson"
 )
 

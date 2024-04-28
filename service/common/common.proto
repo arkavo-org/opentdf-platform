@@ -36,6 +36,4 @@ enum ActiveStateEnum {
   ACTIVE_STATE_ENUM_ANY = 3;
 }
 
-// message ListOptions {
-// TODO: limit/offset [https://github.com/opentdf/platform/issues/55]
-// }
+

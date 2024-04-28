@@ -15,10 +15,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/arkavo-org/opentdf-platform/lib/ocrypto"
+	kaspb "github.com/arkavo-org/opentdf-platform/protocol/go/kas"
 	"github.com/docker/go-connections/nat"
 	"github.com/lestrrat-go/jwx/v2/jwt"
-	"github.com/opentdf/platform/lib/ocrypto"
-	kaspb "github.com/opentdf/platform/protocol/go/kas"
 	"github.com/testcontainers/testcontainers-go/wait"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/test/bufconn"

@@ -11,17 +11,17 @@ import (
 	"log/slog"
 	"testing"
 
+	"github.com/arkavo-org/opentdf-platform/service/internal/auth"
 	"github.com/lestrrat-go/jwx/v2/jwa"
 	"github.com/lestrrat-go/jwx/v2/jwk"
 	"github.com/lestrrat-go/jwx/v2/jws"
 	"github.com/lestrrat-go/jwx/v2/jwt"
-	"github.com/opentdf/platform/service/internal/auth"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	kaspb "github.com/arkavo-org/opentdf-platform/protocol/go/kas"
+	"github.com/arkavo-org/opentdf-platform/service/kas/tdf3"
 	"github.com/google/uuid"
-	kaspb "github.com/opentdf/platform/protocol/go/kas"
-	"github.com/opentdf/platform/service/kas/tdf3"
 	"google.golang.org/grpc/metadata"
 )
 
