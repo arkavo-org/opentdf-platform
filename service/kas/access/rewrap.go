@@ -184,7 +184,10 @@ func getEntityInfo(ctx context.Context) (*entityInfo, error) {
 	if len(header) < 1 {
 		return nil, status.Error(codes.Unauthenticated, "missing authorization header")
 	}
-
+	slog.DebugContext(ctx, "header", header[0])
+	tokenRaw = strings.TrimPrefix(header[0], "DPoP ")
+	tokenRaw = strings.TrimPrefix(header[0], "Bearer ")
+	slog.DebugContext(ctx, "tokenRaw", tokenRaw)
 	token, err := jwt.ParseInsecure([]byte(tokenRaw))
 	if err != nil {
 		slog.WarnContext(ctx, "unable to get token")
