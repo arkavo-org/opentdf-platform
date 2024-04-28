@@ -148,23 +148,29 @@ func (s StandardCrypto) RSAPublicKey(keyID string) (string, error) {
 	return pem, nil
 }
 
-func (s StandardCrypto) ECPublicKey(string) (string, error) {
+func (s StandardCrypto) ECCertificate(string) (string, error) {
 	if len(s.ecKeys) == 0 {
 		return "", ErrCertNotFound
 	}
 	// this endpoint returns certificate
 	ecKey := s.ecKeys[0]
 	return ecKey.ecCertificatePEM, nil
-	//publicKeyBytes, err := x509.MarshalPKIXPublicKey(ecKey.ecPublicKey)
-	//if err != nil {
-	//	return "", ErrPublicKeyMarshal
-	//}
-	//pemEncoded := pem.EncodeToMemory(&pem.Block{
-	//	Type:  "PUBLIC KEY",
-	//	Bytes: publicKeyBytes,
-	//})
-	//return string(pemEncoded), nil
+}
 
+func (s StandardCrypto) ECPublicKey(string) (string, error) {
+	if len(s.ecKeys) == 0 {
+		return "", ErrCertNotFound
+	}
+	ecKey := s.ecKeys[0]
+	publicKeyBytes, err := x509.MarshalPKIXPublicKey(ecKey.ecPublicKey)
+	if err != nil {
+		return "", ErrPublicKeyMarshal
+	}
+	pemEncoded := pem.EncodeToMemory(&pem.Block{
+		Type:  "PUBLIC KEY",
+		Bytes: publicKeyBytes,
+	})
+	return string(pemEncoded), nil
 }
 
 func (s StandardCrypto) RSADecrypt(_ crypto.Hash, keyID string, _ string, ciphertext []byte) ([]byte, error) {
@@ -205,6 +211,7 @@ func (s StandardCrypto) RSAPublicKeyAsJSON(keyID string) (string, error) {
 }
 
 func (s StandardCrypto) GenerateNanoTDFSymmetricKey([]byte) ([]byte, error) {
+
 	return nil, errNotImplemented
 }
 

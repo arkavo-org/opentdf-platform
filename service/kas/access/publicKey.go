@@ -23,29 +23,25 @@ const (
 
 func (p *Provider) LegacyPublicKey(ctx context.Context, in *kaspb.LegacyPublicKeyRequest) (*wrapperspb.StringValue, error) {
 	algorithm := in.GetAlgorithm()
-	var pem string
+	var cert string
 	var err error
 	if p.CryptoProvider == nil {
 		return nil, errors.Join(ErrConfig, status.Error(codes.Internal, "configuration error"))
 	}
 	if algorithm == algorithmEc256 {
-		pem, err = p.CryptoProvider.ECPublicKey("unknown")
+		cert, err = p.CryptoProvider.ECCertificate("unknown")
 		if err != nil {
 			slog.ErrorContext(ctx, "CryptoProvider.ECPublicKey failed", "err", err)
 			return nil, errors.Join(ErrConfig, status.Error(codes.Internal, "configuration error"))
 		}
 	} else {
-		pem, err = p.CryptoProvider.RSAPublicKey("unknown")
+		cert, err = p.CryptoProvider.RSAPublicKey("unknown")
 		if err != nil {
 			slog.ErrorContext(ctx, "CryptoProvider.RSAPublicKey failed", "err", err)
 			return nil, errors.Join(ErrConfig, status.Error(codes.Internal, "configuration error"))
 		}
 	}
-	if err != nil {
-		slog.ErrorContext(ctx, "unable to generate PEM", "err", err)
-		return nil, errors.Join(ErrConfig, status.Error(codes.Internal, "configuration error"))
-	}
-	return &wrapperspb.StringValue{Value: pem}, nil
+	return &wrapperspb.StringValue{Value: cert}, nil
 }
 
 func (p *Provider) PublicKey(ctx context.Context, in *kaspb.PublicKeyRequest) (*kaspb.PublicKeyResponse, error) {

@@ -702,6 +702,17 @@ func (h *HSMSession) RSAPublicKeyAsJSON(keyID string) (string, error) {
 	return string(jsonPublicKey), nil
 }
 
+func (h *HSMSession) ECCertificate(string) (string, error) {
+	if h.EC == nil || h.EC.Certificate == nil {
+		return "", ErrCertNotFound
+	}
+	certPEM := pem.EncodeToMemory(&pem.Block{
+		Type:  "CERTIFICATE",
+		Bytes: h.EC.Certificate.Raw,
+	})
+	return string(certPEM), nil
+}
+
 func (h *HSMSession) ECPublicKey(string) (string, error) {
 	if h.EC == nil || h.EC.PublicKey == nil {
 		return "", ErrCertNotFound
