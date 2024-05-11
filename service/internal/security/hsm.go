@@ -609,10 +609,10 @@ func (h *HSMSession) GenerateNanoTDFSessionKey(
 
 	sessionKey := attr[0].Value
 	salt := versionSalt()
-	hkdf := hkdf.New(sha256.New, sessionKey, salt, nil)
+	hkdfParams := hkdf.New(sha256.New, sessionKey, salt, nil)
 
 	derivedKey := make([]byte, keyLength)
-	_, err = io.ReadFull(hkdf, derivedKey)
+	_, err = io.ReadFull(hkdfParams, derivedKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to derive session key: %w", err)
 	}

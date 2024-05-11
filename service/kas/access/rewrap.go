@@ -235,10 +235,6 @@ func (p *Provider) Rewrap(ctx context.Context, in *kaspb.RewrapRequest) (*kaspb.
 		return nil, err
 	}
 
-	if !strings.HasPrefix(body.KeyAccess.URL, p.URI.String()) {
-		slog.InfoContext(ctx, "mismatched key access url", "keyAccessURL", body.KeyAccess.URL, "kasURL", p.URI.String())
-	}
-
 	if body.Algorithm == "" {
 		body.Algorithm = "rsa:2048"
 	}
@@ -312,16 +308,19 @@ func (p *Provider) nanoTDFRewrap(body *RequestBody) (*kaspb.RewrapResponse, erro
 
 	header, err := sdk.ReadNanoTDFHeader(headerReader)
 	if err != nil {
+		slog.Error("ReadNanoTDFHeader", "err", err)
 		return nil, fmt.Errorf("failed to parse NanoTDF header: %w", err)
 	}
 
 	symmetricKey, err := p.CryptoProvider.GenerateNanoTDFSymmetricKey(header.EphemeralPublicKey.Key)
 	if err != nil {
+		slog.Error("GenerateNanoTDFSymmetricKey", "err", err)
 		return nil, fmt.Errorf("failed to generate symmetric key: %w", err)
 	}
 
 	pub, ok := body.PublicKey.(*ecdsa.PublicKey)
 	if !ok {
+		slog.Error("ecdsa.PublicKey", "err", err)
 		return nil, fmt.Errorf("failed to extract public key: %w", err)
 	}
 
@@ -329,20 +328,24 @@ func (p *Provider) nanoTDFRewrap(body *RequestBody) (*kaspb.RewrapResponse, erro
 	pubKeyBytes := make([]byte, 1+len(pub.X.Bytes())+len(pub.Y.Bytes()))
 	pubKeyBytes[0] = 0x4 // ID for uncompressed format
 	if copy(pubKeyBytes[1:33], pub.X.Bytes()) != 32 || copy(pubKeyBytes[33:], pub.Y.Bytes()) != 32 {
+		slog.Error("GenerateEphemeralKasKeys", "err", fmt.Errorf("failed to serialize keypair: %v", pub))
 		return nil, fmt.Errorf("failed to serialize keypair: %v", pub)
 	}
 
 	privateKeyHandle, publicKeyHandle, err := p.CryptoProvider.GenerateEphemeralKasKeys()
 	if err != nil {
+		slog.Error("GenerateEphemeralKasKeys", "err", err)
 		return nil, fmt.Errorf("failed to generate keypair: %w", err)
 	}
 	sessionKey, err := p.CryptoProvider.GenerateNanoTDFSessionKey(privateKeyHandle, pubKeyBytes)
 	if err != nil {
+		slog.Error("GenerateNanoTDFSessionKey", "err", err)
 		return nil, fmt.Errorf("failed to generate session key: %w", err)
 	}
 
 	cipherText, err := wrapKeyAES(sessionKey, symmetricKey)
 	if err != nil {
+		slog.Error("wrapKeyAES", "err", err)
 		return nil, fmt.Errorf("failed to encrypt key: %w", err)
 	}
 
@@ -350,11 +353,13 @@ func (p *Provider) nanoTDFRewrap(body *RequestBody) (*kaspb.RewrapResponse, erro
 	//https://github.com/wqx0532/hyperledger-fabric-gm-1/blob/master/bccsp/pkcs11/pkcs11.go#L480
 	pubGoKey, err := ecdh.P256().NewPublicKey(publicKeyHandle[2:])
 	if err != nil {
+		slog.Error("NewPublicKey", "err", err)
 		return nil, fmt.Errorf("failed to make public key") // Handle error, e.g., invalid public key format
 	}
 
 	pbk, err := x509.MarshalPKIXPublicKey(pubGoKey)
 	if err != nil {
+		slog.Error("MarshalPKIXPublicKey", "err", err)
 		return nil, fmt.Errorf("failed to convert public Key to PKIX")
 	}
 
