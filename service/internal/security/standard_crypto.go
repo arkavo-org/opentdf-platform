@@ -148,13 +148,18 @@ func (s StandardCrypto) RSAPublicKey(keyID string) (string, error) {
 	return pem, nil
 }
 
-func (s StandardCrypto) ECCertificate(string) (string, error) {
+func (s StandardCrypto) ECCertificate(identifier string) (string, error) {
 	if len(s.ecKeys) == 0 {
 		return "", ErrCertNotFound
 	}
 	// this endpoint returns certificate
-	ecKey := s.ecKeys[0]
-	return ecKey.ecCertificatePEM, nil
+	for _, ecKey := range s.ecKeys {
+		slog.Debug("ecKey", "id", ecKey.Identifier)
+		if ecKey.Identifier == identifier {
+			return ecKey.ecCertificatePEM, nil
+		}
+	}
+	return "", fmt.Errorf("no EC Key found with the given identifier: %s", identifier)
 }
 
 func (s StandardCrypto) ECPublicKey(string) (string, error) {
