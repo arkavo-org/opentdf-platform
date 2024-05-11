@@ -184,13 +184,13 @@ func getEntityInfo(ctx context.Context) (*entityInfo, error) {
 	if len(header) < 1 {
 		return nil, status.Error(codes.Unauthenticated, "missing authorization header")
 	}
-	slog.DebugContext(ctx, "header", header[0])
+	slog.DebugContext(ctx, "getEntityInfo", "header", header[0])
 	tokenRaw = strings.TrimPrefix(header[0], "DPoP ")
 	tokenRaw = strings.TrimPrefix(header[0], "Bearer ")
-	slog.DebugContext(ctx, "tokenRaw", tokenRaw)
+	slog.DebugContext(ctx, "getEntityInfo", "tokenRaw", tokenRaw)
 	token, err := jwt.ParseInsecure([]byte(tokenRaw))
 	if err != nil {
-		slog.WarnContext(ctx, "unable to get token")
+		slog.ErrorContext(ctx, "unable to get token")
 		return nil, errors.New("unable to get token")
 	}
 
@@ -217,21 +217,22 @@ func getEntityInfo(ctx context.Context) (*entityInfo, error) {
 	}
 
 	info.Token = tokenRaw
-
+	slog.DebugContext(ctx, "getEntityInfo", "info", info)
 	return info, nil
 }
 
 func (p *Provider) Rewrap(ctx context.Context, in *kaspb.RewrapRequest) (*kaspb.RewrapResponse, error) {
 	slog.DebugContext(ctx, "REWRAP")
-	slog.Info("kas context", slog.Any("ctx", ctx))
 
 	body, err := verifySignedRequestToken(ctx, in)
 	if err != nil {
+		slog.ErrorContext(ctx, "Rewrap", "err", err)
 		return nil, err
 	}
 
 	entityInfo, err := getEntityInfo(ctx)
 	if err != nil {
+		slog.ErrorContext(ctx, "Rewrap", "err", err)
 		return nil, err
 	}
 
