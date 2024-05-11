@@ -8,11 +8,12 @@ import (
 	"encoding/pem"
 	"errors"
 	"log/slog"
+	"sync"
 
 	kaspb "github.com/arkavo-org/opentdf-platform/protocol/go/kas"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
-	wrapperspb "google.golang.org/protobuf/types/known/wrapperspb"
+	"google.golang.org/protobuf/types/known/wrapperspb"
 )
 
 const (
@@ -21,9 +22,10 @@ const (
 	algorithmEc256       = "ec:secp256r1"
 )
 
+var ecCertCache sync.Map
+
 func (p *Provider) LegacyPublicKey(ctx context.Context, in *kaspb.LegacyPublicKeyRequest) (*wrapperspb.StringValue, error) {
 	algorithm := in.GetAlgorithm()
-	var cert string
 	var err error
 	if p.CryptoProvider == nil {
 		return nil, errors.Join(ErrConfig, status.Error(codes.Internal, "configuration error"))
@@ -34,17 +36,25 @@ func (p *Provider) LegacyPublicKey(ctx context.Context, in *kaspb.LegacyPublicKe
 		if !ok {
 			return nil, errors.New("services.kas.eccertid is not a string")
 		}
-		cert, err = p.CryptoProvider.ECCertificate(ecCertID)
+		if cert, exists := ecCertCache.Load(ecCertID); exists {
+			return cert.(*wrapperspb.StringValue), nil
+		}
+		cert, err := p.CryptoProvider.ECCertificate(ecCertID)
 		if err != nil {
 			slog.ErrorContext(ctx, "CryptoProvider.ECPublicKey failed", "err", err)
 			return nil, errors.Join(ErrConfig, status.Error(codes.Internal, "configuration error"))
 		}
-	} else {
-		cert, err = p.CryptoProvider.RSAPublicKey("unknown")
-		if err != nil {
-			slog.ErrorContext(ctx, "CryptoProvider.RSAPublicKey failed", "err", err)
-			return nil, errors.Join(ErrConfig, status.Error(codes.Internal, "configuration error"))
-		}
+		// workaround for Error code 75497574.  [ec_key_pair.cpp:650] Failed to create X509 cert struct.error:04800066:PEM routines::bad end line
+		cert += "\n"
+		ecCertStringValue := &wrapperspb.StringValue{Value: cert}
+		// Store the certificate in the cache
+		ecCertCache.Store(ecCertID, ecCertStringValue)
+		return ecCertStringValue, nil
+	}
+	cert, err := p.CryptoProvider.RSAPublicKey("unknown")
+	if err != nil {
+		slog.ErrorContext(ctx, "CryptoProvider.RSAPublicKey failed", "err", err)
+		return nil, errors.Join(ErrConfig, status.Error(codes.Internal, "configuration error"))
 	}
 	// workaround for Error code 75497574.  [ec_key_pair.cpp:650] Failed to create X509 cert struct.error:04800066:PEM routines::bad end line
 	cert += "\n"
