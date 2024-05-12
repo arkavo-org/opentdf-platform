@@ -18,7 +18,6 @@ import (
 	"strings"
 
 	"github.com/lestrrat-go/jwx/v2/jwk"
-
 	"github.com/miekg/pkcs11"
 	"golang.org/x/crypto/hkdf"
 )
@@ -505,13 +504,16 @@ func (h *HSMSession) LoadECKey(info KeyInfo) (*ECKeyPair, error) {
 		slog.Error("pkcs11 SignInit", "err", err)
 		return nil, err
 	}
-	hash := sha256.Sum256([]byte("sanity now"))
-	sig, err := h.ctx.Sign(h.sh, hash[:])
+	digest, err := h.ctx.Digest(h.sh, []byte("sanity now"))
+	if err != nil {
+		return nil, err
+	}
+	sig, err := h.ctx.Sign(h.sh, digest)
 	if err != nil {
 		slog.Error("pkcs11 Sign", "err", err)
 		return nil, err
 	}
-	valid := ecdsa.VerifyASN1(ecPublicKey, hash[:], sig)
+	valid := ecdsa.VerifyASN1(ecPublicKey, digest, sig)
 	if !valid {
 		pubKeyDER, err := x509.MarshalPKIXPublicKey(ecPublicKey)
 		if err != nil {
@@ -523,7 +525,7 @@ func (h *HSMSession) LoadECKey(info KeyInfo) (*ECKeyPair, error) {
 		}
 		pemData := pem.EncodeToMemory(&pubKeyPEM)
 		slog.Error("pkcs11 VerifyASN1 failed",
-			"hash", hex.EncodeToString(hash[:]),
+			"hash", hex.EncodeToString(digest),
 			"sig", hex.EncodeToString(sig),
 			"ecPublicKey", pemData)
 		return nil, err
