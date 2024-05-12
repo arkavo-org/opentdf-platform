@@ -313,6 +313,7 @@ func (h *HSMSession) loadKeys(keys map[string]KeyInfo) error {
 			pair, err := h.LoadRSAKey(info)
 			if err != nil {
 				slog.Error("pkcs11 error unable to load RSA key", "err", err)
+				return err
 			} else {
 				h.RSA = pair
 			}
@@ -320,6 +321,7 @@ func (h *HSMSession) loadKeys(keys map[string]KeyInfo) error {
 			pair, err := h.LoadECKey(info)
 			if err != nil {
 				slog.Error("pkcs11 error unable to load EC key", "err", err)
+				return err
 			} else {
 				h.EC = pair
 			}
@@ -498,14 +500,19 @@ func (h *HSMSession) LoadECKey(info KeyInfo) (*ECKeyPair, error) {
 	pair.PublicKey = ecPublicKey
 
 	// Do a sanity check of the key pair
-	mechanism := []*pkcs11.Mechanism{pkcs11.NewMechanism(pkcs11.CKM_ECDSA, nil)}
-	err = h.ctx.SignInit(h.sh, mechanism, keyHandleEC)
+	err = h.ctx.DigestInit(h.sh, []*pkcs11.Mechanism{pkcs11.NewMechanism(pkcs11.CKM_SHA256, nil)})
 	if err != nil {
 		slog.Error("pkcs11 SignInit", "err", err)
 		return nil, err
 	}
 	digest, err := h.ctx.Digest(h.sh, []byte("sanity now"))
 	if err != nil {
+		slog.Error("pkcs11 Digest", "err", err)
+		return nil, err
+	}
+	err = h.ctx.SignInit(h.sh, []*pkcs11.Mechanism{pkcs11.NewMechanism(pkcs11.CKM_ECDSA, nil)}, keyHandleEC)
+	if err != nil {
+		slog.Error("pkcs11 SignInit", "err", err)
 		return nil, err
 	}
 	sig, err := h.ctx.Sign(h.sh, digest)
@@ -528,7 +535,7 @@ func (h *HSMSession) LoadECKey(info KeyInfo) (*ECKeyPair, error) {
 			"hash", hex.EncodeToString(digest),
 			"sig", hex.EncodeToString(sig),
 			"ecPublicKey", pemData)
-		return nil, err
+		return nil, fmt.Errorf("pkcs11 VerifyASN1 signature failed")
 	}
 	return &pair, nil
 }
