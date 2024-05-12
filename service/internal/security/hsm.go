@@ -6,6 +6,7 @@ import (
 	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/x509"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
@@ -512,7 +513,10 @@ func (h *HSMSession) LoadECKey(info KeyInfo) (*ECKeyPair, error) {
 	}
 	valid := ecdsa.VerifyASN1(ecPublicKey, hash[:], sig)
 	if !valid {
-		slog.Error("pkcs11 VerifyASN1", "err", err)
+		slog.Error("pkcs11 VerifyASN1 failed",
+			"hash", hex.EncodeToString(hash[:]),
+			"sig", sig,
+			"ecPublicKey", ecPublicKey)
 		return nil, err
 	}
 	return &pair, nil
