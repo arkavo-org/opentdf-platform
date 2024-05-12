@@ -513,10 +513,19 @@ func (h *HSMSession) LoadECKey(info KeyInfo) (*ECKeyPair, error) {
 	}
 	valid := ecdsa.VerifyASN1(ecPublicKey, hash[:], sig)
 	if !valid {
+		pubKeyDER, err := x509.MarshalPKIXPublicKey(ecPublicKey)
+		if err != nil {
+			slog.Error("Error marshalling public key:", "err", err)
+		}
+		pubKeyPEM := pem.Block{
+			Type:  "PUBLIC KEY",
+			Bytes: pubKeyDER,
+		}
+		pemData := pem.EncodeToMemory(&pubKeyPEM)
 		slog.Error("pkcs11 VerifyASN1 failed",
 			"hash", hex.EncodeToString(hash[:]),
-			"sig", sig,
-			"ecPublicKey", ecPublicKey)
+			"sig", hex.EncodeToString(sig),
+			"ecPublicKey", pemData)
 		return nil, err
 	}
 	return &pair, nil
