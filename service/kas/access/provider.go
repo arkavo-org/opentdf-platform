@@ -6,6 +6,7 @@ import (
 	kaspb "github.com/arkavo-org/opentdf-platform/protocol/go/kas"
 	otdf "github.com/arkavo-org/opentdf-platform/sdk"
 	"github.com/arkavo-org/opentdf-platform/service/internal/security"
+	"github.com/arkavo-org/opentdf-platform/service/pkg/serviceregistry"
 	"github.com/coreos/go-oidc/v3/oidc"
 )
 
@@ -21,4 +22,5 @@ type Provider struct {
 	AttributeSvc   *url.URL
 	CryptoProvider security.CryptoProvider
 	OIDCVerifier   *oidc.IDTokenVerifier
+	Config         *serviceregistry.ServiceConfig
 }

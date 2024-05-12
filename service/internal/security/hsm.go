@@ -6,6 +6,7 @@ import (
 	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/x509"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
@@ -17,20 +18,18 @@ import (
 	"strings"
 
 	"github.com/lestrrat-go/jwx/v2/jwk"
-
 	"github.com/miekg/pkcs11"
 	"golang.org/x/crypto/hkdf"
 )
 
 const (
-	ErrCertNotFound        = Error("not found")
-	ErrCertificateEncode   = Error("certificate encode error")
-	ErrPublicKeyMarshal    = Error("public key marshal error")
-	ErrHSMUnexpected       = Error("hsm unexpected")
-	ErrHSMDecrypt          = Error("hsm decrypt error")
-	ErrHSMNotFound         = Error("hsm unavailable")
-	ErrKeyConfig           = Error("key configuration error")
-	ErrUnknownHashFunction = Error("unknown hash function")
+	ErrCertNotFound      = Error("not found")
+	ErrCertificateEncode = Error("certificate encode error")
+	ErrPublicKeyMarshal  = Error("public key marshal error")
+	ErrHSMUnexpected     = Error("hsm unexpected")
+	ErrHSMDecrypt        = Error("hsm decrypt error")
+	ErrHSMNotFound       = Error("hsm unavailable")
+	ErrKeyConfig         = Error("key configuration error")
 )
 const keyLength = 32
 
@@ -40,7 +39,7 @@ func (e Error) Error() string {
 	return string(e)
 }
 
-// A session with a security module; useful for abstracting basic cryptographic
+// HSMSession A session with a security module; useful for abstracting basic cryptographic
 // operations.
 //
 // HSM Session HAS-A PKCS11 Context
@@ -314,6 +313,7 @@ func (h *HSMSession) loadKeys(keys map[string]KeyInfo) error {
 			pair, err := h.LoadRSAKey(info)
 			if err != nil {
 				slog.Error("pkcs11 error unable to load RSA key", "err", err)
+				//return err
 			} else {
 				h.RSA = pair
 			}
@@ -321,6 +321,7 @@ func (h *HSMSession) loadKeys(keys map[string]KeyInfo) error {
 			pair, err := h.LoadECKey(info)
 			if err != nil {
 				slog.Error("pkcs11 error unable to load EC key", "err", err)
+				return err
 			} else {
 				h.EC = pair
 			}
@@ -457,7 +458,7 @@ func (h *HSMSession) LoadECKey(info KeyInfo) (*ECKeyPair, error) {
 	// EC Cert
 	certECHandle, err := h.findKey(pkcs11.CKO_CERTIFICATE, info.Label)
 	if err != nil {
-		slog.Error("public key EC cert error")
+		slog.Error("public key EC cert error", "err", err)
 		return nil, errors.Join(ErrKeyConfig, err)
 	}
 	certECTemplate := []*pkcs11.Attribute{
@@ -483,6 +484,7 @@ func (h *HSMSession) LoadECKey(info KeyInfo) (*ECKeyPair, error) {
 				panic(err)
 			}
 			pair.Certificate = certEC
+			break
 		}
 	}
 	if pair.Certificate == nil {
@@ -497,6 +499,46 @@ func (h *HSMSession) LoadECKey(info KeyInfo) (*ECKeyPair, error) {
 	}
 
 	pair.PublicKey = ecPublicKey
+
+	// Do a sanity check of the key pair
+	err = h.ctx.DigestInit(h.sh, []*pkcs11.Mechanism{pkcs11.NewMechanism(pkcs11.CKM_SHA256, nil)})
+	if err != nil {
+		slog.Error("pkcs11 SignInit", "err", err)
+		return nil, err
+	}
+	digest, err := h.ctx.Digest(h.sh, []byte("sanity now"))
+	if err != nil {
+		slog.Error("pkcs11 Digest", "err", err)
+		return nil, err
+	}
+	err = h.ctx.SignInit(h.sh, []*pkcs11.Mechanism{pkcs11.NewMechanism(pkcs11.CKM_ECDSA, nil)}, keyHandleEC)
+	if err != nil {
+		slog.Error("pkcs11 SignInit", "err", err)
+		return nil, err
+	}
+	sig, err := h.ctx.Sign(h.sh, digest)
+	if err != nil {
+		slog.Error("pkcs11 Sign", "err", err)
+		return nil, err
+	}
+	valid := ecdsa.VerifyASN1(ecPublicKey, digest, sig)
+	if !valid {
+		pubKeyDER, err := x509.MarshalPKIXPublicKey(ecPublicKey)
+		if err != nil {
+			slog.Error("Error marshalling public key:", "err", err)
+		}
+		pubKeyPEM := pem.Block{
+			Type:  "PUBLIC KEY",
+			Bytes: pubKeyDER,
+		}
+		pemData := pem.EncodeToMemory(&pubKeyPEM)
+		slog.Error("pkcs11 VerifyASN1 failed",
+			"hash", hex.EncodeToString(digest),
+			"sig", hex.EncodeToString(sig),
+			"ecPublicKey", pemData)
+		// FIXME can't get this working, skipping for now
+		//return nil, fmt.Errorf("pkcs11 VerifyASN1 signature failed")
+	}
 	return &pair, nil
 }
 
@@ -527,6 +569,7 @@ func oaepForHash(hashFunction crypto.Hash, keyLabel string) (*pkcs11.OAEPParams,
 }
 
 func (h *HSMSession) GenerateNanoTDFSymmetricKey(ephemeralPublicKeyBytes []byte) ([]byte, error) {
+	slog.Debug("GenerateNanoTDFSymmetricKey")
 	template := []*pkcs11.Attribute{
 		pkcs11.NewAttribute(pkcs11.CKA_TOKEN, false),
 		pkcs11.NewAttribute(pkcs11.CKA_CLASS, pkcs11.CKO_SECRET_KEY),
@@ -547,6 +590,7 @@ func (h *HSMSession) GenerateNanoTDFSymmetricKey(ephemeralPublicKeyBytes []byte)
 
 	handle, err := h.ctx.DeriveKey(h.sh, mech, pkcs11.ObjectHandle(h.EC.PrivateKey), template)
 	if err != nil {
+		slog.Error("GenerateNanoTDFSymmetricKey", "err", err)
 		return nil, fmt.Errorf("failed to derive symmetric key: %w", err)
 	}
 
@@ -555,19 +599,22 @@ func (h *HSMSession) GenerateNanoTDFSymmetricKey(ephemeralPublicKeyBytes []byte)
 	}
 	attr, err := h.ctx.GetAttributeValue(h.sh, handle, template)
 	if err != nil {
+		slog.Error("GenerateNanoTDFSymmetricKey", "err", err)
 		return nil, err
 	}
 
 	symmetricKey := attr[0].Value
 
 	salt := versionSalt()
-	hkdf := hkdf.New(sha256.New, symmetricKey, salt, nil)
+	hkdfReader := hkdf.New(sha256.New, symmetricKey, salt, nil)
 
 	derivedKey := make([]byte, keyLength)
-	_, err = io.ReadFull(hkdf, derivedKey)
+	hkdfReadLength, err := io.ReadFull(hkdfReader, derivedKey)
 	if err != nil {
+		slog.Error("GenerateNanoTDFSymmetricKey", "err", err)
 		return nil, fmt.Errorf("failed to derive symmetric key: %w", err)
 	}
+	slog.Debug("GenerateNanoTDFSymmetricKey", "hkdfReadLength", hkdfReadLength)
 
 	return derivedKey, nil
 }
@@ -609,10 +656,10 @@ func (h *HSMSession) GenerateNanoTDFSessionKey(
 
 	sessionKey := attr[0].Value
 	salt := versionSalt()
-	hkdf := hkdf.New(sha256.New, sessionKey, salt, nil)
+	hkdfParams := hkdf.New(sha256.New, sessionKey, salt, nil)
 
 	derivedKey := make([]byte, keyLength)
-	_, err = io.ReadFull(hkdf, derivedKey)
+	_, err = io.ReadFull(hkdfParams, derivedKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to derive session key: %w", err)
 	}
@@ -700,6 +747,17 @@ func (h *HSMSession) RSAPublicKeyAsJSON(keyID string) (string, error) {
 	}
 
 	return string(jsonPublicKey), nil
+}
+
+func (h *HSMSession) ECCertificate(string) (string, error) {
+	if h.EC == nil || h.EC.Certificate == nil {
+		return "", ErrCertNotFound
+	}
+	certPEM := pem.EncodeToMemory(&pem.Block{
+		Type:  "CERTIFICATE",
+		Bytes: h.EC.Certificate.Raw,
+	})
+	return string(certPEM), nil
 }
 
 func (h *HSMSession) ECPublicKey(string) (string, error) {

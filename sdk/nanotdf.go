@@ -13,7 +13,7 @@ const (
 	ErrNanoTdfRead = Error("nanotdf read error")
 )
 
-type nanoTdf struct {
+type NanoTdf struct {
 	magicNumber        [3]byte
 	kasUrl             *resourceLocator
 	binding            *bindingCfg
@@ -166,8 +166,8 @@ func readEphemeralPublicKey(reader io.Reader, curve ocrypto.ECCMode) (*eccKey, e
 	return &eccKey{Key: buffer}, nil
 }
 
-func ReadNanoTDFHeader(reader io.Reader) (*nanoTdf, error) {
-	var nanoTDF nanoTdf
+func ReadNanoTDFHeader(reader io.Reader) (*NanoTdf, error) {
+	var nanoTDF NanoTdf
 
 	if err := binary.Read(reader, binary.BigEndian, &nanoTDF.magicNumber); err != nil {
 		return nil, errors.Join(ErrNanoTdfRead, err)

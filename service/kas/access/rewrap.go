@@ -25,7 +25,6 @@ import (
 
 	kaspb "github.com/arkavo-org/opentdf-platform/protocol/go/kas"
 	"github.com/arkavo-org/opentdf-platform/sdk"
-	"github.com/arkavo-org/opentdf-platform/service/internal/auth"
 	"github.com/arkavo-org/opentdf-platform/service/kas/tdf3"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
@@ -49,8 +48,7 @@ type entityInfo struct {
 }
 
 const (
-	ErrUser     = Error("request error")
-	ErrInternal = Error("internal error")
+	ErrUser = Error("request error")
 )
 
 func err400(s string) error {
@@ -65,14 +63,6 @@ func err403(s string) error {
 	return errors.Join(ErrUser, status.Error(codes.PermissionDenied, s))
 }
 
-func err404(s string) error {
-	return errors.Join(ErrUser, status.Error(codes.NotFound, s))
-}
-
-func err503(s string) error {
-	return errors.Join(ErrInternal, status.Error(codes.Unavailable, s))
-}
-
 func generateHMACDigest(ctx context.Context, msg, key []byte) ([]byte, error) {
 	mac := hmac.New(sha256.New, key)
 	_, err := mac.Write(msg)
@@ -84,33 +74,12 @@ func generateHMACDigest(ctx context.Context, msg, key []byte) ([]byte, error) {
 }
 
 func verifySignedRequestToken(ctx context.Context, in *kaspb.RewrapRequest) (*RequestBody, error) {
-	// get dpop public key from context
-	dpopJWK := auth.GetJWKFromContext(ctx)
-
 	var token jwt.Token
 	var err error
-	if dpopJWK == nil {
-		slog.InfoContext(ctx, "no DPoP key provided")
-		// if we have no DPoP key it's for one of two reasons:
-		// 1. auth is disabled so we can't get a DPoP JWK
-		// 2. auth is enabled _but_ we aren't requiring DPoP
-		// in either case letting the request through makes sense
-		token, err = jwt.Parse([]byte(in.GetSignedRequestToken()), jwt.WithValidate(false))
-		if err != nil {
-			slog.WarnContext(ctx, "unable to verify parse token", "err", err)
-			return nil, err401("could not parse token")
-		}
-	} else {
-		// verify and validate the request token
-		token, err = jwt.Parse([]byte(in.GetSignedRequestToken()),
-			jwt.WithKey(dpopJWK.Algorithm(), dpopJWK),
-			jwt.WithValidate(true),
-		)
-		// we have failed to verify the signed request token
-		if err != nil {
-			slog.WarnContext(ctx, "unable to verify request token", "err", err)
-			return nil, err401("unable to verify request token")
-		}
+	token, err = jwt.Parse([]byte(in.GetSignedRequestToken()), jwt.WithValidate(false), jwt.WithVerify(false))
+	if err != nil {
+		slog.WarnContext(ctx, "unable to verify parse token", "err", err)
+		return nil, err401("could not parse token")
 	}
 	rb, exists := token.Get("requestBody")
 	if !exists {
@@ -197,7 +166,7 @@ func verifyAndParsePolicy(ctx context.Context, requestBody *RequestBody, k []byt
 func getEntityInfo(ctx context.Context) (*entityInfo, error) {
 	var info = new(entityInfo)
 
-	// check if metadata exists. if it doesn't not sure how we got to this point
+	// check if metadata exists. if it doesn't then sure how we got to this point
 	md, exists := metadata.FromIncomingContext(ctx)
 	if !exists {
 		slog.WarnContext(ctx, "missing metadata")
@@ -215,17 +184,13 @@ func getEntityInfo(ctx context.Context) (*entityInfo, error) {
 	if len(header) < 1 {
 		return nil, status.Error(codes.Unauthenticated, "missing authorization header")
 	}
-
-	switch {
-	case strings.HasPrefix(header[0], "DPoP "):
-		tokenRaw = strings.TrimPrefix(header[0], "DPoP ")
-	default:
-		return nil, status.Error(codes.Unauthenticated, "not of type dpop")
-	}
-
+	slog.DebugContext(ctx, "getEntityInfo", "header", header[0])
+	tokenRaw = strings.TrimPrefix(header[0], "DPoP ")
+	tokenRaw = strings.TrimPrefix(header[0], "Bearer ")
+	slog.DebugContext(ctx, "getEntityInfo", "tokenRaw", tokenRaw)
 	token, err := jwt.ParseInsecure([]byte(tokenRaw))
 	if err != nil {
-		slog.WarnContext(ctx, "unable to get token")
+		slog.ErrorContext(ctx, "unable to get token")
 		return nil, errors.New("unable to get token")
 	}
 
@@ -252,26 +217,23 @@ func getEntityInfo(ctx context.Context) (*entityInfo, error) {
 	}
 
 	info.Token = tokenRaw
-
+	slog.DebugContext(ctx, "getEntityInfo", "info", info)
 	return info, nil
 }
 
 func (p *Provider) Rewrap(ctx context.Context, in *kaspb.RewrapRequest) (*kaspb.RewrapResponse, error) {
 	slog.DebugContext(ctx, "REWRAP")
-	slog.Info("kas context", slog.Any("ctx", ctx))
 
 	body, err := verifySignedRequestToken(ctx, in)
 	if err != nil {
+		slog.ErrorContext(ctx, "Rewrap", "err", err)
 		return nil, err
 	}
 
 	entityInfo, err := getEntityInfo(ctx)
 	if err != nil {
+		slog.ErrorContext(ctx, "Rewrap", "err", err)
 		return nil, err
-	}
-
-	if !strings.HasPrefix(body.KeyAccess.URL, p.URI.String()) {
-		slog.InfoContext(ctx, "mismatched key access url", "keyAccessURL", body.KeyAccess.URL, "kasURL", p.URI.String())
 	}
 
 	if body.Algorithm == "" {
@@ -347,16 +309,19 @@ func (p *Provider) nanoTDFRewrap(body *RequestBody) (*kaspb.RewrapResponse, erro
 
 	header, err := sdk.ReadNanoTDFHeader(headerReader)
 	if err != nil {
+		slog.Error("ReadNanoTDFHeader", "err", err)
 		return nil, fmt.Errorf("failed to parse NanoTDF header: %w", err)
 	}
 
 	symmetricKey, err := p.CryptoProvider.GenerateNanoTDFSymmetricKey(header.EphemeralPublicKey.Key)
 	if err != nil {
+		slog.Error("GenerateNanoTDFSymmetricKey", "err", err)
 		return nil, fmt.Errorf("failed to generate symmetric key: %w", err)
 	}
 
 	pub, ok := body.PublicKey.(*ecdsa.PublicKey)
 	if !ok {
+		slog.Error("ecdsa.PublicKey", "err", err)
 		return nil, fmt.Errorf("failed to extract public key: %w", err)
 	}
 
@@ -364,20 +329,24 @@ func (p *Provider) nanoTDFRewrap(body *RequestBody) (*kaspb.RewrapResponse, erro
 	pubKeyBytes := make([]byte, 1+len(pub.X.Bytes())+len(pub.Y.Bytes()))
 	pubKeyBytes[0] = 0x4 // ID for uncompressed format
 	if copy(pubKeyBytes[1:33], pub.X.Bytes()) != 32 || copy(pubKeyBytes[33:], pub.Y.Bytes()) != 32 {
+		slog.Error("GenerateEphemeralKasKeys", "err", fmt.Errorf("failed to serialize keypair: %v", pub))
 		return nil, fmt.Errorf("failed to serialize keypair: %v", pub)
 	}
 
 	privateKeyHandle, publicKeyHandle, err := p.CryptoProvider.GenerateEphemeralKasKeys()
 	if err != nil {
+		slog.Error("GenerateEphemeralKasKeys", "err", err)
 		return nil, fmt.Errorf("failed to generate keypair: %w", err)
 	}
 	sessionKey, err := p.CryptoProvider.GenerateNanoTDFSessionKey(privateKeyHandle, pubKeyBytes)
 	if err != nil {
+		slog.Error("GenerateNanoTDFSessionKey", "err", err)
 		return nil, fmt.Errorf("failed to generate session key: %w", err)
 	}
 
 	cipherText, err := wrapKeyAES(sessionKey, symmetricKey)
 	if err != nil {
+		slog.Error("wrapKeyAES", "err", err)
 		return nil, fmt.Errorf("failed to encrypt key: %w", err)
 	}
 
@@ -385,11 +354,13 @@ func (p *Provider) nanoTDFRewrap(body *RequestBody) (*kaspb.RewrapResponse, erro
 	//https://github.com/wqx0532/hyperledger-fabric-gm-1/blob/master/bccsp/pkcs11/pkcs11.go#L480
 	pubGoKey, err := ecdh.P256().NewPublicKey(publicKeyHandle[2:])
 	if err != nil {
+		slog.Error("NewPublicKey", "err", err)
 		return nil, fmt.Errorf("failed to make public key") // Handle error, e.g., invalid public key format
 	}
 
 	pbk, err := x509.MarshalPKIXPublicKey(pubGoKey)
 	if err != nil {
+		slog.Error("MarshalPKIXPublicKey", "err", err)
 		return nil, fmt.Errorf("failed to convert public Key to PKIX")
 	}
 

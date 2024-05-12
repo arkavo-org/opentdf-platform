@@ -9,8 +9,8 @@ import (
 	"github.com/arkavo-org/opentdf-platform/lib/ocrypto"
 )
 
-// nanotdfEqual compares two nanoTdf structures for equality.
-func nanoTDFEqual(a, b *nanoTdf) bool {
+// nanotdfEqual compares two NanoTdf structures for equality.
+func nanoTDFEqual(a, b *NanoTdf) bool {
 	// Compare magicNumber field
 	if a.magicNumber != b.magicNumber {
 		return false
@@ -95,7 +95,7 @@ func init() {
 
 func TestReadNanoTDFHeader(t *testing.T) {
 	// Prepare a sample nanoTdf structure
-	nanoTDF := nanoTdf{
+	nanoTDF := NanoTdf{
 		magicNumber: [3]byte{'L', '1', 'L'},
 		kasUrl: &resourceLocator{
 			protocol:   urlProtocolHttps,
