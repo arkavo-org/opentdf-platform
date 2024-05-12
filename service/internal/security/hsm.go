@@ -498,7 +498,7 @@ func (h *HSMSession) LoadECKey(info KeyInfo) (*ECKeyPair, error) {
 	pair.PublicKey = ecPublicKey
 
 	// Do a sanity check of the key pair
-	mechanism := []*pkcs11.Mechanism{pkcs11.NewMechanism(pkcs11.CKM_ECDSA_SHA256, nil)}
+	mechanism := []*pkcs11.Mechanism{pkcs11.NewMechanism(pkcs11.CKM_ECDSA, nil)}
 	err = h.ctx.SignInit(h.sh, mechanism, keyHandleEC)
 	if err != nil {
 		slog.Error("pkcs11 SignInit", "err", err)
