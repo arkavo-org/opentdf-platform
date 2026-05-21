@@ -103,15 +103,26 @@ type KasReferenceD struct {
 }
 
 type RegisteredResourceDef struct {
-	ID     string                       `yaml:"id" json:"id"`
-	Name   string                       `yaml:"name" json:"name"`
-	Values []RegisteredResourceValueDef `yaml:"values" json:"values"`
+	ID        string                       `yaml:"id" json:"id"`
+	Namespace string                       `yaml:"namespace" json:"namespace"`
+	Name      string                       `yaml:"name" json:"name"`
+	Values    []RegisteredResourceValueDef `yaml:"values" json:"values"`
 }
 
 type RegisteredResourceValueDef struct {
-	ID    string `yaml:"id" json:"id"`
-	Value string `yaml:"value" json:"value"`
-	FQN   string `yaml:"fqn" json:"fqn"`
+	ID                    string                   `yaml:"id" json:"id"`
+	Value                 string                   `yaml:"value" json:"value"`
+	FQN                   string                   `yaml:"fqn" json:"fqn"`
+	ActionAttributeValues []ActionAttributeValueDef `yaml:"action_attribute_values" json:"action_attribute_values"`
+}
+
+// ActionAttributeValueDef binds an action taken on a registered resource value
+// to the attribute value that gates that action — the edge consumed by the v2
+// PDP when computing entitlements for registered resources.
+type ActionAttributeValueDef struct {
+	ID                string `yaml:"id" json:"id"`
+	Action            string `yaml:"action" json:"action"`
+	AttributeValueFQN string `yaml:"attribute_value_fqn" json:"attribute_value_fqn"`
 }
 
 type ObligationDef struct {
@@ -122,7 +133,24 @@ type ObligationDef struct {
 }
 
 type ObligationValueDef struct {
-	ID    string `yaml:"id" json:"id"`
-	Value string `yaml:"value" json:"value"`
-	FQN   string `yaml:"fqn" json:"fqn"`
+	ID       string                 `yaml:"id" json:"id"`
+	Value    string                 `yaml:"value" json:"value"`
+	FQN      string                 `yaml:"fqn" json:"fqn"`
+	Triggers []ObligationTriggerDef `yaml:"triggers" json:"triggers"`
+}
+
+// ObligationTriggerDef fires an obligation value when the named action is
+// taken on the referenced attribute value. Optional context entries scope the
+// trigger to specific PEP client IDs.
+type ObligationTriggerDef struct {
+	ID                string               `yaml:"id" json:"id"`
+	AttributeValueFQN string               `yaml:"attribute_value_fqn" json:"attribute_value_fqn"`
+	Action            string               `yaml:"action" json:"action"`
+	Context           []TriggerContextDef  `yaml:"context" json:"context"`
+}
+
+// TriggerContextDef scopes an obligation trigger to a specific Policy
+// Enforcement Point identified by client_id.
+type TriggerContextDef struct {
+	PEPClientID string `yaml:"pep_client_id" json:"pep_client_id"`
 }

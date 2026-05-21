@@ -215,8 +215,12 @@ func (b *builder) build() (*Store, error) {
 		return nil, err
 	}
 	b.buildResourceMappings()
-	b.buildRegisteredResources()
-	b.buildObligations()
+	if err := b.buildRegisteredResources(); err != nil {
+		return nil, err
+	}
+	if err := b.buildObligations(); err != nil {
+		return nil, err
+	}
 
 	return &Store{
 		namespaces:          b.namespaces,
@@ -399,40 +403,141 @@ func (b *builder) buildResourceMappings() {
 	}
 }
 
-func (b *builder) buildRegisteredResources() {
+func (b *builder) buildRegisteredResources() error {
 	for i := range b.schema.RegisteredResources {
 		def := b.schema.RegisteredResources[i]
+		if def.Name == "" {
+			return fmt.Errorf("filestore: registered_resource at index %d missing name", i)
+		}
+		var ns *policy.Namespace
+		if def.Namespace != "" {
+			ns = b.namespacesByName[strings.ToLower(def.Namespace)]
+			if ns == nil {
+				return fmt.Errorf("filestore: registered_resource %q references unknown namespace %q", def.Name, def.Namespace)
+			}
+		}
 		rr := &policy.RegisteredResource{
-			Id:   nonEmpty(def.ID, def.Name),
-			Name: def.Name,
-		}
-		for _, v := range def.Values {
-			rr.Values = append(rr.Values, &policy.RegisteredResourceValue{
-				Id:    nonEmpty(v.ID, def.Name+"/"+v.Value),
-				Value: v.Value,
-			})
-		}
-		b.registered = append(b.registered, rr)
-	}
-}
-
-func (b *builder) buildObligations() {
-	for i := range b.schema.Obligations {
-		def := b.schema.Obligations[i]
-		ns := b.namespacesByName[strings.ToLower(def.Namespace)]
-		ob := &policy.Obligation{
 			Id:        nonEmpty(def.ID, def.Name),
 			Name:      def.Name,
 			Namespace: ns,
 		}
-		for _, v := range def.Values {
-			ob.Values = append(ob.Values, &policy.ObligationValue{
-				Id:    nonEmpty(v.ID, def.Name+"/"+v.Value),
+		for vIdx, v := range def.Values {
+			if v.Value == "" {
+				return fmt.Errorf("filestore: registered_resource %q value at index %d missing value", def.Name, vIdx)
+			}
+			fqn := v.FQN
+			if fqn == "" {
+				fqn = registeredResourceValueFQN(ns, def.Name, v.Value)
+			}
+			rrv := &policy.RegisteredResourceValue{
+				Id:    nonEmpty(v.ID, fqn),
 				Value: v.Value,
-			})
+				Fqn:   fqn,
+			}
+			for aIdx, aav := range v.ActionAttributeValues {
+				if aav.Action == "" {
+					return fmt.Errorf("filestore: registered_resource %q value %q action_attribute_value at index %d missing action", def.Name, v.Value, aIdx)
+				}
+				attrVal := b.valuesByFQN[strings.ToLower(aav.AttributeValueFQN)]
+				if attrVal == nil {
+					return fmt.Errorf("filestore: registered_resource %q value %q action_attribute_value at index %d references unknown attribute_value_fqn %q",
+						def.Name, v.Value, aIdx, aav.AttributeValueFQN)
+				}
+				rrv.ActionAttributeValues = append(rrv.ActionAttributeValues, &policy.RegisteredResourceValue_ActionAttributeValue{
+					Id:             nonEmpty(aav.ID, fmt.Sprintf("%s-aav-%d", rrv.GetId(), aIdx)),
+					Action:         &policy.Action{Name: aav.Action},
+					AttributeValue: attrVal,
+				})
+			}
+			rr.Values = append(rr.Values, rrv)
+		}
+		b.registered = append(b.registered, rr)
+	}
+	return nil
+}
+
+func (b *builder) buildObligations() error {
+	for i := range b.schema.Obligations {
+		def := b.schema.Obligations[i]
+		if def.Name == "" {
+			return fmt.Errorf("filestore: obligation at index %d missing name", i)
+		}
+		if def.Namespace == "" {
+			return fmt.Errorf("filestore: obligation %q missing namespace", def.Name)
+		}
+		ns := b.namespacesByName[strings.ToLower(def.Namespace)]
+		if ns == nil {
+			return fmt.Errorf("filestore: obligation %q references unknown namespace %q", def.Name, def.Namespace)
+		}
+		oblFQN := strings.ToLower(ns.GetFqn() + "/obl/" + def.Name)
+		ob := &policy.Obligation{
+			Id:        nonEmpty(def.ID, oblFQN),
+			Name:      def.Name,
+			Namespace: ns,
+		}
+		for vIdx, v := range def.Values {
+			if v.Value == "" {
+				return fmt.Errorf("filestore: obligation %q value at index %d missing value", def.Name, vIdx)
+			}
+			valFQN := v.FQN
+			if valFQN == "" {
+				valFQN = strings.ToLower(oblFQN + "/value/" + v.Value)
+			}
+			ov := &policy.ObligationValue{
+				Id:    nonEmpty(v.ID, valFQN),
+				Value: v.Value,
+				Fqn:   valFQN,
+			}
+			for tIdx, t := range v.Triggers {
+				if t.AttributeValueFQN == "" {
+					return fmt.Errorf("filestore: obligation %q value %q trigger at index %d missing attribute_value_fqn",
+						def.Name, v.Value, tIdx)
+				}
+				if t.Action == "" {
+					return fmt.Errorf("filestore: obligation %q value %q trigger at index %d missing action",
+						def.Name, v.Value, tIdx)
+				}
+				attrVal := b.valuesByFQN[strings.ToLower(t.AttributeValueFQN)]
+				if attrVal == nil {
+					return fmt.Errorf("filestore: obligation %q value %q trigger at index %d references unknown attribute_value_fqn %q",
+						def.Name, v.Value, tIdx, t.AttributeValueFQN)
+				}
+				// Intentionally do not set ObligationValue back-reference on
+				// the trigger: it would close a cycle (ObligationValue →
+				// Triggers → ObligationTrigger → ObligationValue) that breaks
+				// proto.Clone. The obligations PDP reads obligationValue.GetFqn()
+				// from the parent loop variable, not via this back-pointer.
+				trigger := &policy.ObligationTrigger{
+					Id:             nonEmpty(t.ID, fmt.Sprintf("%s-trigger-%d", ov.GetId(), tIdx)),
+					Action:         &policy.Action{Name: t.Action},
+					AttributeValue: attrVal,
+					Namespace:      ns,
+				}
+				for _, c := range t.Context {
+					if c.PEPClientID == "" {
+						return fmt.Errorf("filestore: obligation %q value %q trigger at index %d has empty pep_client_id context",
+							def.Name, v.Value, tIdx)
+					}
+					trigger.Context = append(trigger.Context, &policy.RequestContext{
+						Pep: &policy.PolicyEnforcementPoint{ClientId: c.PEPClientID},
+					})
+				}
+				ov.Triggers = append(ov.Triggers, trigger)
+			}
+			ob.Values = append(ob.Values, ov)
 		}
 		b.obligations = append(b.obligations, ob)
 	}
+	return nil
+}
+
+// registeredResourceValueFQN builds the FQN format expected by the v2 PDP.
+// When namespace is empty the value uses the legacy form https://reg_res/...
+func registeredResourceValueFQN(ns *policy.Namespace, resourceName, value string) string {
+	if ns == nil || ns.GetName() == "" {
+		return strings.ToLower("https://reg_res/" + resourceName + "/value/" + value)
+	}
+	return strings.ToLower("https://" + ns.GetName() + "/reg_res/" + resourceName + "/value/" + value)
 }
 
 func (b *builder) resolveKAS(refs []KasReferenceD) []*policy.KeyAccessServer {
