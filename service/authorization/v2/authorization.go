@@ -90,11 +90,16 @@ func NewRegistration() *serviceregistry.Service[authzV2Connect.AuthorizationServ
 				if authZCfg.PolicyFile != "" {
 					store, err := filestore.NewStoreFromFile(authZCfg.PolicyFile)
 					if err != nil {
-						l.Error("failed to load policy file", slog.String("path", authZCfg.PolicyFile), slog.Any("error", err))
+						l.Error("failed to load policy file",
+							slog.String("path", authZCfg.PolicyFile),
+							slog.Any("error", err),
+						)
 						panic(fmt.Errorf("failed to load policy file %q: %w", authZCfg.PolicyFile, err))
 					}
 					as.cache = store
-					l.Info("authorization service using file-backed policy provider", slog.String("path", authZCfg.PolicyFile))
+					l.Info("authorization service using file-backed policy provider",
+						slog.String("path", authZCfg.PolicyFile),
+					)
 					return as, rarHandler
 				}
 

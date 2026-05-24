@@ -71,10 +71,19 @@ func (s *Store) IsReady(_ context.Context) bool { return s.IsEnabled() }
 // subject mappings, which would otherwise close reference cycles into the
 // store's shared state.
 
+// cloneAs returns a typed clone of the given proto message. proto.Clone is
+// documented to preserve the runtime type, so the assertion is infallible —
+// but linters require the two-return form, so we go through this helper to
+// keep call sites readable.
+func cloneAs[T proto.Message](src T) T {
+	cloned, _ := proto.Clone(src).(T)
+	return cloned
+}
+
 func (s *Store) ListAllAttributes(_ context.Context) ([]*policy.Attribute, error) {
 	out := make([]*policy.Attribute, len(s.attributes))
 	for i, a := range s.attributes {
-		out[i] = proto.Clone(a).(*policy.Attribute)
+		out[i] = cloneAs(a)
 	}
 	return out, nil
 }
@@ -82,7 +91,7 @@ func (s *Store) ListAllAttributes(_ context.Context) ([]*policy.Attribute, error
 func (s *Store) ListAllSubjectMappings(_ context.Context) ([]*policy.SubjectMapping, error) {
 	out := make([]*policy.SubjectMapping, len(s.subjectMappings))
 	for i, sm := range s.subjectMappings {
-		out[i] = proto.Clone(sm).(*policy.SubjectMapping)
+		out[i] = cloneAs(sm)
 	}
 	return out, nil
 }
@@ -90,7 +99,7 @@ func (s *Store) ListAllSubjectMappings(_ context.Context) ([]*policy.SubjectMapp
 func (s *Store) ListAllRegisteredResources(_ context.Context) ([]*policy.RegisteredResource, error) {
 	out := make([]*policy.RegisteredResource, len(s.registeredResources))
 	for i, r := range s.registeredResources {
-		out[i] = proto.Clone(r).(*policy.RegisteredResource)
+		out[i] = cloneAs(r)
 	}
 	return out, nil
 }
@@ -98,7 +107,7 @@ func (s *Store) ListAllRegisteredResources(_ context.Context) ([]*policy.Registe
 func (s *Store) ListAllObligations(_ context.Context) ([]*policy.Obligation, error) {
 	out := make([]*policy.Obligation, len(s.obligations))
 	for i, o := range s.obligations {
-		out[i] = proto.Clone(o).(*policy.Obligation)
+		out[i] = cloneAs(o)
 	}
 	return out, nil
 }
@@ -110,7 +119,7 @@ func (s *Store) ListActiveAttributes(_ context.Context) ([]*policy.Attribute, er
 	out := make([]*policy.Attribute, 0, len(s.attributes))
 	for _, a := range s.attributes {
 		if a.GetActive() == nil || a.GetActive().GetValue() {
-			out = append(out, proto.Clone(a).(*policy.Attribute))
+			out = append(out, cloneAs(a))
 		}
 	}
 	return out, nil
@@ -125,7 +134,7 @@ func (s *Store) GetAttributeValuesByFqns(_ context.Context, fqns []string) (map[
 	for _, raw := range fqns {
 		fqn := strings.ToLower(raw)
 		if v, ok := s.valuesByFQN[fqn]; ok {
-			out[fqn] = proto.Clone(v).(*policy.Value)
+			out[fqn] = cloneAs(v)
 		}
 	}
 	return out, nil
@@ -147,7 +156,7 @@ func (s *Store) AttributeForValueFQN(valueFQN string) *policy.Attribute {
 	if !ok {
 		return nil
 	}
-	return proto.Clone(a).(*policy.Attribute)
+	return cloneAs(a)
 }
 
 // MatchSubjectMappings replicates the policy service's "liberal" matcher: any
@@ -166,7 +175,7 @@ func (s *Store) MatchSubjectMappings(_ context.Context, properties []*policy.Sub
 	out := make([]*policy.SubjectMapping, 0)
 	for _, sm := range s.subjectMappings {
 		if subjectMappingMatches(sm, wanted) {
-			out = append(out, proto.Clone(sm).(*policy.SubjectMapping))
+			out = append(out, cloneAs(sm))
 		}
 	}
 	return out, nil
@@ -358,8 +367,8 @@ func (b *builder) buildSubjectMappings() error {
 			}
 			scs = built
 		case def.SubjectConditionSet != "":
-			ref, ok := b.scsByID[def.SubjectConditionSet]
-			if !ok {
+			ref, refOK := b.scsByID[def.SubjectConditionSet]
+			if !refOK {
 				return fmt.Errorf("filestore: subject_mapping at index %d references unknown subject_condition_set %q", i, def.SubjectConditionSet)
 			}
 			scs = ref
@@ -601,7 +610,9 @@ func convertActions(refs []ActionRef) ([]*policy.Action, error) {
 			if err != nil {
 				return nil, err
 			}
-			a.Value = &policy.Action_Standard{Standard: std}
+			// policy.Action.Value is deprecated; the rest of the codebase still uses
+			// it pending the action-name migration (DECRYPT→"read", TRANSMIT→"create").
+			a.Value = &policy.Action_Standard{Standard: std} //nolint:staticcheck
 		}
 		out = append(out, a)
 	}

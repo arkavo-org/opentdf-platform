@@ -41,11 +41,11 @@ type AttrValueDef struct {
 }
 
 type SubjectMappingDef struct {
-	ID                    string          `yaml:"id" json:"id"`
-	AttributeValueFQN     string          `yaml:"attribute_value_fqn" json:"attribute_value_fqn"`
-	SubjectConditionSet   string          `yaml:"subject_condition_set" json:"subject_condition_set"`
-	InlineConditionSet    *InlineSCSDef   `yaml:"inline_condition_set,omitempty" json:"inline_condition_set,omitempty"`
-	Actions               []ActionRef     `yaml:"actions" json:"actions"`
+	ID                  string        `yaml:"id" json:"id"`
+	AttributeValueFQN   string        `yaml:"attribute_value_fqn" json:"attribute_value_fqn"`
+	SubjectConditionSet string        `yaml:"subject_condition_set" json:"subject_condition_set"`
+	InlineConditionSet  *InlineSCSDef `yaml:"inline_condition_set,omitempty" json:"inline_condition_set,omitempty"`
+	Actions             []ActionRef   `yaml:"actions" json:"actions"`
 }
 
 type ActionRef struct {
@@ -110,9 +110,9 @@ type RegisteredResourceDef struct {
 }
 
 type RegisteredResourceValueDef struct {
-	ID                    string                   `yaml:"id" json:"id"`
-	Value                 string                   `yaml:"value" json:"value"`
-	FQN                   string                   `yaml:"fqn" json:"fqn"`
+	ID                    string                    `yaml:"id" json:"id"`
+	Value                 string                    `yaml:"value" json:"value"`
+	FQN                   string                    `yaml:"fqn" json:"fqn"`
 	ActionAttributeValues []ActionAttributeValueDef `yaml:"action_attribute_values" json:"action_attribute_values"`
 }
 
@@ -143,10 +143,10 @@ type ObligationValueDef struct {
 // taken on the referenced attribute value. Optional context entries scope the
 // trigger to specific PEP client IDs.
 type ObligationTriggerDef struct {
-	ID                string               `yaml:"id" json:"id"`
-	AttributeValueFQN string               `yaml:"attribute_value_fqn" json:"attribute_value_fqn"`
-	Action            string               `yaml:"action" json:"action"`
-	Context           []TriggerContextDef  `yaml:"context" json:"context"`
+	ID                string              `yaml:"id" json:"id"`
+	AttributeValueFQN string              `yaml:"attribute_value_fqn" json:"attribute_value_fqn"`
+	Action            string              `yaml:"action" json:"action"`
+	Context           []TriggerContextDef `yaml:"context" json:"context"`
 }
 
 // TriggerContextDef scopes an obligation trigger to a specific Policy

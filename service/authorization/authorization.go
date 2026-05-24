@@ -144,11 +144,16 @@ func NewRegistration() *serviceregistry.Service[authorizationconnect.Authorizati
 				if authZCfg.PolicyFile != "" {
 					store, err := filestore.NewStoreFromFile(authZCfg.PolicyFile)
 					if err != nil {
-						logger.Error("failed to load policy file", slog.String("path", authZCfg.PolicyFile), slog.String("error", err.Error()))
+						logger.Error("failed to load policy file",
+							slog.String("path", authZCfg.PolicyFile),
+							slog.String("error", err.Error()),
+						)
 						panic(fmt.Errorf("failed to load policy file %q: %w", authZCfg.PolicyFile, err))
 					}
 					as.policyStore = store
-					logger.Info("authorization service using file-backed policy provider", slog.String("path", authZCfg.PolicyFile))
+					logger.Info("authorization service using file-backed policy provider",
+						slog.String("path", authZCfg.PolicyFile),
+					)
 				}
 				as.config = authZCfg
 				as.Tracer = srp.Tracer
