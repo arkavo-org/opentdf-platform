@@ -40,13 +40,15 @@ import (
 	ctxAuth "github.com/opentdf/platform/service/pkg/auth"
 )
 
+// IANA-registered URIs from RFC 8693 — these are public identifiers, not
+// credentials, but gosec G101 keyword-matches "token" / "grant-type" and
+// flags them, hence the per-line nolint annotations below.
 const (
-	// RFC 8693 grant type
-	grantTypeTokenExchange = "urn:ietf:params:oauth:grant-type:token-exchange"
-	// RFC 8693 token types
-	tokenTypeJWT         = "urn:ietf:params:oauth:token-type:jwt"
-	tokenTypeAccessToken = "urn:ietf:params:oauth:token-type:access_token"
-	tokenTypeIDToken     = "urn:ietf:params:oauth:token-type:id_token"
+	grantTypeTokenExchange = "urn:ietf:params:oauth:grant-type:token-exchange" //nolint:gosec // RFC 8693 IANA URI
+
+	tokenTypeJWT         = "urn:ietf:params:oauth:token-type:jwt"          //nolint:gosec // RFC 8693 IANA URI
+	tokenTypeAccessToken = "urn:ietf:params:oauth:token-type:access_token" //nolint:gosec // RFC 8693 IANA URI
+	tokenTypeIDToken     = "urn:ietf:params:oauth:token-type:id_token"     //nolint:gosec // RFC 8693 IANA URI
 
 	// Custom RAR detail type understood by this POC. Other type values cause
 	// the detail to be rejected at validation time.
@@ -71,10 +73,10 @@ type AuthorizationDetail struct {
 
 // tokenExchangeResponse follows RFC 8693 §2.2.
 type tokenExchangeResponse struct {
-	AccessToken          string                 `json:"access_token"`
-	IssuedTokenType      string                 `json:"issued_token_type"`
-	TokenType            string                 `json:"token_type"`
-	ExpiresIn            int64                  `json:"expires_in"`
+	AccessToken          string                `json:"access_token"`
+	IssuedTokenType      string                `json:"issued_token_type"`
+	TokenType            string                `json:"token_type"`
+	ExpiresIn            int64                 `json:"expires_in"`
 	AuthorizationDetails []AuthorizationDetail `json:"authorization_details,omitempty"`
 }
 
