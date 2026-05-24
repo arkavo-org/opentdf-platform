@@ -46,7 +46,8 @@ func TestRARSigner_RoundTripSignAndVerify(t *testing.T) {
 
 	// Resource server side: pull the public JWKS, parse the token against it.
 	set := signer.JWKS()
-	parsed, err := jwt.Parse([]byte(signed),
+	parsed, err := jwt.Parse(
+		[]byte(signed),
 		jwt.WithKeySet(set),
 		jwt.WithValidate(true),
 		jwt.WithIssuer("https://opentdf.local"),
@@ -177,7 +178,7 @@ type stubVerifier struct {
 
 func (s *stubVerifier) VerifyAccessToken(_ context.Context, tokenRaw string) (jwt.Token, error) {
 	if tokenRaw != s.expectedToken {
-		return nil, assertErr("unexpected subject token")
+		return nil, assertError("unexpected subject token")
 	}
 	t := jwt.New()
 	_ = t.Set(jwt.SubjectKey, s.subject)
@@ -185,9 +186,9 @@ func (s *stubVerifier) VerifyAccessToken(_ context.Context, tokenRaw string) (jw
 	return t, nil
 }
 
-type assertErr string
+type assertError string
 
-func (a assertErr) Error() string { return string(a) }
+func (a assertError) Error() string { return string(a) }
 
 // stubERS returns a fixed entity representation regardless of input — the test
 // owns the policy file, so it owns what selectors need to match.
@@ -300,7 +301,8 @@ func TestRAREndpoint_GrantsPermittedDetails(t *testing.T) {
 		}, got.Locations)
 
 	// Verify the issued JWT is valid under the published JWKS.
-	parsed, err := jwt.Parse([]byte(body.AccessToken),
+	parsed, err := jwt.Parse(
+		[]byte(body.AccessToken),
 		jwt.WithKeySet(endpoint.signer.JWKS()),
 		jwt.WithValidate(true),
 		jwt.WithIssuer("https://opentdf.local"),
