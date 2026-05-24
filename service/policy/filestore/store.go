@@ -612,7 +612,7 @@ func convertActions(refs []ActionRef) ([]*policy.Action, error) {
 			}
 			// policy.Action.Value is deprecated; the rest of the codebase still uses
 			// it pending the action-name migration (DECRYPT→"read", TRANSMIT→"create").
-			a.Value = &policy.Action_Standard{Standard: std} //nolint:staticcheck
+			a.Value = &policy.Action_Standard{Standard: std} //nolint:staticcheck // deprecated proto field still used across codebase
 		}
 		out = append(out, a)
 	}
