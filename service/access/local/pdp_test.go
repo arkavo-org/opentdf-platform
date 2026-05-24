@@ -25,12 +25,12 @@ func TestGrant_Validate(t *testing.T) {
 		g       Grant
 		wantErr bool
 	}{
-		"ok":                {g: Grant{Type: GrantTypeAttribute, Actions: []string{"read"}, Locations: []string{fqnSecret}}, wantErr: false},
-		"no type":           {g: Grant{Actions: []string{"read"}, Locations: []string{fqnSecret}}, wantErr: true},
-		"no actions":        {g: Grant{Type: GrantTypeAttribute, Locations: []string{fqnSecret}}, wantErr: true},
-		"no locations":      {g: Grant{Type: GrantTypeAttribute, Actions: []string{"read"}}, wantErr: true},
-		"empty action":      {g: Grant{Type: GrantTypeAttribute, Actions: []string{""}, Locations: []string{fqnSecret}}, wantErr: true},
-		"empty location":    {g: Grant{Type: GrantTypeAttribute, Actions: []string{"read"}, Locations: []string{""}}, wantErr: true},
+		"ok":             {g: Grant{Type: GrantTypeAttribute, Actions: []string{"read"}, Locations: []string{fqnSecret}}, wantErr: false},
+		"no type":        {g: Grant{Actions: []string{"read"}, Locations: []string{fqnSecret}}, wantErr: true},
+		"no actions":     {g: Grant{Type: GrantTypeAttribute, Locations: []string{fqnSecret}}, wantErr: true},
+		"no locations":   {g: Grant{Type: GrantTypeAttribute, Actions: []string{"read"}}, wantErr: true},
+		"empty action":   {g: Grant{Type: GrantTypeAttribute, Actions: []string{""}, Locations: []string{fqnSecret}}, wantErr: true},
+		"empty location": {g: Grant{Type: GrantTypeAttribute, Actions: []string{"read"}, Locations: []string{""}}, wantErr: true},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
