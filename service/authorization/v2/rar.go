@@ -61,8 +61,11 @@ const (
 	// JWT-family subject token types.
 	tokenTypeCWT = "urn:ietf:params:oauth:token-type:cwt" //nolint:gosec // RFC 8392 / RFC 8693 token type URN
 
-	rarTokenPath = "/v2/authorization/token"
-	rarJWKSPath  = "/v2/authorization/jwks.json"
+	rarTokenPath     = "/v2/authorization/token"
+	rarJWKSPath      = "/v2/authorization/jwks.json"
+	rarCOSEKeysPath  = "/v2/authorization/cose-keys"
+	contentTypeCWT   = "application/cwt+cbor"
+	contentTypeCOSEK = "application/cose-key-set+cbor"
 )
 
 // authzDetailRequest is a parsed authorization_details entry from the inbound
@@ -103,14 +106,36 @@ type rarErrorResponse struct {
 type RAREndpoint struct {
 	pdp         *Service
 	signer      *RARSigner
+	cwtSigner   *RARCWTSigner
 	verifier    authn.AccessTokenVerifier
 	cwtVerifier authn.CWTSubjectTokenVerifier
 }
 
-// Mount attaches the RAR token + JWKS handlers to the supplied mux.
+// Mount attaches the RAR token + JWKS + COSE Key Set handlers to the
+// supplied mux. The COSE Key Set is only published when a CWT signer is
+// configured; without it the route returns 503.
 func (r *RAREndpoint) Mount(mux *http.ServeMux) {
 	mux.HandleFunc("POST "+rarTokenPath, r.handleToken)
 	mux.HandleFunc("GET "+rarJWKSPath, r.handleJWKS)
+	mux.HandleFunc("GET "+rarCOSEKeysPath, r.handleCOSEKeys)
+}
+
+func (r *RAREndpoint) handleCOSEKeys(w http.ResponseWriter, _ *http.Request) {
+	if r.cwtSigner == nil {
+		writeError(w, http.StatusServiceUnavailable, "server_error",
+			"CWT signer not configured")
+		return
+	}
+	set, err := r.cwtSigner.COSEKeySet()
+	if err != nil {
+		r.pdp.logger.Error("failed to encode COSE Key Set", slog.Any("error", err))
+		writeError(w, http.StatusInternalServerError, "server_error",
+			"could not encode COSE Key Set")
+		return
+	}
+	w.Header().Set("Content-Type", contentTypeCOSEK)
+	w.Header().Set("Cache-Control", "public, max-age=300")
+	_, _ = w.Write(set)
 }
 
 func (r *RAREndpoint) handleJWKS(w http.ResponseWriter, _ *http.Request) {
@@ -163,13 +188,27 @@ func (r *RAREndpoint) handleToken(w http.ResponseWriter, req *http.Request) {
 			"unsupported subject_token_type "+subjectTokenType)
 		return
 	}
+	// requested_token_type controls the response format. Default is CWT —
+	// the platform issues authorization_details inside an RFC 8392 CWT
+	// (COSE_Sign1 / ES256) and the response body is raw CBOR with content
+	// type application/cwt+cbor. Clients can opt back into the legacy JSON
+	// envelope by setting requested_token_type to the JWT URN.
 	requestedTokenType := req.PostForm.Get("requested_token_type")
 	if requestedTokenType == "" {
-		requestedTokenType = tokenTypeJWT
+		requestedTokenType = tokenTypeCWT
 	}
-	if requestedTokenType != tokenTypeJWT {
+	switch requestedTokenType {
+	case tokenTypeCWT:
+		if r.cwtSigner == nil {
+			writeError(w, http.StatusBadRequest, "invalid_request",
+				"CWT response tokens are not enabled on this server")
+			return
+		}
+	case tokenTypeJWT:
+		// JSON envelope path; r.signer is required (validated at startup).
+	default:
 		writeError(w, http.StatusBadRequest, "invalid_request",
-			"only "+tokenTypeJWT+" is supported as requested_token_type")
+			"unsupported requested_token_type "+requestedTokenType)
 		return
 	}
 	audience := req.PostForm.Get("audience")
@@ -246,24 +285,39 @@ func (r *RAREndpoint) handleToken(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	signed, exp, err := r.signer.Issue(subjectStr, audience, grants)
-	if err != nil {
-		r.pdp.logger.ErrorContext(ctx, "rar token sign failed", slog.Any("error", err))
-		writeError(w, http.StatusInternalServerError, "server_error", "could not mint access token")
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("Pragma", "no-cache")
-	if err := json.NewEncoder(w).Encode(tokenExchangeResponse{
-		AccessToken:          signed,
-		IssuedTokenType:      tokenTypeJWT,
-		TokenType:            "Bearer",
-		ExpiresIn:            int64(time.Until(exp).Seconds()),
-		AuthorizationDetails: grants,
-	}); err != nil {
-		r.pdp.logger.Error("failed to encode rar response", slog.Any("error", err))
+	switch requestedTokenType {
+	case tokenTypeCWT:
+		raw, _, err := r.cwtSigner.Issue(subjectStr, audience, grants)
+		if err != nil {
+			r.pdp.logger.ErrorContext(ctx, "rar cwt sign failed", slog.Any("error", err))
+			writeError(w, http.StatusInternalServerError, "server_error", "could not mint CWT access token")
+			return
+		}
+		// Raw CBOR body; access_token claims (sub, aud, exp, authorization_details)
+		// live inside the CWT itself, so no JSON envelope is needed.
+		w.Header().Set("Content-Type", contentTypeCWT)
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Pragma", "no-cache")
+		_, _ = w.Write(raw)
+	default: // tokenTypeJWT
+		signed, exp, err := r.signer.Issue(subjectStr, audience, grants)
+		if err != nil {
+			r.pdp.logger.ErrorContext(ctx, "rar token sign failed", slog.Any("error", err))
+			writeError(w, http.StatusInternalServerError, "server_error", "could not mint access token")
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Pragma", "no-cache")
+		if err := json.NewEncoder(w).Encode(tokenExchangeResponse{
+			AccessToken:          signed,
+			IssuedTokenType:      tokenTypeJWT,
+			TokenType:            "Bearer",
+			ExpiresIn:            int64(time.Until(exp).Seconds()),
+			AuthorizationDetails: grants,
+		}); err != nil {
+			r.pdp.logger.Error("failed to encode rar response", slog.Any("error", err))
+		}
 	}
 }
 

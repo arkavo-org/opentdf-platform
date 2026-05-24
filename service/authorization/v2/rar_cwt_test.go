@@ -171,6 +171,8 @@ func newCWTTestEndpoint(t *testing.T, priv *ecdsa.PrivateKey, kid []byte) (*RARE
 	}
 	signer, err := NewEphemeralRARSigner("https://opentdf.local", time.Hour)
 	require.NoError(t, err)
+	cwtSigner, err := NewEphemeralRARCWTSigner("https://opentdf.local", time.Hour)
+	require.NoError(t, err)
 
 	cwtVerifier, err := authn.NewCWTVerifier(context.Background(), authn.CWTVerifierConfig{
 		COSEKeysURL: keySrv.URL,
@@ -184,6 +186,7 @@ func newCWTTestEndpoint(t *testing.T, priv *ecdsa.PrivateKey, kid []byte) (*RARE
 	endpoint := &RAREndpoint{
 		pdp:         svc,
 		signer:      signer,
+		cwtSigner:   cwtSigner,
 		cwtVerifier: cwtVerifier,
 	}
 	return endpoint, keySrv
@@ -217,6 +220,7 @@ func TestRAREndpoint_CWT_HappyPath(t *testing.T) {
 	form.Set("grant_type", grantTypeTokenExchange)
 	form.Set("subject_token", subjectToken)
 	form.Set("subject_token_type", tokenTypeCWT)
+	form.Set("requested_token_type", tokenTypeJWT)
 	form.Set("audience", "kas.example")
 
 	resp, err := http.Post(srv.URL+rarTokenPath, "application/x-www-form-urlencoded",
@@ -251,6 +255,7 @@ func TestRAREndpoint_CWT_RejectsBadSignature(t *testing.T) {
 	form.Set("grant_type", grantTypeTokenExchange)
 	form.Set("subject_token", subjectToken)
 	form.Set("subject_token_type", tokenTypeCWT)
+	form.Set("requested_token_type", tokenTypeJWT)
 
 	resp, err := http.Post(srv.URL+rarTokenPath, "application/x-www-form-urlencoded",
 		strings.NewReader(form.Encode()))
@@ -269,6 +274,7 @@ func TestRAREndpoint_CWT_DisabledWhenVerifierNotConfigured(t *testing.T) {
 	form.Set("grant_type", grantTypeTokenExchange)
 	form.Set("subject_token", "any-token")
 	form.Set("subject_token_type", tokenTypeCWT)
+	form.Set("requested_token_type", tokenTypeJWT)
 
 	resp, err := http.Post(srv.URL+rarTokenPath, "application/x-www-form-urlencoded",
 		strings.NewReader(form.Encode()))
@@ -293,6 +299,7 @@ func TestRAREndpoint_CWT_RejectsMalformedBase64(t *testing.T) {
 	form.Set("grant_type", grantTypeTokenExchange)
 	form.Set("subject_token", "!!!not base64!!!")
 	form.Set("subject_token_type", tokenTypeCWT)
+	form.Set("requested_token_type", tokenTypeJWT)
 
 	resp, err := http.Post(srv.URL+rarTokenPath, "application/x-www-form-urlencoded",
 		strings.NewReader(form.Encode()))
