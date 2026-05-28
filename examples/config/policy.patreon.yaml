@@ -1,0 +1,291 @@
+# Patreon-backed policy snapshot.
+#
+# Defines two attribute axes for data tagging plus three Patreon-sourced
+# subject attributes (tier, campaign, status) with subject mappings keyed off
+# the claim shape produced by the Patreon entity resolution provider
+# (service/entityresolution/patreon).
+#
+# Reference this file from opentdf.yaml as:
+#
+#   services:
+#     authorization:
+#       policy_file: ./examples/config/policy.patreon.yaml
+#
+# Run the platform without the policy CRUD service to skip Postgres entirely:
+#
+#   mode: core,-policy
+
+namespaces:
+  - name: patreon.arkavo.com
+
+key_access_servers:
+  - id: kas-arkavo
+    uri: https://kas.arkavo.com
+
+attributes:
+  # ---- Data-tagging attributes (assigned to TDFs at encryption time) ----
+  - namespace: patreon.arkavo.com
+    name: classification
+    rule: hierarchy
+    grants:
+      - id: kas-arkavo
+    values:
+      - value: public
+      - value: member
+      - value: paid
+      - value: vip
+
+  - namespace: patreon.arkavo.com
+    name: content-type
+    rule: anyOf
+    values:
+      - value: text
+      - value: image
+      - value: video
+      - value: audio
+
+  - namespace: patreon.arkavo.com
+    name: entitlement
+    rule: allOf
+    values:
+      - value: exclusive-content
+      - value: early-access
+      - value: behind-the-scenes
+      - value: live-stream
+      - value: discord
+
+  # ---- Patreon-sourced subject attributes ----
+  # tier mirrors Patreon's pledge tiers as a hierarchy so encrypting against
+  # `supporter` admits anyone at supporter, patron, or vip.
+  - namespace: patreon.arkavo.com
+    name: tier
+    rule: hierarchy
+    grants:
+      - id: kas-arkavo
+    values:
+      - value: vip
+      - value: patron
+      - value: supporter
+      - value: free
+
+  # campaign is flat (anyOf) because a backer may support multiple unrelated
+  # creators; each campaign id becomes a distinct attribute value.
+  - namespace: patreon.arkavo.com
+    name: campaign
+    rule: anyOf
+    values:
+      - value: arkavo
+
+  - namespace: patreon.arkavo.com
+    name: status
+    rule: anyOf
+    values:
+      - value: active
+      - value: declined
+      - value: former
+
+subject_mappings:
+  # tier mappings: each tier value matches when the Patreon ERS surfaces the
+  # corresponding tier slug in the patreon.tier_slug claim.
+  - attribute_value_fqn: https://patreon.arkavo.com/attr/tier/value/vip
+    inline_condition_set:
+      subject_sets:
+        - condition_groups:
+            - boolean_operator: AND
+              conditions:
+                - subject_external_selector_value: .patreon.tier_slug
+                  operator: IN
+                  subject_external_values:
+                    - vip
+                - subject_external_selector_value: .patreon.status
+                  operator: IN
+                  subject_external_values:
+                    - active
+    actions:
+      - name: read
+        standard: TRANSMIT
+
+  - attribute_value_fqn: https://patreon.arkavo.com/attr/tier/value/patron
+    inline_condition_set:
+      subject_sets:
+        - condition_groups:
+            - boolean_operator: AND
+              conditions:
+                - subject_external_selector_value: .patreon.tier_slug
+                  operator: IN
+                  subject_external_values:
+                    - patron
+                - subject_external_selector_value: .patreon.status
+                  operator: IN
+                  subject_external_values:
+                    - active
+    actions:
+      - name: read
+        standard: TRANSMIT
+
+  - attribute_value_fqn: https://patreon.arkavo.com/attr/tier/value/supporter
+    inline_condition_set:
+      subject_sets:
+        - condition_groups:
+            - boolean_operator: AND
+              conditions:
+                - subject_external_selector_value: .patreon.tier_slug
+                  operator: IN
+                  subject_external_values:
+                    - supporter
+                - subject_external_selector_value: .patreon.status
+                  operator: IN
+                  subject_external_values:
+                    - active
+    actions:
+      - name: read
+        standard: TRANSMIT
+
+  - attribute_value_fqn: https://patreon.arkavo.com/attr/tier/value/free
+    inline_condition_set:
+      subject_sets:
+        - condition_groups:
+            - boolean_operator: AND
+              conditions:
+                - subject_external_selector_value: .patreon.tier_slug
+                  operator: IN
+                  subject_external_values:
+                    - free
+                    - ""
+    actions:
+      - name: read
+        standard: TRANSMIT
+
+  # campaign: subject is entitled to a campaign value when that campaign id
+  # appears in the resolved patreon.campaign_ids array claim.
+  - attribute_value_fqn: https://patreon.arkavo.com/attr/campaign/value/arkavo
+    inline_condition_set:
+      subject_sets:
+        - condition_groups:
+            - boolean_operator: AND
+              conditions:
+                - subject_external_selector_value: .patreon.campaign_ids[]
+                  operator: IN
+                  subject_external_values:
+                    - arkavo
+    actions:
+      - name: read
+        standard: TRANSMIT
+
+  # status: surface the Patreon membership lifecycle so policies can revoke
+  # access when payments fail.
+  - attribute_value_fqn: https://patreon.arkavo.com/attr/status/value/active
+    inline_condition_set:
+      subject_sets:
+        - condition_groups:
+            - boolean_operator: AND
+              conditions:
+                - subject_external_selector_value: .patreon.status
+                  operator: IN
+                  subject_external_values:
+                    - active
+    actions:
+      - name: read
+        standard: TRANSMIT
+
+  - attribute_value_fqn: https://patreon.arkavo.com/attr/status/value/declined
+    inline_condition_set:
+      subject_sets:
+        - condition_groups:
+            - boolean_operator: AND
+              conditions:
+                - subject_external_selector_value: .patreon.status
+                  operator: IN
+                  subject_external_values:
+                    - declined
+    actions:
+      - name: read
+        standard: TRANSMIT
+
+  - attribute_value_fqn: https://patreon.arkavo.com/attr/status/value/former
+    inline_condition_set:
+      subject_sets:
+        - condition_groups:
+            - boolean_operator: AND
+              conditions:
+                - subject_external_selector_value: .patreon.status
+                  operator: IN
+                  subject_external_values:
+                    - former
+
+    actions:
+      - name: read
+        standard: TRANSMIT
+
+  # Entitlement mappings derived from Patreon benefits. The Patreon ERS
+  # surfaces benefit slugs in patreon.benefits[]; the allOf rule means data
+  # tagged with several entitlements requires the subject to hold all of them.
+  - attribute_value_fqn: https://patreon.arkavo.com/attr/entitlement/value/exclusive-content
+    inline_condition_set:
+      subject_sets:
+        - condition_groups:
+            - boolean_operator: AND
+              conditions:
+                - subject_external_selector_value: .patreon.benefits[]
+                  operator: IN
+                  subject_external_values:
+                    - exclusive-content
+    actions:
+      - name: read
+        standard: TRANSMIT
+
+  - attribute_value_fqn: https://patreon.arkavo.com/attr/entitlement/value/early-access
+    inline_condition_set:
+      subject_sets:
+        - condition_groups:
+            - boolean_operator: AND
+              conditions:
+                - subject_external_selector_value: .patreon.benefits[]
+                  operator: IN
+                  subject_external_values:
+                    - early-access
+    actions:
+      - name: read
+        standard: TRANSMIT
+
+  - attribute_value_fqn: https://patreon.arkavo.com/attr/entitlement/value/behind-the-scenes
+    inline_condition_set:
+      subject_sets:
+        - condition_groups:
+            - boolean_operator: AND
+              conditions:
+                - subject_external_selector_value: .patreon.benefits[]
+                  operator: IN
+                  subject_external_values:
+                    - behind-the-scenes
+    actions:
+      - name: read
+        standard: TRANSMIT
+
+  - attribute_value_fqn: https://patreon.arkavo.com/attr/entitlement/value/live-stream
+    inline_condition_set:
+      subject_sets:
+        - condition_groups:
+            - boolean_operator: AND
+              conditions:
+                - subject_external_selector_value: .patreon.benefits[]
+                  operator: IN
+                  subject_external_values:
+                    - live-stream
+    actions:
+      - name: read
+        standard: TRANSMIT
+
+  - attribute_value_fqn: https://patreon.arkavo.com/attr/entitlement/value/discord
+    inline_condition_set:
+      subject_sets:
+        - condition_groups:
+            - boolean_operator: AND
+              conditions:
+                - subject_external_selector_value: .patreon.benefits[]
+                  operator: IN
+                  subject_external_values:
+                    - discord
+    actions:
+      - name: read
+        standard: TRANSMIT

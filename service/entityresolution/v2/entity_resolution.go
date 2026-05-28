@@ -11,6 +11,7 @@ import (
 	claims "github.com/opentdf/platform/service/entityresolution/claims/v2"
 	keycloak "github.com/opentdf/platform/service/entityresolution/keycloak/v2"
 	multistrategyv2 "github.com/opentdf/platform/service/entityresolution/multi-strategy/v2"
+	patreonv2 "github.com/opentdf/platform/service/entityresolution/patreon/v2"
 	"github.com/opentdf/platform/service/pkg/cache"
 	"github.com/opentdf/platform/service/pkg/serviceregistry"
 	"go.opentelemetry.io/otel/trace"
@@ -25,6 +26,7 @@ const (
 	KeycloakMode      = "keycloak"
 	ClaimsMode        = "claims"
 	MultiStrategyMode = "multi-strategy"
+	PatreonMode       = "patreon"
 )
 
 type EntityResolution struct {
@@ -74,6 +76,10 @@ func NewRegistration() *serviceregistry.Service[entityresolutionv2connect.Entity
 					multiSVC, multiHandler := multistrategyv2.RegisterMultiStrategyERSV2(srp.Config, srp.Logger)
 					multiSVC.Tracer = srp.Tracer
 					return EntityResolution{EntityResolutionServiceHandler: multiSVC}, multiHandler
+				case PatreonMode:
+					patreonSVC, patreonHandler := patreonv2.RegisterPatreonERS(srp.Config, srp.Logger)
+					patreonSVC.Tracer = srp.Tracer
+					return EntityResolution{EntityResolutionServiceHandler: patreonSVC, Tracer: srp.Tracer}, patreonHandler
 				default:
 					// Default to Keycloak ERS with cache support
 					kcSVC, kcHandler := keycloak.RegisterKeycloakERS(srp.Config, srp.Logger, ersCache)
