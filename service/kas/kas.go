@@ -119,10 +119,56 @@ func NewRegistration() *serviceregistry.Service[kasconnect.AccessServiceHandler]
 					srp.Logger.Error("failed to register kas readiness check", slog.String("error", err.Error()))
 				}
 
+				if err := registerKASWellKnown(srp, kasCfg); err != nil {
+					srp.Logger.Warn("failed to register kas wellknown config", slog.Any("error", err))
+				}
+
 				return p, nil
 			},
 		},
 	}
+}
+
+// registerKASWellKnown publishes a "kas" namespace in the platform's
+// well-known configuration so SDKs can discover the KAS URL, public-key
+// and rewrap endpoints, and supported key algorithms without out-of-band
+// configuration. Mirrors the registration pattern used by health/idp.
+//
+// The "algorithms" list excludes entries flagged legacy: true, since those
+// describe alternate key formats already covered by their non-legacy
+// sibling under the same kid. Returns nil if the registrar isn't wired up
+// (modes that skip the well-known service entirely).
+func registerKASWellKnown(srp serviceregistry.RegistrationParams, kasCfg access.KASConfig) error {
+	if srp.WellKnownConfig == nil {
+		return nil
+	}
+	kasURL, err := determineKASURL(srp, kasCfg)
+	if err != nil {
+		return fmt.Errorf("could not determine KAS URL: %w", err)
+	}
+	base := strings.TrimRight(kasURL.String(), "/")
+
+	seen := map[string]struct{}{}
+	algs := make([]string, 0, len(kasCfg.Keyring))
+	for _, k := range kasCfg.Keyring {
+		if k.Legacy || k.Algorithm == "" {
+			continue
+		}
+		if _, ok := seen[k.Algorithm]; ok {
+			continue
+		}
+		seen[k.Algorithm] = struct{}{}
+		algs = append(algs, k.Algorithm)
+	}
+
+	return srp.WellKnownConfig("kas", map[string]any{
+		"uri":                    base,
+		"public_key_url":         base + "/kas/v2/kas_public_key",
+		"connect_public_key_url": base + "/kas.AccessService/PublicKey",
+		"rewrap_url":             base + "/kas/v2/rewrap",
+		"connect_rewrap_url":     base + "/kas.AccessService/Rewrap",
+		"algorithms":             algs,
+	})
 }
 
 func determineKASURL(srp serviceregistry.RegistrationParams, kasCfg access.KASConfig) (*url.URL, error) {
