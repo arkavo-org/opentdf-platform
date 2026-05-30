@@ -148,8 +148,11 @@ func registerKASWellKnown(srp serviceregistry.RegistrationParams, kasCfg access.
 	}
 	base := strings.TrimRight(kasURL.String(), "/")
 
+	// structpb.NewStruct (used by the wellknown HTTP handler to serialize
+	// the aggregate map) accepts []any for nested slices but rejects []string,
+	// so build the algorithm list as []any.
 	seen := map[string]struct{}{}
-	algs := make([]string, 0, len(kasCfg.Keyring))
+	algs := make([]any, 0, len(kasCfg.Keyring))
 	for _, k := range kasCfg.Keyring {
 		if k.Legacy || k.Algorithm == "" {
 			continue
