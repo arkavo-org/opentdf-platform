@@ -30,8 +30,8 @@ services:
     allow_direct_entitlements: true
   entityresolution:
     mode: patreon
-    api_base: http://127.0.0.1:9876
-    creator_access_token: test-creator-token
-    campaign_ids:
-      - "12345678"
+    # Multi-creator passthrough: trust the materialized arkavo_patreon claim
+    # and emit campaign-qualified direct entitlements. No Patreon creds needed.
+    trust_materialized_claims: true
+    trusted_issuer: http://127.0.0.1:9999
     infer_unknown_as_free: true

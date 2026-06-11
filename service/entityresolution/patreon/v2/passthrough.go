@@ -119,7 +119,15 @@ func passthroughResolution(claim *arkavoPatreonClaim, namespace string) *resolut
 		entitlements = append(entitlements, fmt.Sprintf(
 			"https://%s/attr/%s/value/%s", namespace, campaignAttributeName, m.campaignID,
 		))
-		for _, slug := range m.tierSlugs {
+		for _, rawSlug := range m.tierSlugs {
+			// Enforce the FQN split invariant rather than trusting the
+			// materializer: slugify guarantees lowercase, no '_' and no
+			// spaces, so <campaign_id>_<tier_slug> splits unambiguously and
+			// matches the policy value form.
+			slug := slugify(rawSlug)
+			if slug == "" {
+				continue
+			}
 			// Flattened tier_slug is informational only in multi-creator
 			// mode; gating uses the campaign-qualified entitlements below.
 			if mem.TierSlug == tierFree {
@@ -147,4 +155,14 @@ func (c *Config) entitlementsNamespace() string {
 		return c.EntitlementsNamespace
 	}
 	return defaultEntitlementsNamespace
+}
+
+// issuerTrusted reports whether the verified token's issuer is acceptable
+// for materialized-claim passthrough. Empty TrustedIssuer = no check.
+func (s *EntityResolutionService) issuerTrusted(claims map[string]interface{}) bool {
+	if s.cfg.TrustedIssuer == "" {
+		return true
+	}
+	iss, _ := claims["iss"].(string)
+	return iss == s.cfg.TrustedIssuer
 }

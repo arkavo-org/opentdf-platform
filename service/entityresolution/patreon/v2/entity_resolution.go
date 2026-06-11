@@ -47,6 +47,30 @@ type Config struct {
 	// when the subject can't be matched in Patreon. Useful so unauthenticated
 	// or non-Patreon traffic still flows through subject mappings.
 	InferUnknownAsFree bool `mapstructure:"infer_unknown_as_free" json:"infer_unknown_as_free"`
+	// TrustMaterializedClaims enables the claims-passthrough path: when an
+	// entity's claims already carry the arkavo_patreon materialization, emit
+	// campaign-qualified direct entitlements from it WITHOUT calling Patreon.
+	//
+	// SECURITY — this is the real trust control, default false. The
+	// materialized claim is honored as authoritative, so it must only ever
+	// reach this provider through a cryptographically trusted channel:
+	//   - the platform's own decision flow, where the subject token's
+	//     signature was verified by the authn interceptor before the ERS
+	//     re-parses it (and entitiesFromToken additionally pins the token's
+	//     issuer to TrustedIssuer below); or
+	//   - an entityChain submitted by a PEP that authenticated with a
+	//     role:standard credential and is trusted to have verified the
+	//     subject token itself (e.g. the catalog node, which verifies the
+	//     consumer CWT before forwarding arkavo_patreon).
+	// Leave false unless every decision caller satisfies one of those.
+	TrustMaterializedClaims bool `mapstructure:"trust_materialized_claims" json:"trust_materialized_claims"`
+	// TrustedIssuer, when set, is the issuer the materialized claim must
+	// have been minted by. On the verified-token path the iss claim is
+	// inside the signed token (non-forgeable), so this rejects a claim
+	// carried by a token from any other IdP. Empty = no issuer check
+	// (entityChain/claims path has no token iss to check; relies on the
+	// PEP trust boundary above).
+	TrustedIssuer string `mapstructure:"trusted_issuer" json:"trusted_issuer"`
 }
 
 // JWTConfig customizes which JWT claims the provider reads.
@@ -67,6 +91,8 @@ func (c Config) LogValue() slog.Value {
 		slog.String("creator_access_token", redact(c.CreatorAccessToken)),
 		slog.Any("campaign_ids", c.CampaignIDs),
 		slog.Bool("infer_unknown_as_free", c.InferUnknownAsFree),
+		slog.Bool("trust_materialized_claims", c.TrustMaterializedClaims),
+		slog.String("trusted_issuer", c.TrustedIssuer),
 	)
 }
 
@@ -244,9 +270,14 @@ func (s *EntityResolutionService) entitiesFromToken(ctx context.Context, jwtStri
 	// Preserve the materialized claim verbatim so the decision flow's
 	// second pass (ResolveEntities over the chain entities) re-derives the
 	// claims-passthrough resolution — including its direct entitlements —
-	// without ever consulting Patreon.
-	if raw, ok := claims["arkavo_patreon"].(map[string]interface{}); ok {
-		wrappedClaims["arkavo_patreon"] = raw
+	// without ever consulting Patreon. Only when trust is enabled AND the
+	// token's verified issuer matches TrustedIssuer (when configured): the
+	// iss is inside the signature-verified token, so this is a non-forgeable
+	// check on the token path.
+	if s.cfg.TrustMaterializedClaims && s.issuerTrusted(claims) {
+		if raw, ok := claims["arkavo_patreon"].(map[string]interface{}); ok {
+			wrappedClaims["arkavo_patreon"] = raw
+		}
 	}
 	subjectClaims, err := structpb.NewStruct(wrappedClaims)
 	if err != nil {
@@ -305,9 +336,13 @@ func liveResolution(mem *Membership, err error) (*resolution, error) {
 func (s *EntityResolutionService) resolveFromClaims(ctx context.Context, claims map[string]interface{}) (*resolution, error) {
 	// Claims-passthrough (SaaS multi-creator path): pre-materialized
 	// memberships from identity.arkavo.net need no Patreon access and emit
-	// campaign-qualified direct entitlements. See passthrough.go.
-	if claim := parseArkavoPatreon(claims); claim != nil {
-		return passthroughResolution(claim, s.cfg.entitlementsNamespace()), nil
+	// campaign-qualified direct entitlements. Gated on TrustMaterializedClaims
+	// (default off) — the claim is authoritative, so it is only honored when
+	// the operator has asserted the trust boundary. See passthrough.go.
+	if s.cfg.TrustMaterializedClaims {
+		if claim := parseArkavoPatreon(claims); claim != nil {
+			return passthroughResolution(claim, s.cfg.entitlementsNamespace()), nil
+		}
 	}
 	if tok, ok := claims[s.cfg.JWT.PatreonTokenClaim].(string); ok && tok != "" {
 		return liveResolution(s.client.ResolveSelf(ctx, tok))

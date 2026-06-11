@@ -68,7 +68,7 @@ func materializedClaims(t *testing.T) *anypb.Any {
 }
 
 func TestPassthrough_EmitsCampaignQualifiedEntitlements(t *testing.T) {
-	svc := newSvc(t, Config{}, &forbiddenClient{t: t})
+	svc := newSvc(t, Config{TrustMaterializedClaims: true}, &forbiddenClient{t: t})
 
 	req := connect.NewRequest(&ersV2.ResolveEntitiesRequest{
 		Entities: []*entity.Entity{{
@@ -132,7 +132,7 @@ func TestPassthrough_EmitsCampaignQualifiedEntitlements(t *testing.T) {
 }
 
 func TestPassthrough_AllFormerMembershipsGrantNothing(t *testing.T) {
-	svc := newSvc(t, Config{}, &forbiddenClient{t: t})
+	svc := newSvc(t, Config{TrustMaterializedClaims: true}, &forbiddenClient{t: t})
 	claims, _ := structpb.NewStruct(map[string]interface{}{
 		"arkavo_patreon": map[string]interface{}{
 			"role":            "consumer",
@@ -180,4 +180,56 @@ func TestPassthrough_CustomNamespace(t *testing.T) {
 	if !found {
 		t.Errorf("custom namespace entitlement missing: %v", res.entitlements)
 	}
+}
+
+func TestPassthrough_SlugifiesTierToEnforceSplitInvariant(t *testing.T) {
+	res := passthroughResolution(&arkavoPatreonClaim{
+		memberships: []materializedMembership{{
+			campaignID: "77",
+			status:     "active_patron",
+			tierSlugs:  []string{"Gold Tier_Plus"},
+		}},
+	}, defaultEntitlementsNamespace)
+	want := "https://patreon.arkavo.com/attr/campaign-tier/value/77_gold-tier-plus"
+	found := false
+	for _, e := range res.entitlements {
+		if e == want {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("slug not normalized; got %v", res.entitlements)
+	}
+}
+
+func TestPassthrough_DisabledByDefault(t *testing.T) {
+	svc := newSvc(t, Config{InferUnknownAsFree: true}, freeFallbackClient{})
+	req := connect.NewRequest(&ersV2.ResolveEntitiesRequest{
+		Entities: []*entity.Entity{{
+			EphemeralId: "e0",
+			EntityType:  &entity.Entity_Claims{Claims: materializedClaims(t)},
+		}},
+	})
+	resp, err := svc.ResolveEntities(context.Background(), req)
+	if err != nil {
+		t.Fatalf("ResolveEntities: %v", err)
+	}
+	if n := len(resp.Msg.GetEntityRepresentations()[0].GetDirectEntitlements()); n != 0 {
+		t.Errorf("trust disabled but got %d entitlements — claim was honored ungated", n)
+	}
+}
+
+// freeFallbackClient always misses, exercising the InferUnknownAsFree path.
+type freeFallbackClient struct{}
+
+func (freeFallbackClient) ResolveByUserID(context.Context, string) (*Membership, error) {
+	return nil, ErrMemberNotFound
+}
+
+func (freeFallbackClient) ResolveByEmail(context.Context, string) (*Membership, error) {
+	return nil, ErrMemberNotFound
+}
+
+func (freeFallbackClient) ResolveSelf(context.Context, string) (*Membership, error) {
+	return nil, ErrMemberNotFound
 }
