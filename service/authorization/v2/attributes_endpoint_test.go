@@ -57,7 +57,7 @@ func TestAttributesEndpoint_ListServesSnapshotDefinitions(t *testing.T) {
 		require.NotEmpty(t, fqn, "attribute missing fqn: %v", attr)
 		fqns[fqn] = true
 	}
-	require.True(t, fqns["https://patreon.arkavo.com/attr/tier"], "tier fqn missing: %v", fqns)
+	require.True(t, fqns["https://patreon.arkavo.com/attr/classification"], "classification fqn missing: %v", fqns)
 	require.True(t, fqns["https://patreon.arkavo.com/attr/campaign"])
 }
 
@@ -65,17 +65,17 @@ func TestAttributesEndpoint_FQNPathsDereference(t *testing.T) {
 	srv := attributesTestServer(t)
 
 	// The path component of an attribute FQN resolves to its definition.
-	status, attr := getJSON(t, srv.URL+"/attr/tier")
+	status, attr := getJSON(t, srv.URL+"/attr/classification")
 	require.Equal(t, http.StatusOK, status)
-	require.Equal(t, "https://patreon.arkavo.com/attr/tier", attr["fqn"])
+	require.Equal(t, "https://patreon.arkavo.com/attr/classification", attr["fqn"])
 	require.Contains(t, attr["rule"], "HIERARCHY")
 
 	// And a value FQN path resolves to the value.
-	status, value := getJSON(t, srv.URL+"/attr/tier/value/supporter")
+	status, value := getJSON(t, srv.URL+"/attr/classification/value/member")
 	require.Equal(t, http.StatusOK, status)
-	require.Equal(t, "https://patreon.arkavo.com/attr/tier/value/supporter", value["fqn"])
+	require.Equal(t, "https://patreon.arkavo.com/attr/classification/value/member", value["fqn"])
 
-	status, _ = getJSON(t, srv.URL+"/attr/tier/value/platinum")
+	status, _ = getJSON(t, srv.URL+"/attr/classification/value/nonexistent")
 	require.Equal(t, http.StatusNotFound, status)
 
 	status, _ = getJSON(t, srv.URL+"/attr/no-such-attribute")
