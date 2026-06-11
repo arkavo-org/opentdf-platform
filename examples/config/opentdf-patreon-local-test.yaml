@@ -1,0 +1,34 @@
+# Local integration test: Patreon ERS + policy snapshot, no Postgres, no IdP.
+#
+#   go run ./service start --config-file ../examples/config/opentdf-patreon-local-test.yaml
+#
+# Pairs with integration-tests/mock_patreon.py on :9876. Auth is disabled —
+# this configuration is for contract testing only, never deployment.
+mode: core,entityresolution,-policy,-kas
+
+logger:
+  level: debug
+  type: text
+  output: stderr
+
+server:
+  port: 8080
+  auth:
+    enabled: true
+    enforceDPoP: false
+    issuer: http://127.0.0.1:9999
+    audience: http://localhost:8080
+    policy:
+      client_id_claim: azp
+      groups_claim: roles
+
+services:
+  authorization:
+    policy_file: ./examples/config/policy.patreon.yaml
+  entityresolution:
+    mode: patreon
+    api_base: http://127.0.0.1:9876
+    creator_access_token: test-creator-token
+    campaign_ids:
+      - "12345678"
+    infer_unknown_as_free: true

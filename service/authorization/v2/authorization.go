@@ -101,7 +101,21 @@ func NewRegistration() *serviceregistry.Service[authzV2Connect.AuthorizationServ
 					l.Info("authorization service using file-backed policy provider",
 						slog.String("path", authZCfg.PolicyFile),
 					)
-					return as, rarHandler
+					// Public attribute discovery from the same snapshot the
+					// PDP evaluates — attribute FQNs dereference here (see
+					// attributes_endpoint.go). Compose with the RAR handler.
+					attrEndpoint, err := NewAttributesEndpoint(store)
+					if err != nil {
+						l.Error("failed to build attributes endpoint", slog.Any("error", err))
+						panic(fmt.Errorf("failed to build attributes endpoint: %w", err))
+					}
+					return as, func(ctx context.Context, mux *http.ServeMux) error {
+						attrEndpoint.Mount(mux)
+						if rarHandler != nil {
+							return rarHandler(ctx, mux)
+						}
+						return nil
+					}
 				}
 
 				if !authZCfg.Cache.Enabled {

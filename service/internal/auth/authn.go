@@ -37,6 +37,15 @@ var (
 		// Well Known Configuration Endpoints
 		"/wellknownconfiguration.WellKnownService/GetWellKnownConfiguration",
 		"/.well-known/opentdf-configuration",
+		// Public attribute discovery (file-backed policy provider): the
+		// definitions the PDP evaluates against, served so attribute FQNs
+		// dereference. Definitions are public metadata by design — access
+		// to data is enforced at decision/rewrap time, not discovery.
+		// Patterns are scoped to exactly the mounted routes; anything new
+		// under /attr/ must NOT assume authentication.
+		"/attributes",
+		"/attr/*",
+		"/attr/*/value/*",
 		// KAS Public Key Endpoints
 		"/kas.AccessService/PublicKey",
 		"/kas.AccessService/LegacyPublicKey",
