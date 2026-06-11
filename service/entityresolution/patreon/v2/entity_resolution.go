@@ -132,9 +132,11 @@ func applyJWTDefaults(j *JWTConfig) {
 	}
 }
 
-// ResolveEntities looks each requested entity up in Patreon and returns the
-// resolved membership wrapped as additional claims under a "patreon" key,
-// matching the .patreon.* selectors used by subject mappings.
+// ResolveEntities resolves each requested entity from its claims (the
+// claims-passthrough — no Patreon API access) and returns the flattened
+// membership under a "patreon" key plus campaign-qualified direct
+// entitlements. Entities without a usable arkavo_patreon claim resolve as
+// free (when InferUnknownAsFree) or not-found.
 func (s *EntityResolutionService) ResolveEntities(
 	ctx context.Context,
 	req *connect.Request[entityresolutionV2.ResolveEntitiesRequest],
@@ -176,8 +178,9 @@ func (s *EntityResolutionService) ResolveEntities(
 }
 
 // CreateEntityChainsFromTokens builds an entity chain per JWT: an environment
-// entity for the client id and a subject entity carrying the user's Patreon
-// membership claims (resolved via the JWT's identity hints).
+// entity for the azp client id and a subject entity carrying the (trust-gated)
+// arkavo_patreon claim from the token, for the decision flow's resolution
+// pass. The token signature is verified upstream by the platform authn layer.
 func (s *EntityResolutionService) CreateEntityChainsFromTokens(
 	ctx context.Context,
 	req *connect.Request[entityresolutionV2.CreateEntityChainsFromTokensRequest],
