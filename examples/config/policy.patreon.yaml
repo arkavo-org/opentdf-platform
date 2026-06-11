@@ -69,7 +69,9 @@ attributes:
       - value: free
 
   # campaign is flat (anyOf) because a backer may support multiple unrelated
-  # creators; each campaign id becomes a distinct attribute value.
+  # creators. The value slug is a human-readable creator name; the subject
+  # mapping below pins it to the numeric Patreon campaign id the resolver
+  # emits in .patreon.campaign_ids.
   - namespace: patreon.arkavo.com
     name: campaign
     rule: anyOf
@@ -156,8 +158,11 @@ subject_mappings:
       - name: read
         standard: TRANSMIT
 
-  # campaign: subject is entitled to a campaign value when that campaign id
-  # appears in the resolved patreon.campaign_ids array claim.
+  # campaign: subject is entitled to a campaign value when that campaign's
+  # numeric Patreon id appears in the resolved patreon.campaign_ids array
+  # claim. The resolver emits numeric ids (e.g. "12345678"), not creator
+  # slugs — replace with your own campaign id (the same one configured under
+  # the ERS campaign_ids list).
   - attribute_value_fqn: https://patreon.arkavo.com/attr/campaign/value/arkavo
     inline_condition_set:
       subject_sets:
@@ -167,7 +172,7 @@ subject_mappings:
                 - subject_external_selector_value: .patreon.campaign_ids[]
                   operator: IN
                   subject_external_values:
-                    - arkavo
+                    - "12345678"
     actions:
       - name: read
         standard: TRANSMIT

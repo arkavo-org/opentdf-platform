@@ -224,7 +224,7 @@ func (s *EntityResolutionService) entitiesFromToken(ctx context.Context, jwtStri
 	mem, err := s.resolveFromClaims(ctx, claims)
 	switch {
 	case errors.Is(err, ErrMemberNotFound) && s.cfg.InferUnknownAsFree:
-		mem = &Membership{TierSlug: "free", Status: "former"}
+		mem = &Membership{TierSlug: tierFree, Status: statusFormer}
 	case err != nil:
 		return nil, err
 	}
@@ -302,7 +302,7 @@ func (s *EntityResolutionService) resolveFromClaims(ctx context.Context, claims 
 // freeMembership returns a synthetic free-tier membership tied to the
 // caller identity, used when InferUnknownAsFree is set.
 func freeMembership(e *entity.Entity) *Membership {
-	mem := &Membership{TierSlug: "free", Status: "former"}
+	mem := &Membership{TierSlug: tierFree, Status: statusFormer}
 	switch et := e.GetEntityType().(type) {
 	case *entity.Entity_UserName:
 		mem.UserID = et.UserName

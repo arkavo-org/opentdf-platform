@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"connectrpc.com/connect"
@@ -276,6 +278,92 @@ func TestClient_ResolveByEmail_PaginatesAndMatches(t *testing.T) {
 	}
 	if mem.Status != "active" {
 		t.Errorf("status = %q, want active", mem.Status)
+	}
+}
+
+func TestClient_FindMember_SkipsCampaign404(t *testing.T) {
+	// A 404 from one campaign's member endpoint (deleted/inaccessible id)
+	// must not abort the search — the backer here exists only in the second
+	// configured campaign.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.Contains(r.URL.Path, "/campaigns/dead/"):
+			http.Error(w, "not found", http.StatusNotFound)
+		case strings.Contains(r.URL.Path, "/campaigns/live/"):
+			_, _ = w.Write([]byte(`{
+				"data": [{"id":"m1","type":"member","attributes":{"patron_status":"active_patron"},
+				          "relationships":{"user":{"data":{"id":"u9","type":"user"}}}}],
+				"included": [{"id":"u9","type":"user","attributes":{"email":"carol@example.com"}}],
+				"meta": {"pagination":{"cursors":{"next":""}}}
+			}`))
+		default:
+			http.Error(w, "unexpected", http.StatusInternalServerError)
+		}
+	}))
+	defer server.Close()
+
+	c := NewClient(ClientOptions{
+		APIBase:            server.URL,
+		CreatorAccessToken: "fake-creator-token",
+		CampaignIDs:        []string{"dead", "live"},
+	})
+	mem, err := c.ResolveByUserID(context.Background(), "u9")
+	if err != nil {
+		t.Fatalf("ResolveByUserID: %v", err)
+	}
+	if mem.UserID != "u9" {
+		t.Errorf("user_id = %q, want u9", mem.UserID)
+	}
+	if len(mem.CampaignIDs) != 1 || mem.CampaignIDs[0] != "live" {
+		t.Errorf("campaign_ids = %v, want [live]", mem.CampaignIDs)
+	}
+}
+
+func TestClient_CreatorToken_DefaultTTLAndSingleFetch(t *testing.T) {
+	// A token response without expires_in must still be cached (default TTL)
+	// rather than treated as immediately stale and re-fetched per request.
+	var tokenCalls int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodPost {
+			atomic.AddInt32(&tokenCalls, 1)
+			_, _ = w.Write([]byte(`{"access_token":"cc-token"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{
+			"data": [{"id":"m1","type":"member","attributes":{},
+			          "relationships":{"user":{"data":{"id":"u1","type":"user"}}}}],
+			"included": [],
+			"meta": {"pagination":{"cursors":{"next":""}}}
+		}`))
+	}))
+	defer server.Close()
+
+	c := NewClient(ClientOptions{
+		APIBase:      server.URL,
+		TokenURL:     server.URL + "/token",
+		ClientID:     "cid",
+		ClientSecret: "csecret",
+		CampaignIDs:  []string{"camp"},
+	})
+
+	// Concurrent lookups: refresh is single-flighted, then cached.
+	var wg sync.WaitGroup
+	for range 4 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, _ = c.ResolveByUserID(context.Background(), "u1")
+		}()
+	}
+	wg.Wait()
+	if _, err := c.ResolveByUserID(context.Background(), "u1"); err != nil {
+		t.Fatalf("ResolveByUserID: %v", err)
+	}
+
+	if got := atomic.LoadInt32(&tokenCalls); got != 1 {
+		t.Errorf("token endpoint called %d times, want 1 (cached with default TTL, single-flight refresh)", got)
 	}
 }
 

@@ -20,6 +20,22 @@ const (
 	campaignsResource  = "/campaigns"
 	defaultHTTPTimeout = 15 * time.Second
 	httpStatusOKBucket = 2 // numerator/100 for 2xx responses
+
+	// tokenExpirySafetyMargin refreshes the cached creator token slightly
+	// before Patreon's stated expiry so in-flight requests don't race it.
+	tokenExpirySafetyMargin = time.Minute
+	// defaultTokenTTL caches a token whose response omits expires_in (or
+	// reports 0) — otherwise it would be treated as immediately stale and
+	// re-fetched on every request.
+	defaultTokenTTL = time.Hour
+)
+
+// Normalized claim values surfaced to the policy engine.
+const (
+	tierFree       = "free"
+	statusActive   = "active"
+	statusDeclined = "declined"
+	statusFormer   = "former"
 )
 
 var (
@@ -55,7 +71,8 @@ type Client struct {
 	creatorToken string
 	campaignIDs  []string
 
-	mu          sync.Mutex
+	mu          sync.Mutex // guards cachedToken/tokenExpiry; never held across I/O
+	refreshMu   sync.Mutex // single-flights token refreshes
 	cachedToken string
 	tokenExpiry time.Time
 }
@@ -160,6 +177,12 @@ func (c *Client) findMember(ctx context.Context, match func(*memberRow) bool) (*
 	for _, campaignID := range campaigns {
 		member, err := c.searchCampaignMembers(ctx, token, campaignID, match)
 		if err != nil {
+			// A 404 from one campaign's member endpoint (invalid, deleted,
+			// or inaccessible to this token) must not abort the search — a
+			// backer may exist only in a later campaign.
+			if errors.Is(err, ErrMemberNotFound) {
+				continue
+			}
 			return nil, err
 		}
 		if member != nil {
@@ -221,20 +244,38 @@ func (c *Client) listCampaigns(ctx context.Context, token string) ([]string, err
 	return ids, nil
 }
 
-// creatorAccessToken returns a usable access token, refreshing via the
-// client_credentials grant when a client id/secret are configured.
-func (c *Client) creatorAccessToken(ctx context.Context) (string, error) {
+// cachedCreatorToken returns the cached client_credentials token if it is
+// still comfortably inside its expiry window.
+func (c *Client) cachedCreatorToken() (string, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.cachedToken != "" && time.Now().Before(c.tokenExpiry.Add(-tokenExpirySafetyMargin)) {
+		return c.cachedToken, true
+	}
+	return "", false
+}
 
-	if c.cachedToken != "" && time.Now().Before(c.tokenExpiry.Add(-1*time.Minute)) {
-		return c.cachedToken, nil
+// creatorAccessToken returns a usable access token, refreshing via the
+// client_credentials grant when a client id/secret are configured. Refreshes
+// are single-flighted on refreshMu so concurrent callers don't stampede the
+// token endpoint, while c.mu is only ever held for memory operations — never
+// across the HTTP round-trip.
+func (c *Client) creatorAccessToken(ctx context.Context) (string, error) {
+	if tok, ok := c.cachedCreatorToken(); ok {
+		return tok, nil
 	}
 	if c.creatorToken != "" {
 		return c.creatorToken, nil
 	}
 	if c.clientID == "" || c.clientSecret == "" {
 		return "", fmt.Errorf("%w: no creator token and no client credentials configured", ErrPatreonUnavailable)
+	}
+
+	c.refreshMu.Lock()
+	defer c.refreshMu.Unlock()
+	// Another caller may have completed the refresh while we waited.
+	if tok, ok := c.cachedCreatorToken(); ok {
+		return tok, nil
 	}
 
 	form := url.Values{}
@@ -265,9 +306,15 @@ func (c *Client) creatorAccessToken(ctx context.Context) (string, error) {
 	if err := json.Unmarshal(body, &tokResp); err != nil {
 		return "", fmt.Errorf("%w: %w", ErrPatreonUnavailable, err)
 	}
+	ttl := time.Duration(tokResp.ExpiresIn) * time.Second
+	if ttl <= 0 {
+		ttl = defaultTokenTTL
+	}
+	c.mu.Lock()
 	c.cachedToken = tokResp.AccessToken
-	c.tokenExpiry = time.Now().Add(time.Duration(tokResp.ExpiresIn) * time.Second)
-	return c.cachedToken, nil
+	c.tokenExpiry = time.Now().Add(ttl)
+	c.mu.Unlock()
+	return tokResp.AccessToken, nil
 }
 
 func (c *Client) doJSON(ctx context.Context, method, target, bearer string, out interface{}) error {
@@ -333,7 +380,7 @@ func (m *memberRow) toMembership(campaignID string) *Membership {
 		out.CampaignIDs = []string{campaignID}
 	}
 	if out.TierSlug == "" {
-		out.TierSlug = "free"
+		out.TierSlug = tierFree
 	}
 	out.Status = normalizeStatus(out.Status)
 	return out
@@ -535,7 +582,7 @@ func parseIdentity(raw json.RawMessage) (*Membership, error) {
 		UserID:   resp.Data.ID,
 		Email:    attrString(resp.Data, "email"),
 		FullName: attrString(resp.Data, "full_name"),
-		TierSlug: "free",
+		TierSlug: tierFree,
 		Status:   normalizeStatus(""),
 	}
 	bestAmount := -1
@@ -576,13 +623,13 @@ func parseIdentity(raw json.RawMessage) (*Membership, error) {
 func normalizeStatus(in string) string {
 	switch strings.ToLower(in) {
 	case "active_patron":
-		return "active"
+		return statusActive
 	case "declined_patron":
-		return "declined"
+		return statusDeclined
 	case "former_patron":
-		return "former"
+		return statusFormer
 	case "":
-		return "former"
+		return statusFormer
 	default:
 		return strings.ToLower(in)
 	}
