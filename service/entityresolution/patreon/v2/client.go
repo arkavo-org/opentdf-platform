@@ -36,6 +36,8 @@ const (
 	statusActive   = "active"
 	statusDeclined = "declined"
 	statusFormer   = "former"
+	// Raw Patreon patron_status for an active pledge.
+	patronStatusActive = "active_patron"
 )
 
 var (
@@ -646,7 +648,7 @@ func parseIdentity(raw json.RawMessage) (*Membership, error) {
 
 func normalizeStatus(in string) string {
 	switch strings.ToLower(in) {
-	case "active_patron":
+	case patronStatusActive:
 		return statusActive
 	case "declined_patron":
 		return statusDeclined

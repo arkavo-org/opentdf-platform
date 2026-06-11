@@ -25,6 +25,9 @@ server:
 services:
   authorization:
     policy_file: ./examples/config/policy.patreon.yaml
+    # Dynamic attribute values (synthetic) + ERS direct entitlements — the
+    # multi-creator SaaS path.
+    allow_direct_entitlements: true
   entityresolution:
     mode: patreon
     api_base: http://127.0.0.1:9876

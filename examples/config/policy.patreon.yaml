@@ -86,6 +86,19 @@ attributes:
       - value: declined
       - value: former
 
+  # campaign-tier gates content on a tier WITHIN a campaign, in the
+  # creator's own tier vocabulary: value format <campaign_id>_<tier_slug>
+  # (e.g. 12345678_gold-tier). Values are DYNAMIC — emitted as direct
+  # entitlements by the Patreon ERS claims-passthrough path and resolved as
+  # synthetic values (allow_direct_entitlements), so onboarding a creator
+  # needs no policy change; only this definition must exist. Content tagged
+  # "this tier and up" carries the explicit value list (anyOf) — the
+  # Creator app expands its own ladder at protect time.
+  - namespace: patreon.arkavo.com
+    name: campaign-tier
+    rule: anyOf
+    values: []
+
 subject_mappings:
   # tier mappings: each tier value matches when the Patreon ERS surfaces the
   # corresponding tier slug in the patreon.tier_slug claim.
