@@ -2,15 +2,35 @@ package patreon
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"connectrpc.com/connect"
+	"github.com/lestrrat-go/jwx/v2/jwt"
 	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/structpb"
 
 	"github.com/opentdf/platform/protocol/go/entity"
 	ersV2 "github.com/opentdf/platform/protocol/go/entityresolution/v2"
 )
+
+// buildJWT builds an UNSIGNED JWT with the given claims — entitiesFromToken
+// parses without verification (the platform authn layer verifies upstream),
+// so an unsigned token exercises the claim-handling logic directly.
+func buildJWT(t *testing.T, claims map[string]interface{}) string {
+	t.Helper()
+	tok := jwt.New()
+	for k, v := range claims {
+		if err := tok.Set(k, v); err != nil {
+			t.Fatalf("set claim %s: %v", k, err)
+		}
+	}
+	b, err := jwt.NewSerializer().Serialize(tok)
+	if err != nil {
+		t.Fatalf("serialize jwt: %v", err)
+	}
+	return string(b)
+}
 
 // forbiddenClient fails the test if any Patreon lookup is attempted — the
 // claims-passthrough path must never touch the API.
@@ -216,6 +236,81 @@ func TestPassthrough_DisabledByDefault(t *testing.T) {
 	}
 	if n := len(resp.Msg.GetEntityRepresentations()[0].GetDirectEntitlements()); n != 0 {
 		t.Errorf("trust disabled but got %d entitlements — claim was honored ungated", n)
+	}
+}
+
+func TestPassthrough_UntrustedIssuerLeaksNothingViaToken(t *testing.T) {
+	// A signature-valid token from a NON-pinned issuer must not derive the
+	// flattened patreon.* view OR direct entitlements from arkavo_patreon.
+	// Build a JWT carrying iss=evil + a forged arkavo_patreon, run it
+	// through CreateEntityChainsFromTokens (the token path), and assert the
+	// subject entity reflects no active membership and no entitlements.
+	svc := newSvc(t, Config{
+		TrustMaterializedClaims: true,
+		TrustedIssuer:           "https://identity.arkavo.net",
+		InferUnknownAsFree:      true,
+	}, freeFallbackClient{})
+
+	forged := buildJWT(t, map[string]interface{}{
+		"iss": "https://evil.example.com",
+		"sub": "attacker",
+		"arkavo_patreon": map[string]interface{}{
+			"role":            "consumer",
+			"patreon_user_id": "p-evil",
+			"memberships": []interface{}{map[string]interface{}{
+				"campaign_id":   "11111111",
+				"patron_status": "active_patron",
+				"tier_slugs":    []interface{}{"gold-tier"},
+			}},
+		},
+	})
+	resp, err := svc.CreateEntityChainsFromTokens(context.Background(),
+		connect.NewRequest(&ersV2.CreateEntityChainsFromTokensRequest{
+			Tokens: []*entity.Token{{EphemeralId: "t0", Jwt: forged}},
+		}))
+	if err != nil {
+		t.Fatalf("CreateEntityChainsFromTokens: %v", err)
+	}
+	// Find the subject entity's claims; assert no active patreon status and
+	// no preserved arkavo_patreon (so the second pass grants nothing).
+	var subject *entity.Entity
+	for _, e := range resp.Msg.GetEntityChains()[0].GetEntities() {
+		if e.GetCategory() == entity.Entity_CATEGORY_SUBJECT {
+			subject = e
+		}
+	}
+	if subject == nil {
+		t.Fatal("no subject entity")
+	}
+	var st structpb.Struct
+	if err := subject.GetClaims().UnmarshalTo(&st); err != nil {
+		t.Fatalf("unpack: %v", err)
+	}
+	m := st.AsMap()
+	if _, present := m["arkavo_patreon"]; present {
+		t.Error("untrusted issuer: arkavo_patreon was preserved for second pass")
+	}
+	patreon, _ := m["patreon"].(map[string]interface{})
+	if patreon["status"] == "active" {
+		t.Errorf("untrusted issuer leaked active status: %v", patreon)
+	}
+}
+
+func TestPassthrough_NonNumericCampaignIDSkipped(t *testing.T) {
+	res := passthroughResolution(&arkavoPatreonClaim{
+		memberships: []materializedMembership{
+			{campaignID: "good_123", status: "active_patron", tierSlugs: []string{"gold"}},
+			{campaignID: "12345678", status: "active_patron", tierSlugs: []string{"gold"}},
+		},
+	}, defaultEntitlementsNamespace)
+	for _, e := range res.entitlements {
+		if strings.Contains(e, "good_123") {
+			t.Errorf("non-numeric campaign id produced an FQN: %s", e)
+		}
+	}
+	// The valid numeric campaign still produced entitlements.
+	if len(res.entitlements) == 0 {
+		t.Error("valid campaign produced no entitlements")
 	}
 }
 

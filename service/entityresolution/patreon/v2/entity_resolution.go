@@ -130,6 +130,12 @@ func RegisterPatreonERS(cfg config.ServiceConfig, log *logger.Logger) (*EntityRe
 	applyJWTDefaults(&c.JWT)
 	log.Debug("patreon entity resolution configuration", slog.Any("config", c))
 
+	if c.TrustMaterializedClaims && c.TrustedIssuer == "" {
+		log.Warn("patreon: trust_materialized_claims is enabled with no trusted_issuer — " +
+			"any signature-valid token from any IdP the platform accepts can inject " +
+			"arkavo_patreon membership claims; set trusted_issuer to pin the materializer")
+	}
+
 	client := NewClient(ClientOptions{
 		APIBase:            c.APIBase,
 		TokenURL:           c.TokenURL,
@@ -251,6 +257,17 @@ func (s *EntityResolutionService) entitiesFromToken(ctx context.Context, jwtStri
 		})
 	}
 
+	// Honor the materialized claim only through a trusted channel. Drop it
+	// up front when trust is off or the token's verified issuer is not the
+	// pinned one, so NEITHER the flattened patreon.* view (derived just
+	// below) NOR the re-preserved claim for the second pass can come from an
+	// untrusted issuer. The iss lives inside the signature-verified token,
+	// so the pin is non-forgeable on this path.
+	trusted := s.cfg.TrustMaterializedClaims && s.issuerTrusted(claims)
+	if !trusted {
+		delete(claims, "arkavo_patreon")
+	}
+
 	res, err := s.resolveFromClaims(ctx, claims)
 	switch {
 	case errors.Is(err, ErrMemberNotFound) && s.cfg.InferUnknownAsFree:
@@ -267,17 +284,11 @@ func (s *EntityResolutionService) entitiesFromToken(ctx context.Context, jwtStri
 	wrappedClaims := map[string]interface{}{
 		"patreon": patreonStruct.AsMap(),
 	}
-	// Preserve the materialized claim verbatim so the decision flow's
-	// second pass (ResolveEntities over the chain entities) re-derives the
-	// claims-passthrough resolution — including its direct entitlements —
-	// without ever consulting Patreon. Only when trust is enabled AND the
-	// token's verified issuer matches TrustedIssuer (when configured): the
-	// iss is inside the signature-verified token, so this is a non-forgeable
-	// check on the token path.
-	if s.cfg.TrustMaterializedClaims && s.issuerTrusted(claims) {
-		if raw, ok := claims["arkavo_patreon"].(map[string]interface{}); ok {
-			wrappedClaims["arkavo_patreon"] = raw
-		}
+	// Preserve the (now trust-checked) materialized claim verbatim so the
+	// decision flow's second pass re-derives the passthrough — including its
+	// direct entitlements — without consulting Patreon.
+	if raw, ok := claims["arkavo_patreon"].(map[string]interface{}); ok {
+		wrappedClaims["arkavo_patreon"] = raw
 	}
 	subjectClaims, err := structpb.NewStruct(wrappedClaims)
 	if err != nil {

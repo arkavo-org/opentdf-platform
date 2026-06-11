@@ -2,6 +2,7 @@ package patreon
 
 import (
 	"fmt"
+	"regexp"
 )
 
 // Claims-passthrough resolution: the SaaS multi-creator path.
@@ -34,6 +35,12 @@ const (
 	// campaign ids are numeric, so the first '_' splits unambiguously.
 	campaignTierSeparator = "_"
 )
+
+// numericCampaignID guards the FQN split invariant on the campaign side:
+// campaign ids must be numeric (Patreon's are), so they never contain the
+// '_' separator. A non-conforming id is skipped rather than producing an
+// ambiguous FQN.
+var numericCampaignID = regexp.MustCompile(`^[0-9]+$`)
 
 // resolution is a resolved entity: the flattened membership view (backing
 // the legacy .patreon.* selectors) plus any directly granted attribute
@@ -112,6 +119,11 @@ func passthroughResolution(claim *arkavoPatreonClaim, namespace string) *resolut
 			mem.Status = status
 		}
 		if status != statusActive {
+			continue
+		}
+		if !numericCampaignID.MatchString(m.campaignID) {
+			// Defensive: a non-numeric campaign id would break the
+			// <campaign_id>_<tier_slug> split. Skip it entirely.
 			continue
 		}
 		mem.Status = statusActive
