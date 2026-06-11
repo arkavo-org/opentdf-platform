@@ -55,28 +55,19 @@ attributes:
       - value: discord
 
   # ---- Patreon-sourced subject attributes ----
-  # tier mirrors Patreon's pledge tiers as a hierarchy so encrypting against
-  # `supporter` admits anyone at supporter, patron, or vip.
-  - namespace: patreon.arkavo.com
-    name: tier
-    rule: hierarchy
-    grants:
-      - id: kas-arkavo
-    values:
-      - value: vip
-      - value: patron
-      - value: supporter
-      - value: free
-
-  # campaign is flat (anyOf) because a backer may support multiple unrelated
-  # creators. The value slug is a human-readable creator name; the subject
-  # mapping below pins it to the numeric Patreon campaign id the resolver
-  # emits in .patreon.campaign_ids.
+  # campaign and campaign-tier carry the per-creator gating. Both have
+  # DYNAMIC values: the Patreon ERS claims-passthrough emits them as direct
+  # entitlements (campaign/value/<id>, campaign-tier/value/<id>_<slug>) and
+  # the PDP resolves them as synthetic values (allow_direct_entitlements),
+  # so onboarding a creator needs no policy change — only these definitions.
+  # No global tier ladder: tiers are campaign-qualified in the creator's own
+  # vocabulary, so a tier at one creator never satisfies another's gate.
   - namespace: patreon.arkavo.com
     name: campaign
     rule: anyOf
-    values:
-      - value: arkavo
+    grants:
+      - id: kas-arkavo
+    values: []
 
   - namespace: patreon.arkavo.com
     name: status
@@ -100,95 +91,10 @@ attributes:
     values: []
 
 subject_mappings:
-  # tier mappings: each tier value matches when the Patreon ERS surfaces the
-  # corresponding tier slug in the patreon.tier_slug claim.
-  - attribute_value_fqn: https://patreon.arkavo.com/attr/tier/value/vip
-    inline_condition_set:
-      subject_sets:
-        - condition_groups:
-            - boolean_operator: AND
-              conditions:
-                - subject_external_selector_value: .patreon.tier_slug
-                  operator: IN
-                  subject_external_values:
-                    - vip
-                - subject_external_selector_value: .patreon.status
-                  operator: IN
-                  subject_external_values:
-                    - active
-    actions:
-      - name: read
-        standard: TRANSMIT
-
-  - attribute_value_fqn: https://patreon.arkavo.com/attr/tier/value/patron
-    inline_condition_set:
-      subject_sets:
-        - condition_groups:
-            - boolean_operator: AND
-              conditions:
-                - subject_external_selector_value: .patreon.tier_slug
-                  operator: IN
-                  subject_external_values:
-                    - patron
-                - subject_external_selector_value: .patreon.status
-                  operator: IN
-                  subject_external_values:
-                    - active
-    actions:
-      - name: read
-        standard: TRANSMIT
-
-  - attribute_value_fqn: https://patreon.arkavo.com/attr/tier/value/supporter
-    inline_condition_set:
-      subject_sets:
-        - condition_groups:
-            - boolean_operator: AND
-              conditions:
-                - subject_external_selector_value: .patreon.tier_slug
-                  operator: IN
-                  subject_external_values:
-                    - supporter
-                - subject_external_selector_value: .patreon.status
-                  operator: IN
-                  subject_external_values:
-                    - active
-    actions:
-      - name: read
-        standard: TRANSMIT
-
-  - attribute_value_fqn: https://patreon.arkavo.com/attr/tier/value/free
-    inline_condition_set:
-      subject_sets:
-        - condition_groups:
-            - boolean_operator: AND
-              conditions:
-                - subject_external_selector_value: .patreon.tier_slug
-                  operator: IN
-                  subject_external_values:
-                    - free
-                    - ""
-    actions:
-      - name: read
-        standard: TRANSMIT
-
-  # campaign: subject is entitled to a campaign value when that campaign's
-  # numeric Patreon id appears in the resolved patreon.campaign_ids array
-  # claim. The resolver emits numeric ids (e.g. "12345678"), not creator
-  # slugs — replace with your own campaign id (the same one configured under
-  # the ERS campaign_ids list).
-  - attribute_value_fqn: https://patreon.arkavo.com/attr/campaign/value/arkavo
-    inline_condition_set:
-      subject_sets:
-        - condition_groups:
-            - boolean_operator: AND
-              conditions:
-                - subject_external_selector_value: .patreon.campaign_ids[]
-                  operator: IN
-                  subject_external_values:
-                    - "12345678"
-    actions:
-      - name: read
-        standard: TRANSMIT
+  # Campaign and campaign-tier gating is NOT done with subject mappings —
+  # the Patreon ERS emits those as direct entitlements per active
+  # membership, so there are no per-creator entries here. The mappings below
+  # are creator-agnostic vocabularies (status, benefit-derived entitlements).
 
   # status: surface the Patreon membership lifecycle so policies can revoke
   # access when payments fail.

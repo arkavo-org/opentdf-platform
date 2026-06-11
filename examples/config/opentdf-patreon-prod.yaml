@@ -40,22 +40,22 @@ server:
 services:
   authorization:
     # Declarative policy snapshot — no Postgres. Namespace patreon.arkavo.com:
-    # classification/content-type/entitlement data attributes + tier/campaign/
-    # status subject attributes with Patreon-claim subject mappings.
+    # classification/content-type/entitlement + status subject mappings, plus
+    # the dynamic campaign / campaign-tier definitions the ERS fills with
+    # direct entitlements.
     policy_file: /etc/opentdf/policy.patreon.yaml
+    # Required for the dynamic campaign-tier values (synthetic) the Patreon
+    # ERS emits as direct entitlements.
+    allow_direct_entitlements: true
   entityresolution:
     mode: patreon
-    # Patreon issues one client per app; the ERS needs the creator-side
-    # credential for campaign member search. One of:
-    creator_access_token: ${PATREON_CREATOR_ACCESS_TOKEN}
-    # client_id: ${PATREON_ERS_CLIENT_ID}
-    # client_secret: ${PATREON_ERS_CLIENT_SECRET}
+    # Claims-passthrough: no Patreon API, no per-creator credentials, no
+    # campaign list. identity.arkavo.net materialized the consumer's
+    # memberships into the arkavo_patreon CWT claim; this provider trusts
+    # that claim (default off) and emits campaign-qualified entitlements.
+    trust_materialized_claims: true
+    trusted_issuer: https://identity.arkavo.net
 
-    # The production campaign id (numeric). Must match the campaign value(s)
-    # in policy.patreon.yaml subject mappings and the catalog grouping.
-    campaign_ids:
-      - "${PATREON_CAMPAIGN_ID}"
-
-    # Non-backers resolve as free tier so public/free content flows through
-    # subject mappings instead of erroring NotFound.
+    # Non-Patreon traffic resolves as a free follower so it still flows
+    # through subject mappings instead of erroring NotFound.
     infer_unknown_as_free: true

@@ -32,25 +32,6 @@ func buildJWT(t *testing.T, claims map[string]interface{}) string {
 	return string(b)
 }
 
-// forbiddenClient fails the test if any Patreon lookup is attempted — the
-// claims-passthrough path must never touch the API.
-type forbiddenClient struct{ t *testing.T }
-
-func (f *forbiddenClient) ResolveByUserID(context.Context, string) (*Membership, error) {
-	f.t.Fatal("passthrough must not call ResolveByUserID")
-	return nil, ErrMemberNotFound
-}
-
-func (f *forbiddenClient) ResolveByEmail(context.Context, string) (*Membership, error) {
-	f.t.Fatal("passthrough must not call ResolveByEmail")
-	return nil, ErrMemberNotFound
-}
-
-func (f *forbiddenClient) ResolveSelf(context.Context, string) (*Membership, error) {
-	f.t.Fatal("passthrough must not call ResolveSelf")
-	return nil, ErrMemberNotFound
-}
-
 func materializedClaims(t *testing.T) *anypb.Any {
 	t.Helper()
 	claims, err := structpb.NewStruct(map[string]interface{}{
@@ -88,7 +69,7 @@ func materializedClaims(t *testing.T) *anypb.Any {
 }
 
 func TestPassthrough_EmitsCampaignQualifiedEntitlements(t *testing.T) {
-	svc := newSvc(t, Config{TrustMaterializedClaims: true}, &forbiddenClient{t: t})
+	svc := newSvc(t, Config{TrustMaterializedClaims: true})
 
 	req := connect.NewRequest(&ersV2.ResolveEntitiesRequest{
 		Entities: []*entity.Entity{{
@@ -152,7 +133,7 @@ func TestPassthrough_EmitsCampaignQualifiedEntitlements(t *testing.T) {
 }
 
 func TestPassthrough_AllFormerMembershipsGrantNothing(t *testing.T) {
-	svc := newSvc(t, Config{TrustMaterializedClaims: true}, &forbiddenClient{t: t})
+	svc := newSvc(t, Config{TrustMaterializedClaims: true})
 	claims, _ := structpb.NewStruct(map[string]interface{}{
 		"arkavo_patreon": map[string]interface{}{
 			"role":            "consumer",
@@ -223,7 +204,7 @@ func TestPassthrough_SlugifiesTierToEnforceSplitInvariant(t *testing.T) {
 }
 
 func TestPassthrough_DisabledByDefault(t *testing.T) {
-	svc := newSvc(t, Config{InferUnknownAsFree: true}, freeFallbackClient{})
+	svc := newSvc(t, Config{InferUnknownAsFree: true})
 	req := connect.NewRequest(&ersV2.ResolveEntitiesRequest{
 		Entities: []*entity.Entity{{
 			EphemeralId: "e0",
@@ -249,7 +230,7 @@ func TestPassthrough_UntrustedIssuerLeaksNothingViaToken(t *testing.T) {
 		TrustMaterializedClaims: true,
 		TrustedIssuer:           "https://identity.arkavo.net",
 		InferUnknownAsFree:      true,
-	}, freeFallbackClient{})
+	})
 
 	forged := buildJWT(t, map[string]interface{}{
 		"iss": "https://evil.example.com",
@@ -345,19 +326,4 @@ func TestPassthrough_MalformedActiveCampaignDoesNotFlipStatus(t *testing.T) {
 			t.Errorf("malformed campaign leaked entitlement: %s", e)
 		}
 	}
-}
-
-// freeFallbackClient always misses, exercising the InferUnknownAsFree path.
-type freeFallbackClient struct{}
-
-func (freeFallbackClient) ResolveByUserID(context.Context, string) (*Membership, error) {
-	return nil, ErrMemberNotFound
-}
-
-func (freeFallbackClient) ResolveByEmail(context.Context, string) (*Membership, error) {
-	return nil, ErrMemberNotFound
-}
-
-func (freeFallbackClient) ResolveSelf(context.Context, string) (*Membership, error) {
-	return nil, ErrMemberNotFound
 }

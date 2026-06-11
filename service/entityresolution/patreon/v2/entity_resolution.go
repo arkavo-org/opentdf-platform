@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"strconv"
-	"strings"
 
 	"connectrpc.com/connect"
 	"github.com/go-viper/mapstructure/v2"
@@ -33,19 +32,13 @@ const (
 
 // Config configures the Patreon entity resolution provider.
 type Config struct {
-	APIBase            string   `mapstructure:"api_base" json:"api_base"`
-	TokenURL           string   `mapstructure:"token_url" json:"token_url"`
-	ClientID           string   `mapstructure:"client_id" json:"client_id"`
-	ClientSecret       string   `mapstructure:"client_secret" json:"client_secret"`
-	CreatorAccessToken string   `mapstructure:"creator_access_token" json:"creator_access_token"`
-	CampaignIDs        []string `mapstructure:"campaign_ids" json:"campaign_ids"`
 	// EntitlementsNamespace is the namespace for direct-entitlement FQNs
 	// emitted by the claims-passthrough path (default patreon.arkavo.com).
 	EntitlementsNamespace string    `mapstructure:"entitlements_namespace" json:"entitlements_namespace"`
 	JWT                   JWTConfig `mapstructure:"jwt" json:"jwt"`
 	// InferUnknownAsFree returns a free-tier membership instead of an error
-	// when the subject can't be matched in Patreon. Useful so unauthenticated
-	// or non-Patreon traffic still flows through subject mappings.
+	// when a subject carries no usable Patreon claim, so unauthenticated or
+	// non-Patreon traffic still flows through subject mappings.
 	InferUnknownAsFree bool `mapstructure:"infer_unknown_as_free" json:"infer_unknown_as_free"`
 	// TrustMaterializedClaims enables the claims-passthrough path: when an
 	// entity's claims already carry the arkavo_patreon materialization, emit
@@ -84,40 +77,19 @@ type JWTConfig struct {
 // LogValue redacts secrets from log output.
 func (c Config) LogValue() slog.Value {
 	return slog.GroupValue(
-		slog.String("api_base", c.APIBase),
-		slog.String("token_url", c.TokenURL),
-		slog.String("client_id", c.ClientID),
-		slog.String("client_secret", redact(c.ClientSecret)),
-		slog.String("creator_access_token", redact(c.CreatorAccessToken)),
-		slog.Any("campaign_ids", c.CampaignIDs),
+		slog.String("entitlements_namespace", c.EntitlementsNamespace),
 		slog.Bool("infer_unknown_as_free", c.InferUnknownAsFree),
 		slog.Bool("trust_materialized_claims", c.TrustMaterializedClaims),
 		slog.String("trusted_issuer", c.TrustedIssuer),
 	)
 }
 
-func redact(s string) string {
-	if s == "" {
-		return ""
-	}
-	return "[REDACTED]"
-}
-
 // EntityResolutionService is the v2 Patreon entity resolver.
 type EntityResolutionService struct {
 	entityresolutionV2.UnimplementedEntityResolutionServiceServer
 	cfg    Config
-	client MembershipAPI
 	logger *logger.Logger
 	trace.Tracer
-}
-
-// MembershipAPI is the subset of *Client the resolver depends on (extracted
-// for unit testing).
-type MembershipAPI interface {
-	ResolveByUserID(ctx context.Context, userID string) (*Membership, error)
-	ResolveByEmail(ctx context.Context, email string) (*Membership, error)
-	ResolveSelf(ctx context.Context, userAccessToken string) (*Membership, error)
 }
 
 // RegisterPatreonERS adapts the Patreon ERS to the platform serviceregistry.
@@ -136,22 +108,13 @@ func RegisterPatreonERS(cfg config.ServiceConfig, log *logger.Logger) (*EntityRe
 			"arkavo_patreon membership claims; set trusted_issuer to pin the materializer")
 	}
 
-	client := NewClient(ClientOptions{
-		APIBase:            c.APIBase,
-		TokenURL:           c.TokenURL,
-		ClientID:           c.ClientID,
-		ClientSecret:       c.ClientSecret,
-		CreatorAccessToken: c.CreatorAccessToken,
-		CampaignIDs:        c.CampaignIDs,
-		Warn:               log.WarnContext,
-	})
-	return &EntityResolutionService{cfg: c, client: client, logger: log}, nil
+	return &EntityResolutionService{cfg: c, logger: log}, nil
 }
 
-// NewERSWithClient is the test-friendly constructor.
-func NewERSWithClient(cfg Config, client MembershipAPI, log *logger.Logger) *EntityResolutionService {
+// NewERS is the test-friendly constructor.
+func NewERS(cfg Config, log *logger.Logger) *EntityResolutionService {
 	applyJWTDefaults(&cfg.JWT)
-	return &EntityResolutionService{cfg: cfg, client: client, logger: log}
+	return &EntityResolutionService{cfg: cfg, logger: log}
 }
 
 func applyJWTDefaults(j *JWTConfig) {
@@ -313,62 +276,34 @@ func (s *EntityResolutionService) entitiesFromToken(ctx context.Context, jwtStri
 	return out, nil
 }
 
-// resolveEntity routes a single ResolveEntities request entry through the
-// best lookup strategy for its type.
+// resolveEntity resolves a single entity. Only a claims entity can carry the
+// materialized arkavo_patreon membership this provider consumes; other entity
+// types (username/email/client id) have no membership source now that live
+// Patreon lookups are gone, so they resolve as not-found (→ free when
+// InferUnknownAsFree).
 func (s *EntityResolutionService) resolveEntity(ctx context.Context, e *entity.Entity) (*resolution, error) {
-	switch et := e.GetEntityType().(type) {
-	case *entity.Entity_UserName:
-		return liveResolution(s.client.ResolveByUserID(ctx, et.UserName))
-	case *entity.Entity_EmailAddress:
-		return liveResolution(s.client.ResolveByEmail(ctx, et.EmailAddress))
-	case *entity.Entity_ClientId:
-		// Treat client id as a Patreon user id (callers can override claims).
-		return liveResolution(s.client.ResolveByUserID(ctx, et.ClientId))
-	case *entity.Entity_Claims:
+	if claimsEntity, ok := e.GetEntityType().(*entity.Entity_Claims); ok {
 		var asStruct structpb.Struct
-		if err := e.GetClaims().UnmarshalTo(&asStruct); err != nil {
+		if err := claimsEntity.Claims.UnmarshalTo(&asStruct); err != nil {
 			return nil, fmt.Errorf("unpack claims: %w", err)
 		}
 		return s.resolveFromClaims(ctx, asStruct.AsMap())
-	default:
-		return nil, fmt.Errorf("%w: unsupported entity type %T", ErrMemberNotFound, et)
 	}
+	return nil, ErrMemberNotFound
 }
 
-// liveResolution wraps a live Patreon lookup (no direct entitlements — those
-// require the materialized multi-campaign claim).
-func liveResolution(mem *Membership, err error) (*resolution, error) {
-	if err != nil {
-		return nil, err
-	}
-	return &resolution{mem: mem}, nil
-}
-
-func (s *EntityResolutionService) resolveFromClaims(ctx context.Context, claims map[string]interface{}) (*resolution, error) {
-	// Claims-passthrough (SaaS multi-creator path): pre-materialized
-	// memberships from identity.arkavo.net need no Patreon access and emit
-	// campaign-qualified direct entitlements. Gated on TrustMaterializedClaims
-	// (default off) — the claim is authoritative, so it is only honored when
-	// the operator has asserted the trust boundary. See passthrough.go.
+// resolveFromClaims is the single resolution path: the claims-passthrough.
+// Pre-materialized memberships from identity.arkavo.net (in arkavo_patreon)
+// emit campaign-qualified direct entitlements with no Patreon access. Gated
+// on TrustMaterializedClaims (default off) — the claim is authoritative, so
+// it is only honored when the operator has asserted the trust boundary.
+// Without a usable claim the subject is not-found (→ free when
+// InferUnknownAsFree). See passthrough.go.
+func (s *EntityResolutionService) resolveFromClaims(_ context.Context, claims map[string]interface{}) (*resolution, error) {
 	if s.cfg.TrustMaterializedClaims {
 		if claim := parseArkavoPatreon(claims); claim != nil {
 			return passthroughResolution(claim, s.cfg.entitlementsNamespace()), nil
 		}
-	}
-	if tok, ok := claims[s.cfg.JWT.PatreonTokenClaim].(string); ok && tok != "" {
-		return liveResolution(s.client.ResolveSelf(ctx, tok))
-	}
-	if uid, ok := claims[s.cfg.JWT.PatreonUserIDClaim].(string); ok && uid != "" {
-		return liveResolution(s.client.ResolveByUserID(ctx, uid))
-	}
-	if email, ok := claims["email"].(string); ok && email != "" {
-		return liveResolution(s.client.ResolveByEmail(ctx, email))
-	}
-	if username, ok := claims[s.cfg.JWT.UsernameClaim].(string); ok && username != "" {
-		if strings.Contains(username, "@") {
-			return liveResolution(s.client.ResolveByEmail(ctx, username))
-		}
-		return liveResolution(s.client.ResolveByUserID(ctx, username))
 	}
 	return nil, ErrMemberNotFound
 }
@@ -451,8 +386,6 @@ func connectCodeFor(err error) connect.Code {
 	switch {
 	case errors.Is(err, ErrMemberNotFound):
 		return connect.CodeNotFound
-	case errors.Is(err, ErrPatreonUnavailable):
-		return connect.CodeUnavailable
 	default:
 		return connect.CodeInternal
 	}
