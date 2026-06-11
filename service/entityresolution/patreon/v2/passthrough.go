@@ -115,17 +115,23 @@ func passthroughResolution(claim *arkavoPatreonClaim, namespace string) *resolut
 	var entitlements []string
 	for _, m := range claim.memberships {
 		status := normalizeStatus(m.status)
-		if mem.Status != statusActive {
-			mem.Status = status
-		}
 		if status != statusActive {
+			// Surface a non-active status in the flattened view only while
+			// no active+valid campaign has been seen.
+			if mem.Status != statusActive {
+				mem.Status = status
+			}
 			continue
 		}
 		if !numericCampaignID.MatchString(m.campaignID) {
-			// Defensive: a non-numeric campaign id would break the
-			// <campaign_id>_<tier_slug> split. Skip it entirely.
+			// Active but malformed campaign id would break the
+			// <campaign_id>_<tier_slug> split. Skip it AND don't let it
+			// alone promote the flattened view to active — status and the
+			// entitlement set must stay consistent.
 			continue
 		}
+		// Active and valid: this campaign justifies both the active status
+		// and its entitlements.
 		mem.Status = statusActive
 		mem.CampaignIDs = append(mem.CampaignIDs, m.campaignID)
 		entitlements = append(entitlements, fmt.Sprintf(

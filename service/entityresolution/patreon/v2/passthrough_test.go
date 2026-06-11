@@ -314,6 +314,39 @@ func TestPassthrough_NonNumericCampaignIDSkipped(t *testing.T) {
 	}
 }
 
+func TestPassthrough_MalformedActiveCampaignDoesNotFlipStatus(t *testing.T) {
+	// An ACTIVE membership whose only campaign is malformed must not leave
+	// the flattened view reporting status=active with zero entitlements.
+	res := passthroughResolution(&arkavoPatreonClaim{
+		memberships: []materializedMembership{
+			{campaignID: "bad_id", status: "active_patron", tierSlugs: []string{"gold"}},
+		},
+	}, defaultEntitlementsNamespace)
+	if len(res.entitlements) != 0 {
+		t.Errorf("malformed campaign emitted entitlements: %v", res.entitlements)
+	}
+	if res.mem.Status == statusActive {
+		t.Errorf("flattened status is active but no campaign backs it: %v", res.mem)
+	}
+
+	// A valid active campaign alongside a malformed one: status active,
+	// only the valid campaign's entitlements.
+	res = passthroughResolution(&arkavoPatreonClaim{
+		memberships: []materializedMembership{
+			{campaignID: "bad_id", status: "active_patron", tierSlugs: []string{"gold"}},
+			{campaignID: "99", status: "active_patron", tierSlugs: []string{"silver"}},
+		},
+	}, defaultEntitlementsNamespace)
+	if res.mem.Status != statusActive {
+		t.Errorf("valid active campaign should set status active: %v", res.mem)
+	}
+	for _, e := range res.entitlements {
+		if strings.Contains(e, "bad_id") {
+			t.Errorf("malformed campaign leaked entitlement: %s", e)
+		}
+	}
+}
+
 // freeFallbackClient always misses, exercising the InferUnknownAsFree path.
 type freeFallbackClient struct{}
 
