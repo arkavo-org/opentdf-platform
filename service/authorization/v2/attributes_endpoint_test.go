@@ -8,7 +8,6 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/opentdf/platform/service/logger"
 	"github.com/opentdf/platform/service/policy/filestore"
 )
 
@@ -17,11 +16,11 @@ func attributesTestServer(t *testing.T) *httptest.Server {
 	store, err := filestore.NewStoreFromFile("../../../examples/config/policy.patreon.yaml")
 	require.NoError(t, err, "example policy snapshot must load")
 
-	log, err := logger.NewLogger(logger.Config{Level: "error", Output: "stdout", Type: "json"})
+	endpoint, err := NewAttributesEndpoint(store)
 	require.NoError(t, err)
 
 	mux := http.NewServeMux()
-	NewAttributesEndpoint(store, log).Mount(mux)
+	endpoint.Mount(mux)
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	return srv

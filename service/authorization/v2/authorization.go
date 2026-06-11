@@ -104,7 +104,11 @@ func NewRegistration() *serviceregistry.Service[authzV2Connect.AuthorizationServ
 					// Public attribute discovery from the same snapshot the
 					// PDP evaluates — attribute FQNs dereference here (see
 					// attributes_endpoint.go). Compose with the RAR handler.
-					attrEndpoint := NewAttributesEndpoint(store, l)
+					attrEndpoint, err := NewAttributesEndpoint(store)
+					if err != nil {
+						l.Error("failed to build attributes endpoint", slog.Any("error", err))
+						panic(fmt.Errorf("failed to build attributes endpoint: %w", err))
+					}
 					return as, func(ctx context.Context, mux *http.ServeMux) error {
 						attrEndpoint.Mount(mux)
 						if rarHandler != nil {
