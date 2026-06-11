@@ -1,0 +1,61 @@
+# Production config draft: OpenTDF platform upstream behind platform.arkavo.net
+# (arks proxies /kas.AccessService/*, /kas/v2/*, /.well-known/opentdf-configuration,
+# and — with AUTHZ_PROXY=on — /authorization.v2.AuthorizationService/*).
+#
+# Identity: identity.arkavo.net (authnz-rs, CWT issuer). Verified live:
+# discovery advertises access_token_format: application/cwt + cose_keys_uri,
+# which this build's CWT verifier consumes (unprefixed names, post-#33).
+#
+# Fill in: PATREON_* env (real campaign + creator credentials), bind/port,
+# TLS/network specifics for your infra.
+
+mode: core,entityresolution,-policy,-kas
+
+logger:
+  level: info
+  type: json
+
+server:
+  port: 8080
+  auth:
+    enabled: true
+    enforceDPoP: false
+    issuer: https://identity.arkavo.net
+    # Requires authnz-rs#39 (OIDC_PLATFORM_AUDIENCE=https://platform.arkavo.net
+    # on identity) so app tokens AND the catalog node's service token both
+    # carry this audience.
+    audience: https://platform.arkavo.net
+    policy:
+      # authnz CWTs carry the PEP client identity in arkavo_account_id
+      # ("client:<id>" for client_credentials) — a plain string claim.
+      client_id_claim: arkavo_account_id
+      # authnz CWTs carry roles in arkavo_roles (client_credentials mints
+      # ["service-account"]). NOTE the key is groups_claim, not claim.
+      groups_claim: arkavo_roles
+      # Map authnz role names onto platform roles. service-account →
+      # role:standard grants exactly the GetDecision* + Rewrap routes.
+      map:
+        standard: service-account
+
+services:
+  authorization:
+    # Declarative policy snapshot — no Postgres. Namespace patreon.arkavo.com:
+    # classification/content-type/entitlement data attributes + tier/campaign/
+    # status subject attributes with Patreon-claim subject mappings.
+    policy_file: /etc/opentdf/policy.patreon.yaml
+  entityresolution:
+    mode: patreon
+    # Patreon issues one client per app; the ERS needs the creator-side
+    # credential for campaign member search. One of:
+    creator_access_token: ${PATREON_CREATOR_ACCESS_TOKEN}
+    # client_id: ${PATREON_ERS_CLIENT_ID}
+    # client_secret: ${PATREON_ERS_CLIENT_SECRET}
+
+    # The production campaign id (numeric). Must match the campaign value(s)
+    # in policy.patreon.yaml subject mappings and the catalog grouping.
+    campaign_ids:
+      - "${PATREON_CAMPAIGN_ID}"
+
+    # Non-backers resolve as free tier so public/free content flows through
+    # subject mappings instead of erroring NotFound.
+    infer_unknown_as_free: true
