@@ -33,17 +33,44 @@ const (
 
 // Config configures the Patreon entity resolution provider.
 type Config struct {
-	APIBase            string    `mapstructure:"api_base" json:"api_base"`
-	TokenURL           string    `mapstructure:"token_url" json:"token_url"`
-	ClientID           string    `mapstructure:"client_id" json:"client_id"`
-	ClientSecret       string    `mapstructure:"client_secret" json:"client_secret"`
-	CreatorAccessToken string    `mapstructure:"creator_access_token" json:"creator_access_token"`
-	CampaignIDs        []string  `mapstructure:"campaign_ids" json:"campaign_ids"`
-	JWT                JWTConfig `mapstructure:"jwt" json:"jwt"`
+	APIBase            string   `mapstructure:"api_base" json:"api_base"`
+	TokenURL           string   `mapstructure:"token_url" json:"token_url"`
+	ClientID           string   `mapstructure:"client_id" json:"client_id"`
+	ClientSecret       string   `mapstructure:"client_secret" json:"client_secret"`
+	CreatorAccessToken string   `mapstructure:"creator_access_token" json:"creator_access_token"`
+	CampaignIDs        []string `mapstructure:"campaign_ids" json:"campaign_ids"`
+	// EntitlementsNamespace is the namespace for direct-entitlement FQNs
+	// emitted by the claims-passthrough path (default patreon.arkavo.com).
+	EntitlementsNamespace string    `mapstructure:"entitlements_namespace" json:"entitlements_namespace"`
+	JWT                   JWTConfig `mapstructure:"jwt" json:"jwt"`
 	// InferUnknownAsFree returns a free-tier membership instead of an error
 	// when the subject can't be matched in Patreon. Useful so unauthenticated
 	// or non-Patreon traffic still flows through subject mappings.
 	InferUnknownAsFree bool `mapstructure:"infer_unknown_as_free" json:"infer_unknown_as_free"`
+	// TrustMaterializedClaims enables the claims-passthrough path: when an
+	// entity's claims already carry the arkavo_patreon materialization, emit
+	// campaign-qualified direct entitlements from it WITHOUT calling Patreon.
+	//
+	// SECURITY — this is the real trust control, default false. The
+	// materialized claim is honored as authoritative, so it must only ever
+	// reach this provider through a cryptographically trusted channel:
+	//   - the platform's own decision flow, where the subject token's
+	//     signature was verified by the authn interceptor before the ERS
+	//     re-parses it (and entitiesFromToken additionally pins the token's
+	//     issuer to TrustedIssuer below); or
+	//   - an entityChain submitted by a PEP that authenticated with a
+	//     role:standard credential and is trusted to have verified the
+	//     subject token itself (e.g. the catalog node, which verifies the
+	//     consumer CWT before forwarding arkavo_patreon).
+	// Leave false unless every decision caller satisfies one of those.
+	TrustMaterializedClaims bool `mapstructure:"trust_materialized_claims" json:"trust_materialized_claims"`
+	// TrustedIssuer, when set, is the issuer the materialized claim must
+	// have been minted by. On the verified-token path the iss claim is
+	// inside the signed token (non-forgeable), so this rejects a claim
+	// carried by a token from any other IdP. Empty = no issuer check
+	// (entityChain/claims path has no token iss to check; relies on the
+	// PEP trust boundary above).
+	TrustedIssuer string `mapstructure:"trusted_issuer" json:"trusted_issuer"`
 }
 
 // JWTConfig customizes which JWT claims the provider reads.
@@ -64,6 +91,8 @@ func (c Config) LogValue() slog.Value {
 		slog.String("creator_access_token", redact(c.CreatorAccessToken)),
 		slog.Any("campaign_ids", c.CampaignIDs),
 		slog.Bool("infer_unknown_as_free", c.InferUnknownAsFree),
+		slog.Bool("trust_materialized_claims", c.TrustMaterializedClaims),
+		slog.String("trusted_issuer", c.TrustedIssuer),
 	)
 }
 
@@ -100,6 +129,12 @@ func RegisterPatreonERS(cfg config.ServiceConfig, log *logger.Logger) (*EntityRe
 	}
 	applyJWTDefaults(&c.JWT)
 	log.Debug("patreon entity resolution configuration", slog.Any("config", c))
+
+	if c.TrustMaterializedClaims && c.TrustedIssuer == "" {
+		log.Warn("patreon: trust_materialized_claims is enabled with no trusted_issuer — " +
+			"any signature-valid token from any IdP the platform accepts can inject " +
+			"arkavo_patreon membership claims; set trusted_issuer to pin the materializer")
+	}
 
 	client := NewClient(ClientOptions{
 		APIBase:            c.APIBase,
@@ -153,10 +188,10 @@ func (s *EntityResolutionService) ResolveEntities(
 			originalID = ent.EntityIDPrefix + strconv.Itoa(idx)
 		}
 
-		mem, err := s.resolveEntity(ctx, ident)
+		res, err := s.resolveEntity(ctx, ident)
 		if err != nil {
 			if errors.Is(err, ErrMemberNotFound) && s.cfg.InferUnknownAsFree {
-				mem = freeMembership(ident)
+				res = &resolution{mem: freeMembership(ident)}
 			} else {
 				s.logger.WarnContext(ctx, "patreon resolve failed",
 					slog.String("entity_id", originalID),
@@ -165,7 +200,7 @@ func (s *EntityResolutionService) ResolveEntities(
 			}
 		}
 
-		repr, err := membershipToRepresentation(originalID, mem)
+		repr, err := resolutionToRepresentation(originalID, res)
 		if err != nil {
 			return nil, connect.NewError(connect.CodeInternal, err)
 		}
@@ -222,21 +257,40 @@ func (s *EntityResolutionService) entitiesFromToken(ctx context.Context, jwtStri
 		})
 	}
 
-	mem, err := s.resolveFromClaims(ctx, claims)
+	// Honor the materialized claim only through a trusted channel. Drop it
+	// up front when trust is off or the token's verified issuer is not the
+	// pinned one, so NEITHER the flattened patreon.* view (derived just
+	// below) NOR the re-preserved claim for the second pass can come from an
+	// untrusted issuer. The iss lives inside the signature-verified token,
+	// so the pin is non-forgeable on this path.
+	trusted := s.cfg.TrustMaterializedClaims && s.issuerTrusted(claims)
+	if !trusted {
+		delete(claims, "arkavo_patreon")
+	}
+
+	res, err := s.resolveFromClaims(ctx, claims)
 	switch {
 	case errors.Is(err, ErrMemberNotFound) && s.cfg.InferUnknownAsFree:
-		mem = &Membership{TierSlug: tierFree, Status: statusFormer}
+		res = &resolution{mem: &Membership{TierSlug: tierFree, Status: statusFormer}}
 	case err != nil:
 		return nil, err
 	}
+	mem := res.mem
 
 	patreonStruct, err := membershipStruct(mem)
 	if err != nil {
 		return nil, err
 	}
-	subjectClaims, err := structpb.NewStruct(map[string]interface{}{
+	wrappedClaims := map[string]interface{}{
 		"patreon": patreonStruct.AsMap(),
-	})
+	}
+	// Preserve the (now trust-checked) materialized claim verbatim so the
+	// decision flow's second pass re-derives the passthrough — including its
+	// direct entitlements — without consulting Patreon.
+	if raw, ok := claims["arkavo_patreon"].(map[string]interface{}); ok {
+		wrappedClaims["arkavo_patreon"] = raw
+	}
+	subjectClaims, err := structpb.NewStruct(wrappedClaims)
 	if err != nil {
 		return nil, err
 	}
@@ -261,15 +315,15 @@ func (s *EntityResolutionService) entitiesFromToken(ctx context.Context, jwtStri
 
 // resolveEntity routes a single ResolveEntities request entry through the
 // best lookup strategy for its type.
-func (s *EntityResolutionService) resolveEntity(ctx context.Context, e *entity.Entity) (*Membership, error) {
+func (s *EntityResolutionService) resolveEntity(ctx context.Context, e *entity.Entity) (*resolution, error) {
 	switch et := e.GetEntityType().(type) {
 	case *entity.Entity_UserName:
-		return s.client.ResolveByUserID(ctx, et.UserName)
+		return liveResolution(s.client.ResolveByUserID(ctx, et.UserName))
 	case *entity.Entity_EmailAddress:
-		return s.client.ResolveByEmail(ctx, et.EmailAddress)
+		return liveResolution(s.client.ResolveByEmail(ctx, et.EmailAddress))
 	case *entity.Entity_ClientId:
 		// Treat client id as a Patreon user id (callers can override claims).
-		return s.client.ResolveByUserID(ctx, et.ClientId)
+		return liveResolution(s.client.ResolveByUserID(ctx, et.ClientId))
 	case *entity.Entity_Claims:
 		var asStruct structpb.Struct
 		if err := e.GetClaims().UnmarshalTo(&asStruct); err != nil {
@@ -281,21 +335,40 @@ func (s *EntityResolutionService) resolveEntity(ctx context.Context, e *entity.E
 	}
 }
 
-func (s *EntityResolutionService) resolveFromClaims(ctx context.Context, claims map[string]interface{}) (*Membership, error) {
+// liveResolution wraps a live Patreon lookup (no direct entitlements — those
+// require the materialized multi-campaign claim).
+func liveResolution(mem *Membership, err error) (*resolution, error) {
+	if err != nil {
+		return nil, err
+	}
+	return &resolution{mem: mem}, nil
+}
+
+func (s *EntityResolutionService) resolveFromClaims(ctx context.Context, claims map[string]interface{}) (*resolution, error) {
+	// Claims-passthrough (SaaS multi-creator path): pre-materialized
+	// memberships from identity.arkavo.net need no Patreon access and emit
+	// campaign-qualified direct entitlements. Gated on TrustMaterializedClaims
+	// (default off) — the claim is authoritative, so it is only honored when
+	// the operator has asserted the trust boundary. See passthrough.go.
+	if s.cfg.TrustMaterializedClaims {
+		if claim := parseArkavoPatreon(claims); claim != nil {
+			return passthroughResolution(claim, s.cfg.entitlementsNamespace()), nil
+		}
+	}
 	if tok, ok := claims[s.cfg.JWT.PatreonTokenClaim].(string); ok && tok != "" {
-		return s.client.ResolveSelf(ctx, tok)
+		return liveResolution(s.client.ResolveSelf(ctx, tok))
 	}
 	if uid, ok := claims[s.cfg.JWT.PatreonUserIDClaim].(string); ok && uid != "" {
-		return s.client.ResolveByUserID(ctx, uid)
+		return liveResolution(s.client.ResolveByUserID(ctx, uid))
 	}
 	if email, ok := claims["email"].(string); ok && email != "" {
-		return s.client.ResolveByEmail(ctx, email)
+		return liveResolution(s.client.ResolveByEmail(ctx, email))
 	}
 	if username, ok := claims[s.cfg.JWT.UsernameClaim].(string); ok && username != "" {
 		if strings.Contains(username, "@") {
-			return s.client.ResolveByEmail(ctx, username)
+			return liveResolution(s.client.ResolveByEmail(ctx, username))
 		}
-		return s.client.ResolveByUserID(ctx, username)
+		return liveResolution(s.client.ResolveByUserID(ctx, username))
 	}
 	return nil, ErrMemberNotFound
 }
@@ -333,7 +406,8 @@ func membershipStruct(mem *Membership) (*structpb.Struct, error) {
 	return structpb.NewStruct(m)
 }
 
-func membershipToRepresentation(originalID string, mem *Membership) (*entityresolutionV2.EntityRepresentation, error) {
+func resolutionToRepresentation(originalID string, res *resolution) (*entityresolutionV2.EntityRepresentation, error) {
+	mem := res.mem
 	patreonStruct, err := membershipStruct(mem)
 	if err != nil {
 		return nil, err
@@ -346,9 +420,22 @@ func membershipToRepresentation(originalID string, mem *Membership) (*entityreso
 	if err != nil {
 		return nil, err
 	}
+	// Campaign-qualified direct entitlements from the claims-passthrough
+	// path. The PDP merges these with subject-mapping entitlements when
+	// allow_direct_entitlements is enabled; with synthetic-value support,
+	// only the attribute definitions need to exist in policy — values are
+	// fully dynamic, so onboarding a creator requires zero policy changes.
+	var direct []*entityresolutionV2.DirectEntitlement
+	for _, fqn := range res.entitlements {
+		direct = append(direct, &entityresolutionV2.DirectEntitlement{
+			AttributeValueFqn: fqn,
+			Actions:           []string{"read"},
+		})
+	}
 	return &entityresolutionV2.EntityRepresentation{
-		OriginalId:      originalID,
-		AdditionalProps: []*structpb.Struct{wrapped},
+		OriginalId:         originalID,
+		AdditionalProps:    []*structpb.Struct{wrapped},
+		DirectEntitlements: direct,
 	}, nil
 }
 
