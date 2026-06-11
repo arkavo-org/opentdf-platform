@@ -2,13 +2,6 @@ package patreon
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
-	"net/http"
-	"net/http/httptest"
-	"strings"
-	"sync"
-	"sync/atomic"
 	"testing"
 
 	"connectrpc.com/connect"
@@ -18,38 +11,11 @@ import (
 	"go.opentelemetry.io/otel/trace/noop"
 )
 
-func newSvc(t *testing.T, cfg Config, client MembershipAPI) *EntityResolutionService {
+func newSvc(t *testing.T, cfg Config) *EntityResolutionService {
 	t.Helper()
-	svc := NewERSWithClient(cfg, client, testLogger(t))
+	svc := NewERS(cfg, testLogger(t))
 	svc.Tracer = noop.NewTracerProvider().Tracer("test")
 	return svc
-}
-
-type stubClient struct {
-	byID    map[string]*Membership
-	byEmail map[string]*Membership
-	self    map[string]*Membership
-}
-
-func (s *stubClient) ResolveByUserID(_ context.Context, id string) (*Membership, error) {
-	if m, ok := s.byID[id]; ok {
-		return m, nil
-	}
-	return nil, ErrMemberNotFound
-}
-
-func (s *stubClient) ResolveByEmail(_ context.Context, email string) (*Membership, error) {
-	if m, ok := s.byEmail[strings.ToLower(email)]; ok {
-		return m, nil
-	}
-	return nil, ErrMemberNotFound
-}
-
-func (s *stubClient) ResolveSelf(_ context.Context, tok string) (*Membership, error) {
-	if m, ok := s.self[tok]; ok {
-		return m, nil
-	}
-	return nil, ErrMemberNotFound
 }
 
 func testLogger(t *testing.T) *logger.Logger {
@@ -61,50 +27,10 @@ func testLogger(t *testing.T) *logger.Logger {
 	return l
 }
 
-func TestResolveEntities_ByUserID(t *testing.T) {
-	stub := &stubClient{byID: map[string]*Membership{
-		"u123": {
-			UserID: "u123", Email: "a@b.test", TierSlug: "patron",
-			TierAmount: 1000, Status: "active",
-			CampaignIDs: []string{"arkavo"},
-			Benefits:    []string{"early-access", "exclusive-content"},
-		},
-	}}
-	svc := newSvc(t, Config{}, stub)
-
-	req := connect.NewRequest(&ersV2.ResolveEntitiesRequest{
-		Entities: []*entity.Entity{{
-			EphemeralId: "e0",
-			EntityType:  &entity.Entity_UserName{UserName: "u123"},
-		}},
-	})
-	resp, err := svc.ResolveEntities(context.Background(), req)
-	if err != nil {
-		t.Fatalf("ResolveEntities: %v", err)
-	}
-	reprs := resp.Msg.GetEntityRepresentations()
-	if len(reprs) != 1 {
-		t.Fatalf("want 1 representation, got %d", len(reprs))
-	}
-	props := reprs[0].GetAdditionalProps()
-	if len(props) != 1 {
-		t.Fatalf("want 1 props struct, got %d", len(props))
-	}
-	got := props[0].AsMap()
-	patreon, ok := got["patreon"].(map[string]interface{})
-	if !ok {
-		t.Fatalf("expected patreon map, got %T", got["patreon"])
-	}
-	if patreon["tier_slug"] != "patron" {
-		t.Errorf("tier_slug = %v, want patron", patreon["tier_slug"])
-	}
-	if patreon["status"] != "active" {
-		t.Errorf("status = %v, want active", patreon["status"])
-	}
-}
-
+// A subject with no usable Patreon claim resolves to a free follower when
+// InferUnknownAsFree is set — the only non-passthrough resolution behavior.
 func TestResolveEntities_UnknownInfersFree(t *testing.T) {
-	svc := newSvc(t, Config{InferUnknownAsFree: true}, &stubClient{})
+	svc := newSvc(t, Config{InferUnknownAsFree: true})
 	req := connect.NewRequest(&ersV2.ResolveEntitiesRequest{
 		Entities: []*entity.Entity{{
 			EphemeralId: "e0",
@@ -115,7 +41,8 @@ func TestResolveEntities_UnknownInfersFree(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ResolveEntities: %v", err)
 	}
-	patreon, ok := resp.Msg.GetEntityRepresentations()[0].GetAdditionalProps()[0].AsMap()["patreon"].(map[string]interface{})
+	patreon, ok := resp.Msg.GetEntityRepresentations()[0].GetAdditionalProps()[0].
+		AsMap()["patreon"].(map[string]interface{})
 	if !ok {
 		t.Fatalf("patreon key missing or wrong type")
 	}
@@ -125,7 +52,7 @@ func TestResolveEntities_UnknownInfersFree(t *testing.T) {
 }
 
 func TestResolveEntities_UnknownErrors(t *testing.T) {
-	svc := newSvc(t, Config{InferUnknownAsFree: false}, &stubClient{})
+	svc := newSvc(t, Config{InferUnknownAsFree: false})
 	req := connect.NewRequest(&ersV2.ResolveEntitiesRequest{
 		Entities: []*entity.Entity{{
 			EphemeralId: "e0",
@@ -139,240 +66,6 @@ func TestResolveEntities_UnknownErrors(t *testing.T) {
 	if got := connect.CodeOf(err); got != connect.CodeNotFound {
 		t.Errorf("code = %v, want NotFound", got)
 	}
-	if !errors.Is(err, ErrMemberNotFound) {
-		t.Errorf("err = %v, want ErrMemberNotFound underlying", err)
-	}
-}
-
-func TestParseMembersPage(t *testing.T) {
-	payload := `{
-	  "data": [
-	    {
-	      "id": "m1",
-	      "type": "member",
-	      "attributes": {
-	        "email": "fan@example.com",
-	        "full_name": "Fan One",
-	        "patron_status": "active_patron",
-	        "currently_entitled_amount_cents": 500,
-	        "last_charge_date": "2024-05-01T00:00:00Z"
-	      },
-	      "relationships": {
-	        "user":                     {"data": {"id":"u1","type":"user"}},
-	        "currently_entitled_tiers": {"data": [{"id":"t1","type":"tier"}]}
-	      }
-	    }
-	  ],
-	  "included": [
-	    {"id":"u1","type":"user","attributes":{"email":"fan@example.com","full_name":"Fan One"}},
-	    {"id":"t1","type":"tier","attributes":{"title":"Supporter","amount_cents":500},
-	     "relationships":{"benefits":{"data":[{"id":"b1","type":"benefit"},{"id":"b2","type":"benefit"}]}}},
-	    {"id":"b1","type":"benefit","attributes":{"title":"Early Access"}},
-	    {"id":"b2","type":"benefit","attributes":{"title":"Exclusive Content"}}
-	  ],
-	  "meta": {"pagination":{"cursors":{"next":""}}}
-	}`
-	page, err := parseMembersPage(json.RawMessage(payload))
-	if err != nil {
-		t.Fatalf("parse: %v", err)
-	}
-	if len(page.members) != 1 {
-		t.Fatalf("want 1 member, got %d", len(page.members))
-	}
-	m := page.members[0]
-	if m.userID != "u1" || m.email != "fan@example.com" {
-		t.Errorf("user/email mismatch: %+v", m)
-	}
-	if m.tierSlug != "supporter" {
-		t.Errorf("tier_slug = %q, want supporter", m.tierSlug)
-	}
-	if got := strings.Join(m.benefits, ","); got != "early-access,exclusive-content" {
-		t.Errorf("benefits = %q, want early-access,exclusive-content", got)
-	}
-	mem := m.toMembership("arkavo")
-	if mem.Status != "active" {
-		t.Errorf("status = %q, want active", mem.Status)
-	}
-	if len(mem.CampaignIDs) != 1 || mem.CampaignIDs[0] != "arkavo" {
-		t.Errorf("campaign_ids = %v, want [arkavo]", mem.CampaignIDs)
-	}
-}
-
-func TestParseIdentity(t *testing.T) {
-	payload := `{
-	  "data": {
-	    "id": "u42",
-	    "type": "user",
-	    "attributes": {"email":"vip@example.com","full_name":"VIP"},
-	    "relationships": {"memberships": {"data": [{"id":"m99","type":"member"}]}}
-	  },
-	  "included": [
-	    {"id":"m99","type":"member","attributes":{"patron_status":"active_patron","currently_entitled_amount_cents":5000},
-	     "relationships":{"campaign":{"data":{"id":"arkavo","type":"campaign"}},
-	                      "currently_entitled_tiers":{"data":[{"id":"t9","type":"tier"}]}}},
-	    {"id":"t9","type":"tier","attributes":{"title":"VIP","amount_cents":5000},
-	     "relationships":{"benefits":{"data":[{"id":"b9","type":"benefit"}]}}},
-	    {"id":"b9","type":"benefit","attributes":{"title":"Discord"}}
-	  ]
-	}`
-	mem, err := parseIdentity(json.RawMessage(payload))
-	if err != nil {
-		t.Fatalf("parse: %v", err)
-	}
-	if mem.TierSlug != "vip" {
-		t.Errorf("tier_slug = %q, want vip", mem.TierSlug)
-	}
-	if mem.Status != "active" {
-		t.Errorf("status = %q, want active", mem.Status)
-	}
-	if len(mem.CampaignIDs) != 1 || mem.CampaignIDs[0] != "arkavo" {
-		t.Errorf("campaign_ids = %v, want [arkavo]", mem.CampaignIDs)
-	}
-	if len(mem.Benefits) != 1 || mem.Benefits[0] != "discord" {
-		t.Errorf("benefits = %v, want [discord]", mem.Benefits)
-	}
-}
-
-func TestClient_ResolveByEmail_PaginatesAndMatches(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		cursor := r.URL.Query().Get("page[cursor]")
-		w.Header().Set("Content-Type", "application/json")
-		switch cursor {
-		case "":
-			_, _ = w.Write([]byte(`{
-				"data": [{"id":"m1","type":"member","attributes":{},"relationships":{"user":{"data":{"id":"u1","type":"user"}}}}],
-				"included": [{"id":"u1","type":"user","attributes":{"email":"alice@example.com"}}],
-				"meta": {"pagination":{"cursors":{"next":"page2"}}}
-			}`))
-		case "page2":
-			_, _ = w.Write([]byte(`{
-				"data": [{"id":"m2","type":"member","attributes":{"patron_status":"active_patron","currently_entitled_amount_cents":2500},
-				          "relationships":{"user":{"data":{"id":"u2","type":"user"}},
-				                           "currently_entitled_tiers":{"data":[{"id":"t1","type":"tier"}]}}}],
-				"included": [
-				  {"id":"u2","type":"user","attributes":{"email":"bob@example.com","full_name":"Bob"}},
-				  {"id":"t1","type":"tier","attributes":{"title":"Patron","amount_cents":2500}}
-				],
-				"meta": {"pagination":{"cursors":{"next":""}}}
-			}`))
-		default:
-			http.Error(w, "unexpected", http.StatusInternalServerError)
-		}
-	}))
-	defer server.Close()
-
-	c := NewClient(ClientOptions{
-		APIBase:            server.URL,
-		CreatorAccessToken: "fake-creator-token",
-		CampaignIDs:        []string{"arkavo"},
-	})
-	mem, err := c.ResolveByEmail(context.Background(), "BOB@example.com")
-	if err != nil {
-		t.Fatalf("ResolveByEmail: %v", err)
-	}
-	if mem.UserID != "u2" {
-		t.Errorf("user_id = %q, want u2", mem.UserID)
-	}
-	if mem.TierSlug != "patron" {
-		t.Errorf("tier_slug = %q, want patron", mem.TierSlug)
-	}
-	if mem.Status != "active" {
-		t.Errorf("status = %q, want active", mem.Status)
-	}
-}
-
-func TestClient_FindMember_SkipsCampaign404(t *testing.T) {
-	// A 404 from one campaign's member endpoint (deleted/inaccessible id)
-	// must not abort the search — the backer here exists only in the second
-	// configured campaign.
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		switch {
-		case strings.Contains(r.URL.Path, "/campaigns/dead/"):
-			http.Error(w, "not found", http.StatusNotFound)
-		case strings.Contains(r.URL.Path, "/campaigns/live/"):
-			_, _ = w.Write([]byte(`{
-				"data": [{"id":"m1","type":"member","attributes":{"patron_status":"active_patron"},
-				          "relationships":{"user":{"data":{"id":"u9","type":"user"}}}}],
-				"included": [{"id":"u9","type":"user","attributes":{"email":"carol@example.com"}}],
-				"meta": {"pagination":{"cursors":{"next":""}}}
-			}`))
-		default:
-			http.Error(w, "unexpected", http.StatusInternalServerError)
-		}
-	}))
-	defer server.Close()
-
-	var warned []string
-	c := NewClient(ClientOptions{
-		APIBase:            server.URL,
-		CreatorAccessToken: "fake-creator-token",
-		CampaignIDs:        []string{"dead", "live"},
-		Warn: func(_ context.Context, msg string, _ ...any) {
-			warned = append(warned, msg)
-		},
-	})
-	mem, err := c.ResolveByUserID(context.Background(), "u9")
-	if err != nil {
-		t.Fatalf("ResolveByUserID: %v", err)
-	}
-	if mem.UserID != "u9" {
-		t.Errorf("user_id = %q, want u9", mem.UserID)
-	}
-	if len(mem.CampaignIDs) != 1 || mem.CampaignIDs[0] != "live" {
-		t.Errorf("campaign_ids = %v, want [live]", mem.CampaignIDs)
-	}
-	// Operators must be able to tell "empty campaign" from "bad config".
-	if len(warned) != 1 {
-		t.Errorf("warn hook fired %d times, want 1 (for campaign id 'dead')", len(warned))
-	}
-}
-
-func TestClient_CreatorToken_DefaultTTLAndSingleFetch(t *testing.T) {
-	// A token response without expires_in must still be cached (default TTL)
-	// rather than treated as immediately stale and re-fetched per request.
-	var tokenCalls int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		if r.Method == http.MethodPost {
-			atomic.AddInt32(&tokenCalls, 1)
-			_, _ = w.Write([]byte(`{"access_token":"cc-token"}`))
-			return
-		}
-		_, _ = w.Write([]byte(`{
-			"data": [{"id":"m1","type":"member","attributes":{},
-			          "relationships":{"user":{"data":{"id":"u1","type":"user"}}}}],
-			"included": [],
-			"meta": {"pagination":{"cursors":{"next":""}}}
-		}`))
-	}))
-	defer server.Close()
-
-	c := NewClient(ClientOptions{
-		APIBase:      server.URL,
-		TokenURL:     server.URL + "/token",
-		ClientID:     "cid",
-		ClientSecret: "csecret",
-		CampaignIDs:  []string{"camp"},
-	})
-
-	// Concurrent lookups: refresh is single-flighted, then cached.
-	var wg sync.WaitGroup
-	for range 4 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			_, _ = c.ResolveByUserID(context.Background(), "u1")
-		}()
-	}
-	wg.Wait()
-	if _, err := c.ResolveByUserID(context.Background(), "u1"); err != nil {
-		t.Fatalf("ResolveByUserID: %v", err)
-	}
-
-	if got := atomic.LoadInt32(&tokenCalls); got != 1 {
-		t.Errorf("token endpoint called %d times, want 1 (cached with default TTL, single-flight refresh)", got)
-	}
 }
 
 func TestSlugify(t *testing.T) {
@@ -382,6 +75,7 @@ func TestSlugify(t *testing.T) {
 		{"  Behind The Scenes  ", "behind-the-scenes"},
 		{"!!!", ""},
 		{"foo--bar", "foo-bar"},
+		{"Tier_With_Underscores", "tier-with-underscores"},
 	} {
 		if got := slugify(tc.in); got != tc.want {
 			t.Errorf("slugify(%q) = %q, want %q", tc.in, got, tc.want)
