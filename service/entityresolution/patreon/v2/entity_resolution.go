@@ -108,6 +108,7 @@ func RegisterPatreonERS(cfg config.ServiceConfig, log *logger.Logger) (*EntityRe
 		ClientSecret:       c.ClientSecret,
 		CreatorAccessToken: c.CreatorAccessToken,
 		CampaignIDs:        c.CampaignIDs,
+		Warn:               log.WarnContext,
 	})
 	return &EntityResolutionService{cfg: c, client: client, logger: log}, nil
 }

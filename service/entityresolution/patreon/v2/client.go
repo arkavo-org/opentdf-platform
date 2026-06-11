@@ -71,6 +71,8 @@ type Client struct {
 	creatorToken string
 	campaignIDs  []string
 
+	warn func(ctx context.Context, msg string, args ...any)
+
 	mu          sync.Mutex // guards cachedToken/tokenExpiry; never held across I/O
 	refreshMu   sync.Mutex // single-flights token refreshes
 	cachedToken string
@@ -88,6 +90,10 @@ type ClientOptions struct {
 	ClientSecret       string
 	CreatorAccessToken string
 	CampaignIDs        []string
+	// Warn, when set, receives operator-actionable warnings (e.g. a
+	// configured campaign id returning 404, which is indistinguishable
+	// from an empty campaign at the API level).
+	Warn func(ctx context.Context, msg string, args ...any)
 }
 
 func NewClient(opts ClientOptions) *Client {
@@ -111,6 +117,7 @@ func NewClient(opts ClientOptions) *Client {
 		clientSecret: opts.ClientSecret,
 		creatorToken: opts.CreatorAccessToken,
 		campaignIDs:  opts.CampaignIDs,
+		warn:         opts.Warn,
 	}
 }
 
@@ -160,6 +167,12 @@ func (c *Client) ResolveSelf(ctx context.Context, userAccessToken string) (*Memb
 	return parseIdentity(raw)
 }
 
+func (c *Client) warnf(ctx context.Context, msg string, args ...any) {
+	if c.warn != nil {
+		c.warn(ctx, msg, args...)
+	}
+}
+
 func (c *Client) findMember(ctx context.Context, match func(*memberRow) bool) (*Membership, error) {
 	token, err := c.creatorAccessToken(ctx)
 	if err != nil {
@@ -179,8 +192,13 @@ func (c *Client) findMember(ctx context.Context, match func(*memberRow) bool) (*
 		if err != nil {
 			// A 404 from one campaign's member endpoint (invalid, deleted,
 			// or inaccessible to this token) must not abort the search — a
-			// backer may exist only in a later campaign.
+			// backer may exist only in a later campaign. It is, however,
+			// indistinguishable from a misconfigured campaign id, so surface
+			// it to operators: if every configured id 404s, genuine patrons
+			// silently resolve as not-found (or free, with infer_unknown_as_free).
 			if errors.Is(err, ErrMemberNotFound) {
+				c.warnf(ctx, "patreon members endpoint returned 404; campaign id may be misconfigured, deleted, or inaccessible to this token",
+					"campaign_id", campaignID)
 				continue
 			}
 			return nil, err
@@ -235,6 +253,12 @@ func (c *Client) listCampaigns(ctx context.Context, token string) ([]string, err
 		} `json:"data"`
 	}
 	if err := c.doJSON(ctx, http.MethodGet, u, token, &resp); err != nil {
+		// A 404 from the campaigns-listing endpoint is not "member not
+		// found" — the listing itself failed, which is an availability or
+		// token-scope problem and must not read as a benign miss.
+		if errors.Is(err, ErrMemberNotFound) {
+			return nil, fmt.Errorf("%w: campaigns listing returned 404", ErrPatreonUnavailable)
+		}
 		return nil, err
 	}
 	ids := make([]string, 0, len(resp.Data))

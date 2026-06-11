@@ -303,10 +303,14 @@ func TestClient_FindMember_SkipsCampaign404(t *testing.T) {
 	}))
 	defer server.Close()
 
+	var warned []string
 	c := NewClient(ClientOptions{
 		APIBase:            server.URL,
 		CreatorAccessToken: "fake-creator-token",
 		CampaignIDs:        []string{"dead", "live"},
+		Warn: func(_ context.Context, msg string, _ ...any) {
+			warned = append(warned, msg)
+		},
 	})
 	mem, err := c.ResolveByUserID(context.Background(), "u9")
 	if err != nil {
@@ -317,6 +321,10 @@ func TestClient_FindMember_SkipsCampaign404(t *testing.T) {
 	}
 	if len(mem.CampaignIDs) != 1 || mem.CampaignIDs[0] != "live" {
 		t.Errorf("campaign_ids = %v, want [live]", mem.CampaignIDs)
+	}
+	// Operators must be able to tell "empty campaign" from "bad config".
+	if len(warned) != 1 {
+		t.Errorf("warn hook fired %d times, want 1 (for campaign id 'dead')", len(warned))
 	}
 }
 
