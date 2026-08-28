@@ -156,16 +156,17 @@ func (v *CWTVerifier) VerifyAccessToken(ctx context.Context, tokenRaw string) (j
 	return tok, err
 }
 
-// VerifyCWTSubjectToken verifies the base64url-encoded CWT and returns the
-// verified claims as both a jwt.Token (for direct use) and an unsigned-JWT
-// string (for the claims-mode ERS).
-func (v *CWTVerifier) VerifyCWTSubjectToken(ctx context.Context, subjectToken string) (jwt.Token, string, error) {
-	raw, err := base64.RawURLEncoding.DecodeString(subjectToken)
+// decodeSign1FromToken base64-decodes tokenRaw and parses the result as a
+// COSE_Sign1 message, WITHOUT verifying its signature. It accepts
+// base64url (raw, or padded — some clients pad) of either a CBOR-tagged
+// (#61 CWT wrapper around a tagged #18 COSE_Sign1) or untagged COSE_Sign1.
+func decodeSign1FromToken(tokenRaw string) (*cose.Sign1Message, error) {
+	raw, err := base64.RawURLEncoding.DecodeString(tokenRaw)
 	if err != nil {
 		// Some clients pad. Accept either form.
-		raw, err = base64.StdEncoding.DecodeString(subjectToken)
+		raw, err = base64.StdEncoding.DecodeString(tokenRaw)
 		if err != nil {
-			return nil, "", fmt.Errorf("cwt: subject_token is not valid base64url: %w", err)
+			return nil, fmt.Errorf("cwt: subject_token is not valid base64url: %w", err)
 		}
 	}
 
@@ -185,9 +186,20 @@ func (v *CWTVerifier) VerifyCWTSubjectToken(ctx context.Context, subjectToken st
 	if err := msg.UnmarshalCBOR(raw); err != nil {
 		var untagged cose.UntaggedSign1Message
 		if uErr := untagged.UnmarshalCBOR(raw); uErr != nil {
-			return nil, "", fmt.Errorf("cwt: not a COSE_Sign1 (tagged: %v; untagged: %w)", err, uErr)
+			return nil, fmt.Errorf("cwt: not a COSE_Sign1 (tagged: %w; untagged: %w)", err, uErr)
 		}
 		msg = cose.Sign1Message(untagged)
+	}
+	return &msg, nil
+}
+
+// VerifyCWTSubjectToken verifies the base64url-encoded CWT and returns the
+// verified claims as both a jwt.Token (for direct use) and an unsigned-JWT
+// string (for the claims-mode ERS).
+func (v *CWTVerifier) VerifyCWTSubjectToken(ctx context.Context, subjectToken string) (jwt.Token, string, error) {
+	msg, err := decodeSign1FromToken(subjectToken)
+	if err != nil {
+		return nil, "", err
 	}
 
 	keys, err := v.keys(ctx)
@@ -348,6 +360,22 @@ func decodeCWTClaims(payload []byte) (map[string]any, error) {
 		}
 	}
 	return out, nil
+}
+
+// DecodeCWTClaimsFromToken decodes the claims of a base64url-encoded CWT
+// WITHOUT verifying its signature. It exists for consumers that receive a
+// token already verified upstream by the auth interceptor (the ERS on the
+// with_request_token path receives the raw CWT, not the unsigned-JWT bridge).
+// Never use it as an authentication step.
+func DecodeCWTClaimsFromToken(tokenRaw string) (map[string]any, error) {
+	msg, err := decodeSign1FromToken(tokenRaw)
+	if err != nil {
+		return nil, err
+	}
+	if len(msg.Payload) == 0 {
+		return nil, errors.New("cwt: empty payload")
+	}
+	return decodeCWTClaims(msg.Payload)
 }
 
 // cwtIntLabelToName maps CWT integer claim labels (RFC 8392 §4) to JWT

@@ -333,3 +333,30 @@ func TestNewCWTVerifier_RejectsBadConfig(t *testing.T) {
 		})
 	}
 }
+
+func TestDecodeCWTClaimsFromToken_ParseOnly(t *testing.T) {
+	priv, kid := newP256(t)
+	tokenRaw := signCWT(t, priv, kid,
+		map[int64]any{
+			1: "https://identity.arkavo.net",
+			2: "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK",
+			3: []any{"https://platform.arkavo.net"},
+			4: int64(4102444800),
+			6: int64(1700000000),
+		},
+		map[string]any{
+			"arkavo_entitlements": []any{"https://arkavo.ai/attr/tdf/value/decrypt"},
+			"arkavo_npe":          map[any]any{"type": "agent", "depth": uint64(0)},
+		},
+	)
+
+	claims, err := DecodeCWTClaimsFromToken(tokenRaw)
+	require.NoError(t, err)
+	assert.Equal(t, "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK", claims["sub"])
+
+	npe, _ := claims["arkavo_npe"].(map[string]any)
+	assert.Equal(t, "agent", npe["type"])
+
+	_, err = DecodeCWTClaimsFromToken("not-a-cwt")
+	require.Error(t, err)
+}
