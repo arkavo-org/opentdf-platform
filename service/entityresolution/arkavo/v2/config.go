@@ -4,11 +4,9 @@ import "log/slog"
 
 // defaultClientIDClaim is the fallback for Config.ClientIDClaim.
 //
-// NOTE for Task 3: the arkavo_npe.class values (unverified/managed/attested)
-// and npe.type values (agent/device) are used by claims.go's parsing and by
-// the entitlement-shaping logic Task 3 adds, not by this file — define those
-// constants alongside the code that switches on them (mirrors patreon/v2's
-// convention of keeping class/type consts with their consumer).
+// The arkavo_npe.class values (unverified/managed/attested) and npe.type
+// values (agent/device) live in entity_resolution.go, next to the
+// entitlement-shaping and entity-typing code that switches on them.
 const defaultClientIDClaim = "arkavo_account_id"
 
 // Config configures the arkavo claims-passthrough entity resolver.

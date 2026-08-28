@@ -12,9 +12,9 @@ import (
 // claimsFromToken accepts either a JOSE JWT (the RAR endpoint's unsigned
 // bridge, or a real JWT) or a base64url CWT (the with_request_token path
 // hands the ERS the raw bearer). Signature verification happened upstream.
-func claimsFromToken(tokenRaw string) (map[string]any, error) {
+func claimsFromToken(ctx context.Context, tokenRaw string) (map[string]any, error) {
 	if parsed, err := jwt.ParseString(tokenRaw, jwt.WithVerify(false), jwt.WithValidate(false)); err == nil {
-		m, err := parsed.AsMap(context.Background())
+		m, err := parsed.AsMap(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("read jwt claims: %w", err)
 		}
