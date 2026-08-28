@@ -101,10 +101,9 @@ func keySetServer(t *testing.T, body []byte) *httptest.Server {
 
 // standardClaims builds a CWT claims map with CBOR integer labels
 // (RFC 8392 §4) for the standard registered claims used in tests.
-// `sub` is parameterized for future tests even though every existing test
-// uses "user-1".
-//
-//nolint:unparam // sub is intentionally parameterizable
+// `sub` is parameterized so callers can mint tokens for distinct subjects
+// (e.g. TestActorToken in authn_test.go mints bearer and actor CWTs with
+// different subjects).
 func standardClaims(iss, aud, sub string, ttl time.Duration) map[int64]any {
 	now := time.Now().Unix()
 	return map[int64]any{
@@ -332,4 +331,31 @@ func TestNewCWTVerifier_RejectsBadConfig(t *testing.T) {
 			require.Error(t, err)
 		})
 	}
+}
+
+func TestDecodeCWTClaimsFromToken_ParseOnly(t *testing.T) {
+	priv, kid := newP256(t)
+	tokenRaw := signCWT(t, priv, kid,
+		map[int64]any{
+			1: "https://identity.arkavo.net",
+			2: "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK",
+			3: []any{"https://platform.arkavo.net"},
+			4: int64(4102444800),
+			6: int64(1700000000),
+		},
+		map[string]any{
+			"arkavo_entitlements": []any{"https://arkavo.ai/attr/tdf/value/decrypt"},
+			"arkavo_npe":          map[any]any{"type": "agent", "depth": uint64(0)},
+		},
+	)
+
+	claims, err := DecodeCWTClaimsFromToken(tokenRaw)
+	require.NoError(t, err)
+	assert.Equal(t, "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK", claims["sub"])
+
+	npe, _ := claims["arkavo_npe"].(map[string]any)
+	assert.Equal(t, "agent", npe["type"])
+
+	_, err = DecodeCWTClaimsFromToken("not-a-cwt")
+	require.Error(t, err)
 }

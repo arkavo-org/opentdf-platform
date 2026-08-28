@@ -34,6 +34,20 @@ ERS enables the OpenTDF platform to:
 - **Failure Strategies**: `fail-fast` (default) for strict error handling, `continue` for resilient failover
 - **Use Case**: Organizations with heterogeneous identity systems, complex authorization requirements
 
+### Arkavo Entity Resolution Service (STABLE)
+- **Status**: ✅ **Stable**
+- **Location**: [`./arkavo/`](./arkavo/)
+- **Backends**: authnz-rs CWT/JWT claims passthrough with NPE entities and direct entitlements
+- **Features**: Token validation, direct entitlements, device class ceilings, no external dependencies
+- **Use Case**: Arkavo ecosystem identity resolution with distributed authorization
+
+### Patreon Entity Resolution Service (STABLE)
+- **Status**: ✅ **Stable**
+- **Location**: [`./patreon/`](./patreon/)
+- **Backends**: Patreon membership materialized via authnz-rs claims
+- **Features**: Campaign-qualified entitlements, tier-based access, no per-creator config
+- **Use Case**: Creator economy platforms with Patreon integrations
+
 ## Quick Start
 
 ### 1. Choose Your Implementation
@@ -41,6 +55,8 @@ Select the ERS implementation that matches your identity backend:
 - Use **Claims ERS** for JWT-based authentication systems
 - Use **Keycloak ERS** for Keycloak identity provider integration
 - Use **Multi-Strategy ERS** for LDAP, SQL databases, and multiple backends with intelligent routing
+- Use **Arkavo ERS** for authnz-rs CWT/JWT claims passthrough with direct entitlements
+- Use **Patreon ERS** for Patreon membership materialized via authnz-rs claims
 
 ### 2. Configure Your Service
 ```yaml
@@ -51,6 +67,10 @@ services:
     mode: keycloak  # Keycloak identity provider
     # OR (V2 only)
     mode: multi-strategy  # LDAP, SQL, and JWT Claims with intelligent routing
+    # OR
+    mode: arkavo    # Arkavo identity-plane with direct entitlements
+    # OR
+    mode: patreon   # Patreon membership materialized via authnz-rs claims
     # Implementation-specific configuration
 ```
 
