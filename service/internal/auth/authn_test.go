@@ -823,7 +823,7 @@ func TestActorToken(t *testing.T) {
 		actorTok := mint("https://arks.test", nil)
 
 		_, _, err := auth.checkToken(context.Background(), []string{"Bearer " + bearer}, receiverInfo{}, nil, []string{actorTok})
-		require.Error(t, err)
+		require.ErrorContains(t, err, "actor not authorized")
 	})
 
 	t.Run("actor token failing verification is rejected", func(t *testing.T) {
@@ -833,15 +833,25 @@ func TestActorToken(t *testing.T) {
 
 		t.Run("garbage token", func(t *testing.T) {
 			_, _, err := auth.checkToken(context.Background(), []string{"Bearer " + bearer}, receiverInfo{}, nil, []string{"not-a-cwt"})
-			require.Error(t, err)
+			require.ErrorContains(t, err, "invalid actor token")
 		})
 
 		t.Run("wrong signing key", func(t *testing.T) {
 			otherPriv, otherKid := newP256(t) // not in the fake IdP's published key set
 			badActorTok := signCWT(t, otherPriv, otherKid, standardClaims(srv.URL, "test", "https://arks.test", time.Hour), nil)
 			_, _, err := auth.checkToken(context.Background(), []string{"Bearer " + bearer}, receiverInfo{}, nil, []string{badActorTok})
-			require.Error(t, err)
+			require.ErrorContains(t, err, "invalid actor token")
 		})
+	})
+
+	t.Run("actor token with no subject is rejected even when bearer also has no subject", func(t *testing.T) {
+		// Regression case: accessToken.Subject() == "" and actorTok.Subject() == ""
+		// must NOT short-circuit the authorization check via "" != "" being false.
+		bearer := mint("", nil)   // bearer with no `sub`
+		actorTok := mint("", nil) // actor with no `sub`
+
+		_, _, err := auth.checkToken(context.Background(), []string{"Bearer " + bearer}, receiverInfo{}, nil, []string{actorTok})
+		require.ErrorContains(t, err, "actor token has no subject")
 	})
 
 	t.Run("no actor header behaves exactly as before", func(t *testing.T) {
@@ -860,4 +870,36 @@ func TestActorToken(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, "user-1", ctxAuth.GetActorSubjectFromContext(ctx))
 	})
+}
+
+// TestActorAuthorized pins actorAuthorized's fail-closed contract directly:
+// every malformed/absent shape of the `act` claim must resolve to NOT
+// authorized, and only a well-formed {"sub": <matching string>} entry
+// authorizes. See task-6 fix round 1, finding 2.
+func TestActorAuthorized(t *testing.T) {
+	const wantSub = "https://arks.test"
+
+	tests := []struct {
+		name string
+		act  any // nil means the `act` claim is not set at all
+		want bool
+	}{
+		{"claim absent", nil, false},
+		{"non-array act claim (bare string)", wantSub, false},
+		{"array entry is not a map", []any{"notamap"}, false},
+		{"map entry missing sub", []any{map[string]any{"other": "x"}}, false},
+		{"map entry sub wrong type", []any{map[string]any{"sub": 42}}, false},
+		{"map entry sub is empty string", []any{map[string]any{"sub": ""}}, false},
+		{"well-formed entry matches", []any{map[string]any{"sub": wantSub}}, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tok := jwt.New()
+			if tt.act != nil {
+				require.NoError(t, tok.Set("act", tt.act))
+			}
+			assert.Equal(t, tt.want, actorAuthorized(tok, wantSub))
+		})
+	}
 }

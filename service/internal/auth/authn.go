@@ -509,6 +509,9 @@ func (a *Authentication) checkToken(ctx context.Context, authHeader []string, dp
 			return nil, nil, fmt.Errorf("invalid actor token: %w", err)
 		}
 		actorSub := actorTok.Subject()
+		if actorSub == "" {
+			return nil, nil, errors.New("actor token has no subject")
+		}
 		if actorSub != accessToken.Subject() && !actorAuthorized(accessToken, actorSub) {
 			return nil, nil, errors.New("actor not authorized for this token")
 		}
