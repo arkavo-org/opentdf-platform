@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"sort"
 	"testing"
+	"time"
 
 	"connectrpc.com/connect"
 	"github.com/fxamacker/cbor/v2"
@@ -17,6 +18,7 @@ import (
 	"github.com/opentdf/platform/service/logger"
 	"github.com/veraison/go-cose"
 	"go.opentelemetry.io/otel/trace/noop"
+	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/structpb"
 )
 
@@ -288,5 +290,146 @@ func TestCWTToken_MatchesEquivalentJWT(t *testing.T) {
 		if !reflect.DeepEqual(jwtGot[k], cwtGot[k]) {
 			t.Errorf("actions for %s differ: jwt=%v cwt=%v", k, jwtGot[k], cwtGot[k])
 		}
+	}
+}
+
+// --- Review findings regression tests ---------------------------------------
+
+// TestResolveEntities_FabricatedTrustedMarkerRejected covers Finding 1: a
+// caller-supplied Entity_Claims payload is not guaranteed to have come from
+// this service's own CreateEntityChainsFromTokens, so a fabricated
+// arkavo_trusted marker must not bypass the operator's master switch
+// (TrustMaterializedClaims: false here).
+func TestResolveEntities_FabricatedTrustedMarkerRejected(t *testing.T) {
+	svc := newSvc(t, Config{TrustMaterializedClaims: false, TrustedIssuer: issuer})
+	claims, err := structpb.NewStruct(map[string]interface{}{
+		"sub":                 "did:key:z6Mkattacker",
+		"iss":                 issuer,
+		"arkavo_trusted":      true,
+		"arkavo_entitlements": []interface{}{"https://arkavo.ai/attr/tdf/value/decrypt", "https://arkavo.ai/attr/action/value/read"},
+	})
+	if err != nil {
+		t.Fatalf("build forged claims: %v", err)
+	}
+	anyClaims, err := anypb.New(claims)
+	if err != nil {
+		t.Fatalf("anypb.New: %v", err)
+	}
+	ents := []*entity.Entity{{
+		EntityType:  &entity.Entity_Claims{Claims: anyClaims},
+		EphemeralId: "forged-subject",
+		Category:    entity.Entity_CATEGORY_SUBJECT,
+	}}
+	resp, err := svc.ResolveEntities(context.Background(), connect.NewRequest(&entityresolutionV2.ResolveEntitiesRequest{Entities: ents}))
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	for _, r := range resp.Msg.GetEntityRepresentations() {
+		if got := r.GetDirectEntitlements(); len(got) != 0 {
+			t.Errorf("fabricated arkavo_trusted marker with TrustMaterializedClaims=false must yield zero DirectEntitlements, got %v", got)
+		}
+	}
+}
+
+// TestCWTToken_NpeEpochTimestampAndByteString_Sanitized covers Finding 2: a
+// legitimately signed CWT whose arkavo_npe carries a CBOR tag-1 epoch
+// timestamp and a byte-string field must not fail CreateEntityChainsFromTokens
+// with structpb.NewStruct's "invalid type: time.Time" error — normalizeCBOR
+// (service/internal/auth/cwt_verifier.go) hands those back as native
+// time.Time / []byte, and the ERS boundary must sanitize them.
+func TestCWTToken_NpeEpochTimestampAndByteString_Sanitized(t *testing.T) {
+	svc := newSvc(t, Config{TrustMaterializedClaims: true, TrustedIssuer: issuer})
+	expiry := time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)
+	nonce := []byte{0xDE, 0xAD, 0xBE, 0xEF}
+	tok := signCWT(t, issuer, "did:key:z6Mkdevice", map[any]any{
+		"arkavo_npe": map[any]any{
+			"type":               "device",
+			"device_id":          "K1",
+			"attestation_expiry": cbor.Tag{Number: 1, Content: expiry.Unix()},
+			"attestation_nonce":  nonce,
+		},
+	})
+
+	resp, err := svc.CreateEntityChainsFromTokens(context.Background(), connect.NewRequest(&entityresolutionV2.CreateEntityChainsFromTokensRequest{
+		Tokens: []*entity.Token{{EphemeralId: "t1", Jwt: tok}},
+	}))
+	if err != nil {
+		t.Fatalf("CreateEntityChainsFromTokens must not error on a signed CWT with an epoch-timestamp arkavo_npe field: %v", err)
+	}
+
+	claims := subjectClaimsMap(t, resp.Msg.GetEntityChains()[0].GetEntities())
+	npe, ok := claims["arkavo_npe"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("arkavo_npe missing or wrong shape on subject entity: %#v", claims["arkavo_npe"])
+	}
+	gotExpiry, ok := npe["attestation_expiry"].(float64)
+	if !ok || int64(gotExpiry) != expiry.Unix() {
+		t.Errorf("attestation_expiry = %#v, want %d as a number", npe["attestation_expiry"], expiry.Unix())
+	}
+	wantNonce := base64.RawURLEncoding.EncodeToString(nonce)
+	gotNonce, ok := npe["attestation_nonce"].(string)
+	if !ok || gotNonce != wantNonce {
+		t.Errorf("attestation_nonce = %#v, want %q", npe["attestation_nonce"], wantNonce)
+	}
+}
+
+// TestCWTToken_NpeNestedStructures_Sanitized covers Finding 2's recursive
+// case: a nested map and a nested list mixing representable values with a
+// CBOR type structpb cannot hold (a big.Int from a tag-2 unsigned bignum).
+// The call must still succeed, keep representable values, and drop the rest.
+func TestCWTToken_NpeNestedStructures_Sanitized(t *testing.T) {
+	svc := newSvc(t, Config{TrustMaterializedClaims: true, TrustedIssuer: issuer})
+	tok := signCWT(t, issuer, "did:key:z6Mkdevice", map[any]any{
+		"arkavo_npe": map[any]any{
+			"type":      "device",
+			"device_id": "K1",
+			"nested_map": map[any]any{
+				"keep":    "value",
+				"dropped": cbor.Tag{Number: 2, Content: []byte{0x01, 0x00}}, // unsigned bignum -> big.Int, unrepresentable
+			},
+			"nested_list": []any{
+				"keep-me",
+				int64(7),
+				cbor.Tag{Number: 2, Content: []byte{0x01, 0x00}},
+			},
+		},
+	})
+
+	resp, err := svc.CreateEntityChainsFromTokens(context.Background(), connect.NewRequest(&entityresolutionV2.CreateEntityChainsFromTokensRequest{
+		Tokens: []*entity.Token{{EphemeralId: "t1", Jwt: tok}},
+	}))
+	if err != nil {
+		t.Fatalf("CreateEntityChainsFromTokens must not error on nested unrepresentable arkavo_npe values: %v", err)
+	}
+
+	claims := subjectClaimsMap(t, resp.Msg.GetEntityChains()[0].GetEntities())
+	npe, ok := claims["arkavo_npe"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("arkavo_npe missing or wrong shape on subject entity: %#v", claims["arkavo_npe"])
+	}
+
+	nestedMap, ok := npe["nested_map"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("nested_map missing or wrong shape: %#v", npe["nested_map"])
+	}
+	if got := nestedMap["keep"]; got != "value" {
+		t.Errorf("nested_map[keep] = %#v, want %q", got, "value")
+	}
+	if _, present := nestedMap["dropped"]; present {
+		t.Errorf("nested_map[dropped] should have been dropped as unrepresentable, got %#v", nestedMap["dropped"])
+	}
+
+	nestedList, ok := npe["nested_list"].([]interface{})
+	if !ok {
+		t.Fatalf("nested_list missing or wrong shape: %#v", npe["nested_list"])
+	}
+	if len(nestedList) != 2 {
+		t.Fatalf("nested_list = %#v, want 2 representable elements (unrepresentable one dropped)", nestedList)
+	}
+	if nestedList[0] != "keep-me" {
+		t.Errorf("nested_list[0] = %#v, want %q", nestedList[0], "keep-me")
+	}
+	if n, numOK := nestedList[1].(float64); !numOK || n != 7 {
+		t.Errorf("nested_list[1] = %#v, want 7 as a number", nestedList[1])
 	}
 }

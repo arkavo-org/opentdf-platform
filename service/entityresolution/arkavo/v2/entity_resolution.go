@@ -6,8 +6,10 @@ package arkavo
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"connectrpc.com/connect"
 	"github.com/go-viper/mapstructure/v2"
@@ -35,9 +37,12 @@ const (
 
 // trustedMarker is set on the subject entity's claims by entitiesFromToken
 // after the issuer check, so ResolveEntities (second pass, no token) can
-// honor entitlements without re-checking iss. A caller-supplied claims
-// entity can forge it — that path is guarded by the PEP's role:standard
-// credential, exactly as in the patreon provider.
+// honor entitlements without re-checking iss. A caller-supplied claims entity
+// can forge this marker, so ResolveEntities never treats it as sufficient on
+// its own: it also re-asserts the operator's TrustMaterializedClaims master
+// switch before honoring it (the TrustedIssuer comparison itself cannot be
+// redone in this second pass — the marker is what carries that decision
+// forward, but the master switch can and must be re-checked).
 const trustedMarker = "arkavo_trusted"
 
 type EntityResolutionService struct {
@@ -107,7 +112,12 @@ func (s *EntityResolutionService) ResolveEntities(
 			}
 			claims := st.AsMap()
 			rep.AdditionalProps = []*structpb.Struct{&st}
-			if claims[trustedMarker] == true {
+			// trustedMarker alone is not sufficient: a caller-supplied Entity_Claims
+			// payload can fabricate it, so the operator's master switch
+			// (TrustMaterializedClaims) must be re-asserted here even though the
+			// TrustedIssuer comparison cannot be redone in this second pass (the
+			// marker is what carries that earlier decision forward).
+			if s.cfg.TrustMaterializedClaims && claims[trustedMarker] == true {
 				rep.DirectEntitlements = s.directEntitlements(parseArkavoClaims(claims))
 			}
 		}
@@ -153,7 +163,9 @@ func (s *EntityResolutionService) entitiesFromToken(ctx context.Context, tokenRa
 			subjectClaims["arkavo_entitlements"] = toAnySlice(c.Entitlements)
 		}
 		if raw, ok := m["arkavo_npe"].(map[string]any); ok {
-			subjectClaims["arkavo_npe"] = raw
+			if safe, safeOK := structpbSafe(raw); safeOK {
+				subjectClaims["arkavo_npe"] = safe
+			}
 		}
 	}
 	st, err := structpb.NewStruct(subjectClaims)
@@ -187,6 +199,50 @@ func toAnySlice(in []string) []any {
 		out[i] = s
 	}
 	return out
+}
+
+// structpbSafe recursively converts v into a shape structpb.NewStruct can
+// accept, dropping any element it cannot represent. It exists because
+// normalizeCBOR's CWT decode path (service/internal/auth/cwt_verifier.go)
+// hands back native Go types for values structpb.NewStruct rejects outright —
+// time.Time for CBOR tag-0/tag-1 timestamps, []byte for byte strings, and
+// uint64 — so a legitimately signed, trusted-issuer CWT carrying e.g. an
+// attestation_expiry timestamp must not fail the whole
+// CreateEntityChainsFromTokens call with a 500. It is applied only to the raw
+// arkavo_npe map, never rebuilt from the typed npeClaim struct, so any field
+// the spec has not yet named is still carried through for audit.
+func structpbSafe(v any) (any, bool) {
+	switch x := v.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(x))
+		for k, vv := range x {
+			if sv, ok := structpbSafe(vv); ok {
+				out[k] = sv
+			}
+		}
+		return out, true
+	case []any:
+		out := make([]any, 0, len(x))
+		for _, vv := range x {
+			if sv, ok := structpbSafe(vv); ok {
+				out = append(out, sv)
+			}
+		}
+		return out, true
+	case time.Time:
+		return x.Unix(), true
+	case []byte:
+		return base64.RawURLEncoding.EncodeToString(x), true
+	case uint64:
+		return int64(x), true
+	case nil, bool, string,
+		int, int8, int16, int32, int64,
+		uint, uint8, uint16, uint32,
+		float32, float64:
+		return v, true
+	default:
+		return nil, false
+	}
 }
 
 func (s *EntityResolutionService) directEntitlements(c arkavoClaims) []*entityresolutionV2.DirectEntitlement {
