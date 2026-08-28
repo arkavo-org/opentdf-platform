@@ -110,7 +110,7 @@ type Authentication struct {
 	logger *logger.Logger
 
 	// Used for testing
-	_testCheckTokenFunc func(ctx context.Context, authHeader []string, dpopInfo receiverInfo, dpopHeader []string) (jwt.Token, context.Context, error)
+	_testCheckTokenFunc func(ctx context.Context, authHeader []string, dpopInfo receiverInfo, dpopHeader []string, actorHeader []string) (jwt.Token, context.Context, error)
 }
 
 // Creates new authN which is used to verify tokens for a set of given issuers
@@ -198,6 +198,7 @@ func (a Authentication) MuxHandler(handler http.Handler) http.Handler {
 		}
 
 		dp := r.Header.Values("Dpop")
+		actorHdr := r.Header.Values("X-Actor-Token")
 		log := a.logger
 
 		// Verify the token
@@ -218,7 +219,7 @@ func (a Authentication) MuxHandler(handler http.Handler) http.Handler {
 		accessTok, ctx, err := a.checkToken(r.Context(), header, receiverInfo{
 			u: []string{normalizeURL(origin, r.URL)},
 			m: []string{r.Method},
-		}, dp)
+		}, dp, actorHdr)
 		if err != nil {
 			log.WarnContext(ctx,
 				"unauthenticated",
@@ -328,6 +329,7 @@ func (a Authentication) ConnectUnaryServerInterceptor() connect.UnaryInterceptor
 				header,
 				ri,
 				req.Header()["Dpop"],
+				req.Header()["X-Actor-Token"],
 			)
 			if err != nil {
 				return nil, connect.NewError(connect.CodeUnauthenticated, errors.New("unauthenticated"))
@@ -459,10 +461,10 @@ func getAction(method string) string {
 }
 
 // checkToken is a helper function to verify the token.
-func (a *Authentication) checkToken(ctx context.Context, authHeader []string, dpopInfo receiverInfo, dpopHeader []string) (jwt.Token, context.Context, error) {
+func (a *Authentication) checkToken(ctx context.Context, authHeader []string, dpopInfo receiverInfo, dpopHeader []string, actorHeader []string) (jwt.Token, context.Context, error) {
 	// Use the test function if it is set
 	if a._testCheckTokenFunc != nil {
-		return a._testCheckTokenFunc(ctx, authHeader, dpopInfo, dpopHeader)
+		return a._testCheckTokenFunc(ctx, authHeader, dpopInfo, dpopHeader, actorHeader)
 	}
 
 	var tokenRaw string
@@ -495,11 +497,32 @@ func (a *Authentication) checkToken(ctx context.Context, authHeader []string, dp
 		ctx = audit.ContextWithActorID(ctx, actorID)
 	}
 
+	// X-Actor-Token (spec §1 `act` rule): when present, verify it with the
+	// same token verifier used for the bearer, and require its subject to
+	// either be the bearer's own subject (self-actation) or appear in the
+	// bearer's `act` claim. An absent header leaves behavior unchanged.
+	var verifiedActorSub string
+	if len(actorHeader) > 0 && actorHeader[0] != "" {
+		actorRaw := actorHeader[0]
+		actorTok, err := a.tokenVerifier.VerifyAccessToken(ctx, actorRaw)
+		if err != nil {
+			return nil, nil, fmt.Errorf("invalid actor token: %w", err)
+		}
+		actorSub := actorTok.Subject()
+		if actorSub != accessToken.Subject() && !actorAuthorized(accessToken, actorSub) {
+			return nil, nil, errors.New("actor not authorized for this token")
+		}
+		verifiedActorSub = actorSub
+	}
+
 	_, tokenHasCNF := accessToken.Get("cnf")
 	if !tokenHasCNF && !a.enforceDPoP {
 		// this condition is not quite tight because it's possible that the `cnf` claim may
 		// come from token introspection
 		ctx = ctxAuth.ContextWithAuthNInfo(ctx, nil, accessToken, tokenRaw)
+		if verifiedActorSub != "" {
+			ctx = ctxAuth.ContextWithActorSubject(ctx, verifiedActorSub)
+		}
 		return accessToken, ctx, nil
 	}
 	dpopKey, err := a.validateDPoP(accessToken, tokenRaw, dpopInfo, dpopHeader)
@@ -508,7 +531,44 @@ func (a *Authentication) checkToken(ctx context.Context, authHeader []string, dp
 		return nil, nil, err
 	}
 	ctx = ctxAuth.ContextWithAuthNInfo(ctx, dpopKey, accessToken, tokenRaw)
+	if verifiedActorSub != "" {
+		ctx = ctxAuth.ContextWithActorSubject(ctx, verifiedActorSub)
+	}
 	return accessToken, ctx, nil
+}
+
+// actorAuthorized reports whether actorSub is permitted to act on behalf of
+// the subject of tok, per the RFC 8693-style `act` claim: a list of
+// {"sub": "..."} entries. The claim arrives via jwx's generic JSON decoding
+// as []any of map[string]any, so any other shape — missing, empty,
+// wrong-typed, or an entry with a missing/empty/non-string `sub` — is
+// treated defensively as NOT authorizing that actor.
+func actorAuthorized(tok jwt.Token, actorSub string) bool {
+	if actorSub == "" {
+		return false
+	}
+	raw, ok := tok.PrivateClaims()["act"]
+	if !ok {
+		return false
+	}
+	entries, ok := raw.([]any)
+	if !ok {
+		return false
+	}
+	for _, entry := range entries {
+		m, isMap := entry.(map[string]any)
+		if !isMap {
+			continue
+		}
+		sub, isString := m["sub"].(string)
+		if !isString || sub == "" {
+			continue
+		}
+		if sub == actorSub {
+			return true
+		}
+	}
+	return false
 }
 
 func (a Authentication) validateDPoP(accessToken jwt.Token, acessTokenRaw string, dpopInfo receiverInfo, headers []string) (jwk.Key, error) {
@@ -667,7 +727,7 @@ func (a Authentication) ipcReauthCheck(ctx context.Context, path string, header 
 			token, ctxWithJWK, err := a.checkToken(ctx, authHeader, receiverInfo{
 				u: []string{path},
 				m: []string{http.MethodPost},
-			}, header["Dpop"])
+			}, header["Dpop"], header["X-Actor-Token"])
 			if err != nil {
 				return nil, connect.NewError(connect.CodeUnauthenticated, errors.New("unauthenticated"))
 			}

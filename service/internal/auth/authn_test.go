@@ -208,7 +208,7 @@ func (s *AuthSuite) Test_IPCUnaryServerInterceptor() {
 
 	type contextKey string
 	mockCtx := context.WithValue(context.Background(), contextKey("mockKey"), "mockValue")
-	s.auth._testCheckTokenFunc = func(_ context.Context, authHeader []string, _ receiverInfo, _ []string) (jwt.Token, context.Context, error) {
+	s.auth._testCheckTokenFunc = func(_ context.Context, authHeader []string, _ receiverInfo, _ []string, _ []string) (jwt.Token, context.Context, error) {
 		if len(authHeader) == 0 {
 			return nil, nil, errors.New("missing authorization header")
 		}
@@ -342,7 +342,7 @@ func (s *AuthSuite) Test_UnaryServerInterceptor_When_Authorization_Header_Missin
 }
 
 func (s *AuthSuite) Test_CheckToken_When_Authorization_Header_Invalid_Expect_Error() {
-	_, _, err := s.auth.checkToken(context.Background(), []string{"BPOP "}, receiverInfo{}, nil)
+	_, _, err := s.auth.checkToken(context.Background(), []string{"BPOP "}, receiverInfo{}, nil, nil)
 	s.Require().Error(err)
 	s.Equal("not of type bearer or dpop", err.Error())
 }
@@ -351,7 +351,7 @@ func (s *AuthSuite) Test_CheckToken_When_Valid_No_DPoP_Expect_Error() {
 	// Default suite config enforces DPoP. A bearer with no `cnf` claim
 	// should be rejected before any access decision is made.
 	bearer := s.mintCWT(map[string]any{"cid": "client1"})
-	_, _, err := s.auth.checkToken(context.Background(), []string{"Bearer " + bearer}, receiverInfo{}, nil)
+	_, _, err := s.auth.checkToken(context.Background(), []string{"Bearer " + bearer}, receiverInfo{}, nil, nil)
 	s.Require().Error(err)
 	s.Require().Contains(err.Error(), "dpop")
 }
@@ -434,6 +434,7 @@ func (s *AuthSuite) TestInvalid_DPoP_Cases() {
 					m: []string{http.MethodPost},
 				},
 				[]string{dpopToken},
+				nil,
 			)
 
 			s.Require().Error(err)
@@ -575,7 +576,7 @@ func (s *AuthSuite) Test_Allowing_Auth_With_No_DPoP() {
 	// CWT without a `cnf` claim — enforceDPoP=false above means the
 	// middleware accepts it and proceeds with no DPoP key bound.
 	bearer := s.mintCWT(map[string]any{"cid": "client1"})
-	_, ctx, err := auth.checkToken(context.Background(), []string{"Bearer " + bearer}, receiverInfo{}, nil)
+	_, ctx, err := auth.checkToken(context.Background(), []string{"Bearer " + bearer}, receiverInfo{}, nil, nil)
 	s.Require().NoError(err)
 	s.Require().Nil(ctxAuth.GetJWKFromContext(ctx, logger.CreateTestLogger()))
 }
@@ -753,4 +754,110 @@ func Test_GetClientIDFromToken(t *testing.T) {
 func (s *AuthSuite) mintCWT(custom map[string]any) string {
 	claims := standardClaims(s.server.URL, "test", "user-1", time.Hour)
 	return signCWT(s.T(), s.priv, s.kid, claims, custom)
+}
+
+// TestActorToken covers X-Actor-Token enforcement against the bearer's
+// `act` claim (identity track2 platform arkavo-ers, task 6 / spec §1 `act`
+// rule). Standalone (not a suite method) so `go test -run TestActorToken`
+// selects exactly this test and its subtests.
+func TestActorToken(t *testing.T) {
+	priv, kid := newP256(t)
+	keySetCBOR := coseKeySetFromPub(t, &priv.PublicKey, kid)
+
+	// Fake IdP serving OIDC discovery + the COSE Key Set, mirroring
+	// AuthSuite.SetupTest. Declared as a var so the handler closure can
+	// reference srv.URL once it's assigned (no request arrives before then).
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/.well-known/openid-configuration":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprintf(w,
+				`{"issuer":%q,"jwks_uri":%q,"cose_keys_uri":%q}`,
+				srv.URL, srv.URL+"/jwks", srv.URL+"/cose-keys")
+		case "/cose-keys":
+			w.Header().Set("Content-Type", "application/cose-key-set+cbor")
+			_, _ = w.Write(keySetCBOR)
+		case "/jwks":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"keys":[]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	auth, err := NewAuthenticator(
+		context.Background(),
+		Config{
+			AuthNConfig: AuthNConfig{
+				EnforceDPoP: false,
+				Issuer:      srv.URL,
+				Audience:    "test",
+			},
+		},
+		logger.CreateTestLogger(),
+		func(_ string, _ any) error { return nil },
+	)
+	require.NoError(t, err)
+
+	// mint signs a CWT with the given subject and custom text-label claims,
+	// using the key the fake IdP's COSE Key Set advertises.
+	mint := func(sub string, custom map[string]any) string {
+		return signCWT(t, priv, kid, standardClaims(srv.URL, "test", sub, time.Hour), custom)
+	}
+
+	t.Run("actor authorized via bearer's act claim passes and is recorded in context", func(t *testing.T) {
+		bearer := mint("user-1", map[string]any{
+			"act": []any{map[string]any{"sub": "https://arks.test"}},
+		})
+		actorTok := mint("https://arks.test", nil)
+
+		_, ctx, err := auth.checkToken(context.Background(), []string{"Bearer " + bearer}, receiverInfo{}, nil, []string{actorTok})
+		require.NoError(t, err)
+		assert.Equal(t, "https://arks.test", ctxAuth.GetActorSubjectFromContext(ctx))
+	})
+
+	t.Run("actor not listed in act claim is rejected", func(t *testing.T) {
+		bearer := mint("user-1", nil) // no `act` claim at all
+		actorTok := mint("https://arks.test", nil)
+
+		_, _, err := auth.checkToken(context.Background(), []string{"Bearer " + bearer}, receiverInfo{}, nil, []string{actorTok})
+		require.Error(t, err)
+	})
+
+	t.Run("actor token failing verification is rejected", func(t *testing.T) {
+		bearer := mint("user-1", map[string]any{
+			"act": []any{map[string]any{"sub": "https://arks.test"}},
+		})
+
+		t.Run("garbage token", func(t *testing.T) {
+			_, _, err := auth.checkToken(context.Background(), []string{"Bearer " + bearer}, receiverInfo{}, nil, []string{"not-a-cwt"})
+			require.Error(t, err)
+		})
+
+		t.Run("wrong signing key", func(t *testing.T) {
+			otherPriv, otherKid := newP256(t) // not in the fake IdP's published key set
+			badActorTok := signCWT(t, otherPriv, otherKid, standardClaims(srv.URL, "test", "https://arks.test", time.Hour), nil)
+			_, _, err := auth.checkToken(context.Background(), []string{"Bearer " + bearer}, receiverInfo{}, nil, []string{badActorTok})
+			require.Error(t, err)
+		})
+	})
+
+	t.Run("no actor header behaves exactly as before", func(t *testing.T) {
+		bearer := mint("user-1", nil)
+
+		_, ctx, err := auth.checkToken(context.Background(), []string{"Bearer " + bearer}, receiverInfo{}, nil, nil)
+		require.NoError(t, err)
+		assert.Empty(t, ctxAuth.GetActorSubjectFromContext(ctx))
+	})
+
+	t.Run("actor whose sub equals the bearer's own sub passes without an act claim", func(t *testing.T) {
+		bearer := mint("user-1", nil) // no `act` claim
+		actorTok := mint("user-1", nil)
+
+		_, ctx, err := auth.checkToken(context.Background(), []string{"Bearer " + bearer}, receiverInfo{}, nil, []string{actorTok})
+		require.NoError(t, err)
+		assert.Equal(t, "user-1", ctxAuth.GetActorSubjectFromContext(ctx))
+	})
 }

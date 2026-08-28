@@ -101,10 +101,9 @@ func keySetServer(t *testing.T, body []byte) *httptest.Server {
 
 // standardClaims builds a CWT claims map with CBOR integer labels
 // (RFC 8392 §4) for the standard registered claims used in tests.
-// `sub` is parameterized for future tests even though every existing test
-// uses "user-1".
-//
-//nolint:unparam // sub is intentionally parameterizable
+// `sub` is parameterized so callers can mint tokens for distinct subjects
+// (e.g. TestActorToken in authn_test.go mints bearer and actor CWTs with
+// different subjects).
 func standardClaims(iss, aud, sub string, ttl time.Duration) map[int64]any {
 	now := time.Now().Unix()
 	return map[int64]any{
