@@ -68,23 +68,63 @@ values to be honored.
 ## Trust Model
 
 Arkavo entitlements are signed upstream at authnz-rs and verified by the
-platform's token validation layer before reaching the ERS. The ERS trusts
-only tokens from the `trusted_issuer` pin — all other issuers are rejected.
+platform's token validation layer before reaching the ERS. The provider uses
+a two-path resolution model with different trust semantics on each path,
+unified by the `arkavo_trusted` marker and the `trust_materialized_claims`
+master switch.
+
+### The `arkavo_trusted` Marker
+
+When `CreateEntityChainsFromTokens` processes a token, it checks the issuer
+against `trusted_issuer` (if `trust_materialized_claims` is on). If the check
+passes, it stamps `arkavo_trusted: true` onto the SUBJECT entity's claims,
+along with `arkavo_entitlements` and the raw `arkavo_npe` data. This marker
+carries the issuer decision forward into the claims-entity path.
+
+### Two-Path Resolution
+
+**Token path** (`CreateEntityChainsFromTokens`):
+- Token signature is verified by platform authn middleware (before reaching ERS)
+- If `trust_materialized_claims` is on: issuer comparison against `trusted_issuer` is enforced here
+- If check passes: `arkavo_trusted: true` marker is set
+- If check fails or `trust_materialized_claims` is off: no marker, no entitlements
+
+**Claims-entity path** (`ResolveEntities`):
+- Caller supplies an Entity_Claims payload (may have originated elsewhere)
+- The issuer comparison is NOT redone on this path — only the `arkavo_trusted` marker is checked
+- If `trust_materialized_claims` is on AND `claims["arkavo_trusted"] == true`: direct entitlements are emitted
+- If either condition is false: no entitlements
+
+Critically: a caller who can construct or forward a claims entity with a forged
+`arkavo_trusted: true` marker will bypass the `trusted_issuer` pin on the
+claims-entity path. The operator's protection on that path is **the PEP
+boundary** — `ResolveEntities` must be reachable only through a trusted
+decision layer. The `trust_materialized_claims` flag is the master switch
+that gates entitlements on both paths, but only the token path can enforce
+the issuer pin; the marker is what carries that decision to the second pass.
+
+When `trust_materialized_claims: false`, entitlements are disabled on both paths
+entirely — no marker check avoids this setting.
 
 ### Entity Resolution Flow
 
 1. **Token arrives at ERS**: JWT (JOSE) or CWT (COSE), signature already verified
    by the platform's authn middleware.
-2. **Issuer check**: If `trust_materialized_claims` is on, verify that the token
-   comes from the `trusted_issuer`.
-3. **Claims extraction**: Extract `arkavo_entitlements`, `arkavo_account_id`
-   (client ID), and other claims.
-4. **Entity synthesis**: Create a SUBJECT entity carrying the entitlements claim
-   and a marker indicating it was trust-gated (PEP boundary).
-5. **Direct entitlements emission**: Convert each entitlement into a platform
-   attribute reference (e.g., `arkavo.ai/classification/restricted`).
-6. **Device ceiling**: If the subject is an NPE (non-person entity), apply the
-   ceiling for its device class.
+2. **Issuer check (token path only)**: If `trust_materialized_claims` is on,
+   verify that the token's `iss` claim matches `trusted_issuer` (or skip if
+   `trusted_issuer` is empty).
+3. **Marker and claims storage**: If the issuer check passes, set
+   `arkavo_trusted: true` and store `arkavo_entitlements` and `arkavo_npe` in
+   the SUBJECT entity's claims.
+4. **Entity synthesis**: Create a SUBJECT entity carrying the claims, and an
+   ENVIRONMENT entity if the token includes an `arkavo_npe` block.
+5. **Claims-entity resolution**: On the second pass, `ResolveEntities` checks
+   `trust_materialized_claims && claims["arkavo_trusted"] == true` to decide
+   whether to emit direct entitlements.
+6. **Direct entitlements emission**: Convert `arkavo_entitlements` into platform
+   attribute FQNs (e.g., `https://arkavo.ai/attr/classification/value/restricted`).
+7. **Device ceiling**: If the subject is a device NPE (non-person entity), apply
+   the ceiling for its device class.
 
 Subject mappings are not used — all authorization flows through direct
 entitlements and the policy snapshot vocabulary.
