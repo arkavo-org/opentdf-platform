@@ -12,8 +12,8 @@ platform entitlements. Pairs with
 
 When a subject's claims carry the `arkavo_entitlements` claim (in JWT or CWT
 form) and the issuer is trusted, the provider emits **direct entitlements**
-per claim assertion, verbatim as platform attribute value FQNs declared in
-the operator's policy snapshot, e.g.:
+per claim assertion (lowercased and deduplicated) as platform attribute
+value FQNs declared in the operator's policy snapshot, e.g.:
 
 ```
 https://arkavo.ai/attr/classification/value/<classification>
