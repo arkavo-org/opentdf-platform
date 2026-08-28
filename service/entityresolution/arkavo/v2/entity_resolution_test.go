@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"reflect"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -118,6 +119,23 @@ func TestUntrustedIssuer_GrantsNothing(t *testing.T) {
 	}
 }
 
+// TestUntrustedIssuer_RolesNotSurfacedOnSubject: arkavo_roles is
+// self-asserted, materialized-claims data of the same kind as
+// arkavo_entitlements and arkavo_npe, so an untrusted issuer's token must
+// not have it surfaced on the SUBJECT entity either — a subject mapping
+// could otherwise key off it despite the issuer not being trusted.
+func TestUntrustedIssuer_RolesNotSurfacedOnSubject(t *testing.T) {
+	svc := newSvc(t, Config{TrustMaterializedClaims: true, TrustedIssuer: issuer})
+	ents := chainsFor(t, svc, agentToken(t, "https://evil.example.com"))
+	claims := subjectClaimsMap(t, ents)
+	if _, present := claims["arkavo_roles"]; present {
+		t.Errorf("untrusted issuer must not surface arkavo_roles on the subject entity, got %v", claims["arkavo_roles"])
+	}
+	if claims["arkavo_trusted"] == true {
+		t.Error("untrusted issuer must not set the arkavo_trusted marker")
+	}
+}
+
 func TestTrustDisabledByDefault(t *testing.T) {
 	svc := newSvc(t, Config{TrustedIssuer: issuer})
 	if got := entitlementsOf(t, svc, chainsFor(t, svc, agentToken(t, issuer))); len(got) != 0 {
@@ -143,6 +161,47 @@ func TestDeviceToken_ClassCeiling(t *testing.T) {
 	}
 }
 
+// TestDirectEntitlements_FQNsLowercasedAndDeduped: the PDP lowercases
+// resource-side attribute value FQNs before matching, so a mixed-case
+// entitlement FQN — whether token-supplied or from an operator-configured
+// device class ceiling — must be lowercased before it is emitted, and case
+// variants of the same FQN must dedupe to a single entitlement.
+func TestDirectEntitlements_FQNsLowercasedAndDeduped(t *testing.T) {
+	svc := newSvc(t, Config{
+		TrustMaterializedClaims: true, TrustedIssuer: issuer,
+		DeviceClassCeilings: map[string][]string{
+			"unverified": {"HTTPS://ARKAVO.AI/ATTR/CLASSIFICATION/VALUE/INTERNAL"},
+		},
+	})
+	tok := buildJWT(t, map[string]interface{}{
+		"iss": issuer, "sub": "00000000-0000-0000-0000-000000000001",
+		"arkavo_entitlements": []interface{}{
+			"HTTPS://ARKAVO.AI/attr/tdf/value/Decrypt",
+			"https://arkavo.ai/attr/tdf/value/decrypt",
+		},
+		"arkavo_npe": map[string]interface{}{"type": "device", "class": "unverified", "device_id": "K1"},
+	})
+	got := entitlementsOf(t, svc, chainsFor(t, svc, tok))
+
+	wantFQNs := []string{
+		"https://arkavo.ai/attr/tdf/value/decrypt",
+		"https://arkavo.ai/attr/classification/value/internal",
+	}
+	if len(got) != len(wantFQNs) {
+		t.Fatalf("got %d entitlements (want %d, mixed-case duplicates must dedupe): %v", len(got), len(wantFQNs), got)
+	}
+	for _, fqn := range wantFQNs {
+		if _, ok := got[fqn]; !ok {
+			t.Errorf("missing lowercased entitlement %s in %v", fqn, got)
+		}
+	}
+	for fqn := range got {
+		if fqn != strings.ToLower(fqn) {
+			t.Errorf("emitted AttributeValueFqn %q is not lowercase", fqn)
+		}
+	}
+}
+
 func TestClaimsEntityPreservesRawForSecondPass(t *testing.T) {
 	svc := newSvc(t, Config{TrustMaterializedClaims: true, TrustedIssuer: issuer})
 	ents := chainsFor(t, svc, agentToken(t, issuer))
@@ -164,7 +223,7 @@ func TestClaimsEntityPreservesRawForSecondPass(t *testing.T) {
 	}
 }
 
-// --- R12: real base64url CWT end-to-end -------------------------------------
+// --- real base64url CWT end-to-end ------------------------------------------
 
 // signCWT mints an in-package COSE_Sign1 CWT (unverified by the ERS, exactly
 // as the with_request_token path hands it the raw bearer). Kept local since
@@ -293,13 +352,13 @@ func TestCWTToken_MatchesEquivalentJWT(t *testing.T) {
 	}
 }
 
-// --- Review findings regression tests ---------------------------------------
+// --- Trust-boundary regression tests -----------------------------------------
 
-// TestResolveEntities_FabricatedTrustedMarkerRejected covers Finding 1: a
-// caller-supplied Entity_Claims payload is not guaranteed to have come from
-// this service's own CreateEntityChainsFromTokens, so a fabricated
-// arkavo_trusted marker must not bypass the operator's master switch
-// (TrustMaterializedClaims: false here).
+// TestResolveEntities_FabricatedTrustedMarkerRejected: a caller-supplied
+// Entity_Claims payload is not guaranteed to have come from this service's
+// own CreateEntityChainsFromTokens, so a fabricated arkavo_trusted marker
+// must not bypass the operator's master switch (TrustMaterializedClaims:
+// false here).
 func TestResolveEntities_FabricatedTrustedMarkerRejected(t *testing.T) {
 	svc := newSvc(t, Config{TrustMaterializedClaims: false, TrustedIssuer: issuer})
 	claims, err := structpb.NewStruct(map[string]interface{}{
@@ -331,10 +390,10 @@ func TestResolveEntities_FabricatedTrustedMarkerRejected(t *testing.T) {
 	}
 }
 
-// TestCWTToken_NpeEpochTimestampAndByteString_Sanitized covers Finding 2: a
-// legitimately signed CWT whose arkavo_npe carries a CBOR tag-1 epoch
-// timestamp and a byte-string field must not fail CreateEntityChainsFromTokens
-// with structpb.NewStruct's "invalid type: time.Time" error — normalizeCBOR
+// TestCWTToken_NpeEpochTimestampAndByteString_Sanitized: a legitimately
+// signed CWT whose arkavo_npe carries a CBOR tag-1 epoch timestamp and a
+// byte-string field must not fail CreateEntityChainsFromTokens with
+// structpb.NewStruct's "invalid type: time.Time" error — normalizeCBOR
 // (service/internal/auth/cwt_verifier.go) hands those back as native
 // time.Time / []byte, and the ERS boundary must sanitize them.
 func TestCWTToken_NpeEpochTimestampAndByteString_Sanitized(t *testing.T) {
@@ -373,9 +432,9 @@ func TestCWTToken_NpeEpochTimestampAndByteString_Sanitized(t *testing.T) {
 	}
 }
 
-// TestCWTToken_NpeNestedStructures_Sanitized covers Finding 2's recursive
-// case: a nested map and a nested list mixing representable values with a
-// CBOR type structpb cannot hold (a big.Int from a tag-2 unsigned bignum).
+// TestCWTToken_NpeNestedStructures_Sanitized covers the recursive case: a
+// nested map and a nested list mixing representable values with a CBOR type
+// structpb cannot hold (a big.Int from a tag-2 unsigned bignum).
 // The call must still succeed, keep representable values, and drop the rest.
 func TestCWTToken_NpeNestedStructures_Sanitized(t *testing.T) {
 	svc := newSvc(t, Config{TrustMaterializedClaims: true, TrustedIssuer: issuer})

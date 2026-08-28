@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"connectrpc.com/connect"
@@ -24,14 +25,11 @@ import (
 	"google.golang.org/protobuf/types/known/structpb"
 )
 
-// arkavo_npe.class values (see authnz-rs's device attestation ladder) and
-// arkavo_npe.type values. Re-added here per Task 3 (see config.go's NOTE) —
-// this is the code that switches on them.
+// classUnverified is the default arkavo_npe.class when a device token omits
+// it. npeTypeDevice is the arkavo_npe.type value that makes a device NPE
+// subject to DeviceClassCeilings.
 const (
 	classUnverified = "unverified"
-	classManaged    = "managed"
-	classAttested   = "attested"
-	npeTypeAgent    = "agent"
 	npeTypeDevice   = "device"
 )
 
@@ -96,7 +94,7 @@ func (s *EntityResolutionService) ResolveEntities(
 	ctx context.Context,
 	req *connect.Request[entityresolutionV2.ResolveEntitiesRequest],
 ) (*connect.Response[entityresolutionV2.ResolveEntitiesResponse], error) {
-	_, span := s.Start(ctx, "ResolveEntities")
+	ctx, span := s.Start(ctx, "ResolveEntities")
 	defer span.End()
 	reps := make([]*entityresolutionV2.EntityRepresentation, 0, len(req.Msg.GetEntities()))
 	for i, e := range req.Msg.GetEntities() {
@@ -108,6 +106,10 @@ func (s *EntityResolutionService) ResolveEntities(
 		if claimsEntity, ok := e.GetEntityType().(*entity.Entity_Claims); ok {
 			var st structpb.Struct
 			if err := claimsEntity.Claims.UnmarshalTo(&st); err != nil {
+				s.logger.ErrorContext(ctx, "failed to unpack claims entity",
+					slog.Any("error", err),
+					slog.String("entity_id", id),
+				)
 				return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("unpack claims: %w", err))
 			}
 			claims := st.AsMap()
@@ -149,24 +151,15 @@ func (s *EntityResolutionService) entitiesFromToken(ctx context.Context, tokenRa
 	}
 
 	// SUBJECT: the PE for person/device tokens; the agent DID for agent tokens
-	// (agent tokens are evaluated as their own subject — spec §1, choice A).
+	// (an agent token is evaluated as its own subject, not via a delegating
+	// human's identity).
 	subjectClaims := map[string]any{"sub": c.Sub, "iss": c.Iss}
 	if c.AccountID != "" {
 		subjectClaims[s.cfg.ClientIDClaim] = c.AccountID
 	}
-	if len(c.Roles) > 0 {
-		subjectClaims["arkavo_roles"] = toAnySlice(c.Roles)
-	}
 	if trusted {
 		subjectClaims[trustedMarker] = true
-		if len(c.Entitlements) > 0 {
-			subjectClaims["arkavo_entitlements"] = toAnySlice(c.Entitlements)
-		}
-		if raw, ok := m["arkavo_npe"].(map[string]any); ok {
-			if safe, safeOK := structpbSafe(raw); safeOK {
-				subjectClaims["arkavo_npe"] = safe
-			}
-		}
+		addTrustedClaims(subjectClaims, c, m)
 	}
 	st, err := structpb.NewStruct(subjectClaims)
 	if err != nil {
@@ -182,6 +175,25 @@ func (s *EntityResolutionService) entitiesFromToken(ctx context.Context, tokenRa
 		Category:    entity.Entity_CATEGORY_SUBJECT,
 	})
 	return out, nil
+}
+
+// addTrustedClaims adds the self-asserted, materialized-claims data —
+// arkavo_roles, arkavo_entitlements, and the raw arkavo_npe block — that is
+// only surfaced on the subject once the issuer has been trusted.
+func addTrustedClaims(subjectClaims map[string]any, c arkavoClaims, m map[string]any) {
+	if len(c.Roles) > 0 {
+		subjectClaims["arkavo_roles"] = toAnySlice(c.Roles)
+	}
+	if len(c.Entitlements) > 0 {
+		subjectClaims["arkavo_entitlements"] = toAnySlice(c.Entitlements)
+	}
+	raw, ok := m["arkavo_npe"].(map[string]any)
+	if !ok {
+		return
+	}
+	if safe, safeOK := structpbSafe(raw); safeOK {
+		subjectClaims["arkavo_npe"] = safe
+	}
 }
 
 func npeID(c arkavoClaims) string {
@@ -257,6 +269,11 @@ func (s *EntityResolutionService) directEntitlements(c arkavoClaims) []*entityre
 	out := make([]*entityresolutionV2.DirectEntitlement, 0, len(fqns))
 	seen := map[string]bool{}
 	for _, fqn := range fqns {
+		// The PDP lowercases resource-side attribute value FQNs before
+		// matching (service/internal/access/v2), so an entitlement FQN must
+		// be normalized the same way or a mixed-case value silently matches
+		// nothing. Normalizing here also lets seen dedupe case-variants.
+		fqn = strings.ToLower(fqn)
 		if fqn == "" || seen[fqn] {
 			continue
 		}

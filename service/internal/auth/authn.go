@@ -497,10 +497,16 @@ func (a *Authentication) checkToken(ctx context.Context, authHeader []string, dp
 		ctx = audit.ContextWithActorID(ctx, actorID)
 	}
 
-	// X-Actor-Token (spec §1 `act` rule): when present, verify it with the
-	// same token verifier used for the bearer, and require its subject to
-	// either be the bearer's own subject (self-actation) or appear in the
-	// bearer's `act` claim. An absent header leaves behavior unchanged.
+	// X-Actor-Token: carries a second token identifying the effective actor
+	// making the request on behalf of the bearer token's subject (e.g. an
+	// agent acting for a person). When present, it is verified with the same
+	// token verifier used for the bearer, and its subject must either equal
+	// the bearer's own subject (self-actation) or appear in the bearer
+	// token's `act` claim (a list of {"sub": "..."} entries); an actor token
+	// with no subject, or one that fails either check, is rejected. An
+	// absent header leaves behavior unchanged. See ContextWithActorSubject
+	// (service/pkg/auth/context_auth.go) for how the verified actor subject
+	// is carried forward for audit.
 	var verifiedActorSub string
 	if len(actorHeader) > 0 && actorHeader[0] != "" {
 		actorRaw := actorHeader[0]

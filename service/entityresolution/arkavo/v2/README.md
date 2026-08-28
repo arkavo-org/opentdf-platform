@@ -2,16 +2,18 @@
 
 An Arkavo-backed Entity Resolution Service (ERS) for distributed identity and
 authorization within the Arkavo ecosystem. It accepts both JOSE (JWT) and COSE
-(CWT) tokens carrying materialized `arkavo_entitlements` claims, verified by
-a trusted authnz-rs issuer, and translates those claims directly into platform
-entitlements. Pairs with
+(CWT) tokens, already signature-verified upstream by the platform's authn
+middleware, and — when the token's issuer is trusted (see Trust Model below)
+— translates their materialized `arkavo_entitlements` claim directly into
+platform entitlements. Pairs with
 [`examples/config/policy.arkavo.yaml`](../../../../examples/config/policy.arkavo.yaml).
 
 ## What it does
 
 When a subject's claims carry the `arkavo_entitlements` claim (in JWT or CWT
-form), the provider emits **direct entitlements** per claim assertion — in the
-entitlements namespace with dynamic attribute values:
+form) and the issuer is trusted, the provider emits **direct entitlements**
+per claim assertion, verbatim as platform attribute value FQNs declared in
+the operator's policy snapshot, e.g.:
 
 ```
 https://arkavo.ai/attr/classification/value/<classification>
@@ -19,14 +21,16 @@ https://arkavo.ai/attr/action/value/<action>
 https://arkavo.ai/attr/mesh/value/<mesh_role>
 ```
 
-Attribute *values* are dynamic (resolved as synthetic values when
-`allow_direct_entitlements` is on), so onboarding agents requires zero policy
-changes. The provider also surfaces a flattened `.arkavo.*` view for legacy
-subject mappings derived from the same claim.
+Attribute *values* under an already-declared attribute (namespace + name) are
+dynamic (resolved as synthetic values when `allow_direct_entitlements` is
+on), so onboarding a new entitlement value requires no change to the policy
+snapshot — only a new namespace or attribute name does.
 
-It also supports Non-Person Entities (NPE) — service accounts and agents — by
-resolving their client IDs and applying device class ceilings (e.g., an
-`unverified` agent can only access `internal` data).
+It also supports Non-Person Entities (NPE) — device and agent tokens — by
+resolving their client IDs. Device class ceilings additionally cap a
+*device* NPE's direct entitlements to its attested class (e.g., an
+`unverified` device can only access `internal` data); agent NPEs are not
+subject to a ceiling.
 
 ## Configuration
 
@@ -56,8 +60,10 @@ services:
       managed:    ["https://arkavo.ai/attr/classification/value/confidential"]
       attested:   ["https://arkavo.ai/attr/classification/value/restricted"]
 
-    # JWT claim overrides (defaults shown). These control which claim names
-    # carry the entitlements, client ID, and user ID.
+    # Claim name override (default shown). Controls which claim carries the
+    # PE account ID surfaced on the SUBJECT entity; the entitlements
+    # (arkavo_entitlements), user ID (sub), and issuer (iss) claim names are
+    # fixed and not configurable.
     client_id_claim: arkavo_account_id
 ```
 
@@ -78,8 +84,9 @@ master switch.
 When `CreateEntityChainsFromTokens` processes a token, it checks the issuer
 against `trusted_issuer` (if `trust_materialized_claims` is on). If the check
 passes, it stamps `arkavo_trusted: true` onto the SUBJECT entity's claims,
-along with `arkavo_entitlements` and the raw `arkavo_npe` data. This marker
-carries the issuer decision forward into the claims-entity path.
+along with `arkavo_roles`, `arkavo_entitlements`, and the raw `arkavo_npe`
+data — all self-asserted, materialized-claims data gated by the same check.
+This marker carries the issuer decision forward into the claims-entity path.
 
 ### Two-Path Resolution
 
@@ -114,15 +121,17 @@ entirely — no marker check avoids this setting.
    verify that the token's `iss` claim matches `trusted_issuer` (or skip if
    `trusted_issuer` is empty).
 3. **Marker and claims storage**: If the issuer check passes, set
-   `arkavo_trusted: true` and store `arkavo_entitlements` and `arkavo_npe` in
-   the SUBJECT entity's claims.
+   `arkavo_trusted: true` and store `arkavo_roles`, `arkavo_entitlements`, and
+   `arkavo_npe` in the SUBJECT entity's claims.
 4. **Entity synthesis**: Create a SUBJECT entity carrying the claims, and an
    ENVIRONMENT entity if the token includes an `arkavo_npe` block.
 5. **Claims-entity resolution**: On the second pass, `ResolveEntities` checks
    `trust_materialized_claims && claims["arkavo_trusted"] == true` to decide
    whether to emit direct entitlements.
-6. **Direct entitlements emission**: Convert `arkavo_entitlements` into platform
-   attribute FQNs (e.g., `https://arkavo.ai/attr/classification/value/restricted`).
+6. **Direct entitlements emission**: Emit each `arkavo_entitlements` value
+   (already a platform attribute value FQN, e.g.
+   `https://arkavo.ai/attr/classification/value/restricted`) as a direct
+   entitlement, lowercased and deduplicated.
 7. **Device ceiling**: If the subject is a device NPE (non-person entity), apply
    the ceiling for its device class.
 

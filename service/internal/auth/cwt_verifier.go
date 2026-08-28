@@ -157,16 +157,18 @@ func (v *CWTVerifier) VerifyAccessToken(ctx context.Context, tokenRaw string) (j
 }
 
 // decodeSign1FromToken base64-decodes tokenRaw and parses the result as a
-// COSE_Sign1 message, WITHOUT verifying its signature. It accepts
-// base64url (raw, or padded — some clients pad) of either a CBOR-tagged
-// (#61 CWT wrapper around a tagged #18 COSE_Sign1) or untagged COSE_Sign1.
+// COSE_Sign1 message, WITHOUT verifying its signature. It accepts unpadded
+// base64url (RFC 4648 §5), falling back to padded standard base64
+// (RFC 4648 §4) for clients that pad; it does not accept padded base64url.
+// The decoded bytes may hold either a CBOR-tagged (#61 CWT wrapper around a
+// tagged #18 COSE_Sign1) or untagged COSE_Sign1.
 func decodeSign1FromToken(tokenRaw string) (*cose.Sign1Message, error) {
 	raw, err := base64.RawURLEncoding.DecodeString(tokenRaw)
 	if err != nil {
 		// Some clients pad. Accept either form.
 		raw, err = base64.StdEncoding.DecodeString(tokenRaw)
 		if err != nil {
-			return nil, fmt.Errorf("cwt: subject_token is not valid base64url: %w", err)
+			return nil, fmt.Errorf("cwt: token is not valid base64: %w", err)
 		}
 	}
 

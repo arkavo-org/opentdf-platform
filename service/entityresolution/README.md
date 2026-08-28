@@ -55,6 +55,8 @@ Select the ERS implementation that matches your identity backend:
 - Use **Claims ERS** for JWT-based authentication systems
 - Use **Keycloak ERS** for Keycloak identity provider integration
 - Use **Multi-Strategy ERS** for LDAP, SQL databases, and multiple backends with intelligent routing
+- Use **Arkavo ERS** for authnz-rs CWT/JWT claims passthrough with direct entitlements
+- Use **Patreon ERS** for Patreon membership materialized via authnz-rs claims
 
 ### 2. Configure Your Service
 ```yaml

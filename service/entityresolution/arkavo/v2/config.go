@@ -4,9 +4,9 @@ import "log/slog"
 
 // defaultClientIDClaim is the fallback for Config.ClientIDClaim.
 //
-// The arkavo_npe.class values (unverified/managed/attested) and npe.type
-// values (agent/device) live in entity_resolution.go, next to the
-// entitlement-shaping and entity-typing code that switches on them.
+// DeviceClassCeilings keys are arkavo_npe.class values (e.g.
+// unverified/managed/attested); the code that applies them switches only on
+// the "unverified" default, in entity_resolution.go.
 const defaultClientIDClaim = "arkavo_account_id"
 
 // Config configures the arkavo claims-passthrough entity resolver.

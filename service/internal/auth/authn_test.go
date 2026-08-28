@@ -757,9 +757,8 @@ func (s *AuthSuite) mintCWT(custom map[string]any) string {
 }
 
 // TestActorToken covers X-Actor-Token enforcement against the bearer's
-// `act` claim (identity track2 platform arkavo-ers, task 6 / spec §1 `act`
-// rule). Standalone (not a suite method) so `go test -run TestActorToken`
-// selects exactly this test and its subtests.
+// `act` claim. Standalone (not a suite method) so `go test -run
+// TestActorToken` selects exactly this test and its subtests.
 func TestActorToken(t *testing.T) {
 	priv, kid := newP256(t)
 	keySetCBOR := coseKeySetFromPub(t, &priv.PublicKey, kid)
@@ -875,7 +874,7 @@ func TestActorToken(t *testing.T) {
 // TestActorAuthorized pins actorAuthorized's fail-closed contract directly:
 // every malformed/absent shape of the `act` claim must resolve to NOT
 // authorized, and only a well-formed {"sub": <matching string>} entry
-// authorizes. See task-6 fix round 1, finding 2.
+// authorizes.
 func TestActorAuthorized(t *testing.T) {
 	const wantSub = "https://arks.test"
 
