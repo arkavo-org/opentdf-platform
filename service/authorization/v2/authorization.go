@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"sync"
 	"time"
 
 	"connectrpc.com/connect"
@@ -39,6 +40,12 @@ type Service struct {
 	logger *logger.Logger
 	trace.Tracer
 	cache access.EntitlementPolicyStore
+
+	// rrIndex caches which registered resource values policy defines, so
+	// SARC decisions about resources policy does not represent can abstain
+	// without a round trip. See sarc_evaluator.go.
+	rrOnce  sync.Once
+	rrIndex *registeredResourceIndex
 }
 
 func NewRegistration() *serviceregistry.Service[authzV2Connect.AuthorizationServiceHandler] {
@@ -84,6 +91,14 @@ func NewRegistration() *serviceregistry.Service[authzV2Connect.AuthorizationServ
 				l.Debug("authorization service config", slog.Any("config", authZCfg.LogValue()))
 
 				rarHandler := buildRARHandler(as, authZCfg, srp)
+
+				// Publish this service as the platform's in-process policy
+				// evaluator so the control plane's enforcement points reach
+				// the same PDP that governs data, with no RPC hop.
+				if srp.Evaluators != nil {
+					srp.Evaluators.Register(as)
+					l.Info("registered authorization service as the platform policy evaluator")
+				}
 
 				// A file-backed policy snapshot takes precedence over the SDK-backed
 				// cache: it's already in memory, validated at load, and never needs

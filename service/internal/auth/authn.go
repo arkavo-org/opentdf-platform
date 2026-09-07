@@ -11,7 +11,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
-	"path"
 	"slices"
 	"strings"
 	"time"
@@ -27,6 +26,7 @@ import (
 	"github.com/opentdf/platform/service/logger/audit"
 	"google.golang.org/grpc/metadata"
 
+	"github.com/opentdf/platform/service/internal/authzen"
 	ctxAuth "github.com/opentdf/platform/service/pkg/auth"
 	"github.com/opentdf/platform/service/pkg/authz"
 )
@@ -82,12 +82,20 @@ var (
 const (
 	refreshInterval = 15 * time.Minute
 	dpopJWTType     = "dpop+jwt"
-	ActionRead      = "read"
-	ActionWrite     = "write"
-	ActionDelete    = "delete"
-	ActionUnsafe    = "unsafe"
-	ActionOther     = "other"
 )
+
+// Endpoint action names. Defined by the authorization engine; aliased here
+// for callers that reference them through the auth package.
+const (
+	ActionRead   = authzen.ActionRead
+	ActionWrite  = authzen.ActionWrite
+	ActionDelete = authzen.ActionDelete
+	ActionUnsafe = authzen.ActionUnsafe
+	ActionOther  = authzen.ActionOther
+)
+
+// ErrPermissionDenied is returned when a request is not authorized.
+var ErrPermissionDenied = authzen.ErrPermissionDenied
 
 // Authentication holds the access-token verifier and the openid configuration.
 type Authentication struct {
@@ -100,8 +108,15 @@ type Authentication struct {
 	// oidcConfiguration is the resolved AuthN config (issuer aligned to what
 	// the IdP self-reports during discovery, audience/policy as configured).
 	oidcConfiguration AuthNConfig
-	// Casbin enforcer
-	enforcer *Enforcer
+	// pdp is the platform's single Policy Decision Point.
+	pdp *authzen.Engine
+	// roleProvider resolves the subject's roles from its token.
+	roleProvider authz.RoleProvider
+	// authzenAPI exposes the PDP over the AuthZEN Authorization API.
+	authzenAPI *authzen.API
+	// evaluators is the registry the authorization service registers its
+	// in-process policy evaluator with.
+	evaluators *authz.EvaluatorRegistry
 	// Public Routes HTTP & gRPC
 	publicRoutes []string
 	// IPC Reauthorization Routes
@@ -126,17 +141,38 @@ func NewAuthenticator(ctx context.Context, cfg Config, logger *logger.Logger, we
 	}
 	a.tokenVerifier = tokenVerifier
 
-	roleProvider, err := resolveRoleProvider(ctx, cfg, logger)
+	a.roleProvider, err = resolveRoleProvider(ctx, cfg, logger)
 	if err != nil {
 		return nil, err
 	}
-	casbinConfig := CasbinConfig{
-		PolicyConfig: cfg.Policy,
-		RoleProvider: roleProvider,
+
+	grants, err := authzen.BuildGrantSet(cfg.Policy.GrantSources())
+	if err != nil {
+		return nil, fmt.Errorf("failed to build platform authorization grants: %w", err)
 	}
-	logger.Info("initializing casbin enforcer")
-	if a.enforcer, err = NewCasbinEnforcer(casbinConfig, a.logger); err != nil {
-		return nil, fmt.Errorf("failed to initialize casbin enforcer: %w", err)
+	evaluators := cfg.Evaluators
+	if evaluators == nil {
+		evaluators = authz.NewEvaluatorRegistry()
+	}
+	logger.Info("initializing authorization engine",
+		slog.Int("grants", len(grants.Grants)),
+		slog.Int("bindings", len(grants.Bindings)),
+		slog.Bool("bootstrap_enabled", cfg.Policy.Bootstrap.Enabled),
+		slog.Bool("endpoint_policy_enabled", cfg.Policy.EndpointPolicy.Enabled),
+	)
+	a.evaluators = evaluators
+	a.pdp, err = authzen.NewEngine(authzen.Config{
+		Grants:         grants,
+		Bootstrap:      cfg.Policy.Bootstrap,
+		EndpointPolicy: cfg.Policy.EndpointPolicy,
+		Evaluators:     evaluators,
+		Logger:         a.logger,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize authorization engine: %w", err)
+	}
+	if cfg.Policy.AuthZEN.Enabled {
+		a.authzenAPI = authzen.NewAPI(a.pdp, a.SubjectFromContext, a.logger)
 	}
 
 	// Combine public routes
@@ -243,41 +279,26 @@ func (a Authentication) MuxHandler(handler http.Handler) http.Handler {
 			ctx = ctxAuth.EnrichIncomingContextMetadataWithAuthn(ctx, log, clientID)
 		}
 
-		// Check if the token is allowed to access the resource
-		var action string
-		switch r.Method {
-		case http.MethodGet:
-			action = ActionRead
-		case http.MethodPost, http.MethodPut, http.MethodPatch:
-			action = ActionWrite
-		case http.MethodDelete:
-			action = ActionDelete
-		default:
-			action = ActionUnsafe
+		// Ask the platform PDP whether this subject may perform this
+		// operation on this resource.
+		decisionReq := authzen.HTTPRequest(r.Method, r.URL.Path)
+		if err := a.contextualize(ctx, accessTok, &decisionReq); err != nil {
+			log.WarnContext(ctx, "permission denied", slog.Any("error", err))
+			http.Error(w, "permission denied", http.StatusForbidden)
+			return
 		}
-		roleReq := authz.RoleRequest{
-			Issuer:   a.oidcConfiguration.Issuer,
-			Resource: r.URL.Path,
-			Action:   action,
-		}
-		if allow, err := a.enforcer.Enforce(ctx, accessTok, roleReq); err != nil {
-			if errors.Is(err, ErrPermissionDenied) {
-				log.WarnContext(
-					ctx,
-					"permission denied",
-					slog.String("azp", accessTok.Subject()),
-					slog.Any("error", err),
-				)
-				http.Error(w, "permission denied", http.StatusForbidden)
-				return
-			}
+		decision, err := a.pdp.Decide(ctx, decisionReq)
+		if err != nil {
+			log.ErrorContext(ctx, "authorization decision failed", slog.Any("error", err))
 			http.Error(w, "internal server error", http.StatusInternalServerError)
 			return
-		} else if !allow {
+		}
+		if !decision.Allowed() {
 			log.WarnContext(
 				ctx,
 				"permission denied",
 				slog.String("azp", accessTok.Subject()),
+				slog.String("reason", decision.Reason),
 			)
 			http.Error(w, "permission denied", http.StatusForbidden)
 			return
@@ -318,10 +339,7 @@ func (a Authentication) ConnectUnaryServerInterceptor() connect.UnaryInterceptor
 				return nil, connect.NewError(connect.CodeUnauthenticated, errors.New("missing authorization header"))
 			}
 
-			// parse the rpc method
-			p := strings.Split(req.Spec().Procedure, "/")
-			resource := path.Join(p[1], p[2])
-			action := getAction(p[2])
+			decisionReq := authzen.ConnectRequest(req.Spec().Procedure)
 
 			token, ctxWithJWK, err := a.checkToken(
 				ctx,
@@ -347,26 +365,23 @@ func (a Authentication) ConnectUnaryServerInterceptor() connect.UnaryInterceptor
 				ctxWithJWK = ctxAuth.EnrichIncomingContextMetadataWithAuthn(ctxWithJWK, log, clientID)
 			}
 
-			// Check if the token is allowed to access the resource
-			roleReq := authz.RoleRequest{
-				Issuer:   a.oidcConfiguration.Issuer,
-				Resource: resource,
-				Action:   action,
+			// Ask the platform PDP whether this subject may invoke this
+			// procedure.
+			if err := a.contextualize(ctxWithJWK, token, &decisionReq); err != nil {
+				log.WarnContext(ctxWithJWK, "permission denied", slog.Any("error", err))
+				return nil, connect.NewError(connect.CodePermissionDenied, ErrPermissionDenied)
 			}
-			if allowed, err := a.enforcer.Enforce(ctxWithJWK, token, roleReq); err != nil {
-				if errors.Is(err, ErrPermissionDenied) {
-					log.WarnContext(
-						ctxWithJWK,
-						"permission denied",
-						slog.String("azp", token.Subject()),
-						slog.Any("error", err),
-					)
-					return nil, connect.NewError(connect.CodePermissionDenied, errors.New("permission denied"))
-				}
-				return nil, err
-			} else if !allowed {
-				log.WarnContext(ctxWithJWK, "permission denied", slog.String("azp", token.Subject()))
-				return nil, connect.NewError(connect.CodePermissionDenied, errors.New("permission denied"))
+			decision, err := a.pdp.Decide(ctxWithJWK, decisionReq)
+			if err != nil {
+				log.ErrorContext(ctxWithJWK, "authorization decision failed", slog.Any("error", err))
+				return nil, connect.NewError(connect.CodeInternal, errors.New("internal server error"))
+			}
+			if !decision.Allowed() {
+				log.WarnContext(ctxWithJWK, "permission denied",
+					slog.String("azp", token.Subject()),
+					slog.String("reason", decision.Reason),
+				)
+				return nil, connect.NewError(connect.CodePermissionDenied, ErrPermissionDenied)
 			}
 
 			return next(ctxWithJWK, req)
@@ -445,17 +460,7 @@ func (a Authentication) IPCUnaryServerInterceptor() connect.UnaryInterceptorFunc
 
 // getAction returns the action based on the rpc name
 func getAction(method string) string {
-	switch {
-	case strings.HasPrefix(method, "List") || strings.HasPrefix(method, "Get"):
-		return ActionRead
-	case strings.HasPrefix(method, "Create") || strings.HasPrefix(method, "Update") || strings.HasPrefix(method, "Assign"):
-		return ActionWrite
-	case strings.HasPrefix(method, "Delete") || strings.HasPrefix(method, "Remove") || strings.HasPrefix(method, "Deactivate"):
-		return ActionDelete
-	case strings.HasPrefix(method, "Unsafe"):
-		return ActionUnsafe
-	}
-	return ActionOther
+	return authzen.ActionForRPC(method)
 }
 
 // checkToken is a helper function to verify the token.
@@ -685,7 +690,11 @@ func (a Authentication) ipcReauthCheck(ctx context.Context, path string, header 
 
 // getClientIDFromToken returns the client ID from the token if found (dot notation)
 func (a *Authentication) getClientIDFromToken(ctx context.Context, tok jwt.Token) (string, error) {
-	clientIDClaim := a.oidcConfiguration.Policy.ClientIDClaim
+	return clientIDFromToken(ctx, tok, a.oidcConfiguration.Policy.ClientIDClaim)
+}
+
+// clientIDFromToken reads the configured client ID claim from a token.
+func clientIDFromToken(ctx context.Context, tok jwt.Token, clientIDClaim string) (string, error) {
 	if clientIDClaim == "" {
 		return "", ErrClientIDClaimNotConfigured
 	}

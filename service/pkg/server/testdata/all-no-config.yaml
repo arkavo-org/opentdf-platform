@@ -43,29 +43,50 @@ server:
       username_claim: # preferred_username
       # That claim to access groups (i.e. realm_access.roles)
       groups_claim: # realm_access.roles
-      ## Extends the builtin policy
-      extension: |
-        g, opentdf-admin, role:admin
-        g, opentdf-standard, role:standard
-      ## Custom policy that overrides builtin policy (see examples https://github.com/casbin/casbin/tree/master/examples)
-      csv: #|
-      #  p, role:admin, *, *, allow
-      ## Custom model (see https://casbin.org/docs/syntax-for-models/)
-      model: #|
-      #  [request_definition]
-      #  r = sub, res, act, obj
-      #
-      #  [policy_definition]
-      #  p = sub, res, act, obj, eft
-      #
-      #  [role_definition]
-      #  g = _, _
-      #
-      #  [policy_effect]
-      #  e = some(where (p.eft == allow)) && !some(where (p.eft == deny))
-      #
-      #  [matchers]
-      #  m = g(r.sub, p.sub) && globOrRegexMatch(r.res, p.res) && globOrRegexMatch(r.act, p.act) && globOrRegexMatch(r.obj, p.obj)
+      # Claim the represents the idP client ID
+      client_id_claim: # azp
+      # Optional external role provider (name is resolved via StartOptions)
+      # roles_provider:
+      #   name: external
+      #   config: {} # provider-specific (any object)
+      ## Bind platform roles to idP groups (role: group)
+      map:
+        # admin: opentdf-admin
+        # standard: opentdf-standard
+      ## Extends the built-in grant table
+      extension: #|
+      #  grants:
+      #    - subjects: ["role:standard"]
+      #      resources: ["new.service.*"]
+      #      actions: ["read"]
+      ## Replaces the built-in grant table entirely
+      grants: #|
+      #  grants:
+      #    - subjects: ["role:admin"]
+      #      resources: ["*"]
+      #      actions: ["*"]
+      #  bindings:
+      #    - subject: opentdf-admin
+      #      role: admin
+      ## Govern platform API operations with the policy graph itself: each
+      ## endpoint is a registered resource value, decided by the same PDP
+      ## that governs data. Endpoints with no registered resource fall back
+      ## to the grant table above.
+      endpoint_policy:
+        enabled: false
+        # namespace: platform.example.com
+        # resource_name: endpoint
+      ## Cryptographic root of trust for the operations that would otherwise
+      ## depend on the policy they change. Disabled unless an authority is named.
+      bootstrap:
+        enabled: false
+        # issuers:
+        #   - https://root.example.com
+        # capabilities_claim: capabilities
+        # require_confirmation: true
+      ## AuthZEN Authorization API (POST /access/v1/evaluation)
+      authzen:
+        enabled: true
   cors:
     enabled: false
     # "*" to allow any origin or a specific domain like "https://yourdomain.com"

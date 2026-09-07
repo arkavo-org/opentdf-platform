@@ -33,7 +33,7 @@ The platform leverages [viper](https://github.com/spf13/viper) to help load conf
       - [Example: Entity Resolution v1](#example-entity-resolution-v1)
       - [Example: Entity Resolution v2](#example-entity-resolution-v2)
     - [Policy](#policy)
-    - [Casbin Endpoint Authorization](#casbin-endpoint-authorization)
+    - [Platform Authorization](#platform-authorization)
       - [Key Aspects of Authorization Configuration](#key-aspects-of-authorization-configuration)
       - [Configuration in opentdf-example.yaml](#configuration-in-opentdf-exampleyaml)
       - [Role Permissions](#role-permissions)
@@ -120,7 +120,7 @@ Root level key `server`
 | ----------------------- | ------------------------------------------------------------------------------------------------------------- | ------- | ------------------------------------ |
 | `auth.audience`         | The audience for the IDP.                                                                                     |         | OPENTDF_SERVER_AUTH_AUDIENCE         |
 | `auth.issuer`           | The issuer for the IDP.                                                                                       |         | OPENTDF_SERVER_AUTH_ISSUER           |
-| `auth.policy`           | The Casbin policy for enforcing authorization on endpoints. Described [below](#casbin-endpoint-authorization) |         |                                      |
+| `auth.policy`           | Platform authorization: subject derivation, grants, root of trust. Described [below](#platform-authorization) |         |                                      |
 | `auth.cache_refresh`    | Interval in which the IDP jwks should be refreshed                                                            | `15m`   | OPENTDF_SERVER_AUTH_CACHE_REFRESH    |
 | `auth.dpopskew`         | The amount of time drift allowed between when the client generated a dpop proof and the server time.          | `1h`    | OPENTDF_SERVER_AUTH                  |
 | `auth.skew`             | The amount of time drift allowed between a tokens `exp` claim and the server time.                            | `1m`    | OPENTDF_SERVER_AUTH_SKEW             |
@@ -552,101 +552,210 @@ services:
     namespaced_policy: false
 ```
 
-### Casbin Endpoint Authorization
+### Platform Authorization
 
-OpenTDF uses Casbin to manage authorization policies. This document provides an overview of how to configure and manage the default authorization policy in OpenTDF.
+The platform has one Policy Decision Point. The same PDP that decides whether
+an entity may read a TDF decides whether a caller may invoke an API: platform
+operations are resources, and every question is asked in the same SARC shape.
 
-#### Key Aspects of Authorization Configuration
+```text
+CWT / COSE
+    │
+    ▼
+Identity / Entity
+    │
+    ▼
+AuthZEN PEP  ── Connect interceptor, HTTP middleware, /access/v1/evaluation
+    │
+    ▼
+Subject · Action · Resource · Context
+    │
+    ▼
+OpenTDF Authorization v2
+    │
+    ▼
+allow / deny / obligations
+```
 
-2. **Username Claim**: The claim in the OIDC token that should be used to extract a username.
-3. **Group Claim**: The claim in the OIDC token that should be used to find the group claims.
-4. **Map (Deprecated)**: Mapping between policy roles and IdP roles.
-4. **Extension**: Policy that will extend the builtin policy
-4. **CSV**: The authorization policy in CSV format. This will override the builtin policy.
-5. **Model**: The Casbin policy model. This should only be set if you have a deep understanding of how casbin works.
+Decision sources are consulted in order, and the first definite answer wins:
 
-#### Configuration in opentdf-example.yaml
+1. **Bootstrap root of trust** — capabilities asserted by a token from a
+   configured root authority. Permits only; never denies.
+2. **OpenTDF policy** — for resources policy represents. Endpoints reach this
+   source when `endpoint_policy` is enabled.
+3. **Platform grants** — the baseline table of which subjects may take which
+   actions on which platform operations.
+4. **Deny.**
 
-Below is an example configuration snippet from
-opentdf-example.yaml:
+#### Key aspects of authorization configuration
+
+1. **Username claim**: the claim in the token used to extract a username.
+2. **Groups claim**: the claim in the token used to find group/role claims.
+3. **Map**: binds a platform role (key) to an idP group (value).
+4. **Extension**: grants merged on top of the table in force.
+5. **Grants**: grants that replace the built-in table entirely.
+6. **Endpoint policy**: govern API operations with the policy graph itself.
+7. **Bootstrap**: the cryptographic root of trust.
+8. **AuthZEN**: the public evaluation API.
+
+#### Grants
+
+A grant says which subjects may take which actions on which resources.
+Subjects, resources and actions are glob patterns. Resources are RPC
+procedures (`<package>.<Service>/<Method>`) or HTTP routes (`/path`); actions
+are `read`, `write`, `delete`, `unsafe` and `other`. A matching `deny` always
+wins.
 
 ```yaml
 server:
   auth:
     enabled: true
     enforceDPoP: false
-    # public_client_id: 'opentdf-public' # DEPRECATED
     audience: 'http://localhost:8080'
     issuer: http://keycloak:8888/auth/realms/opentdf
     policy:
-      
-      ## Deprecated
       ## Dot notation is used to access nested claims (i.e. realm_access.roles)
-      claim: "realm_access.roles"
-
-      ## Dot notation is used to access the username claim
-      username_claim: "email"
-
-      ## Dot notation is used to access the groups claim
-      group_claim: "realm_access.roles"
-
-      # Dot notation is used to access the claim the represents the idP client ID 
+      username_claim: 'email'
+      groups_claim: 'realm_access.roles'
       client_id_claim: # azp
-      
-      ## Deprecated: Use standard casbin policy groupings (g, <user/group>, <role>)
-      ## Maps the external role to the OpenTDF role
-      ## Note: left side is used in the policy, right side is the external role
+
+      ## Bind platform roles to idP groups
       map:
         standard: opentdf-standard
         admin: opentdf-admin
 
-      ## Policy that will extend the builtin policy.
+      ## Extend the built-in grant table
       extension: |
-        p, role:admin, *, *, allow
-        p, role:standard, policy:attributes, read, allow
-        p, role:standard, policy:subject-mappings, read, allow
-        g, opentdf-admin, role:admin
-        g, alice@opentdf.io, role:standard
+        grants:
+          - subjects: ["role:standard"]
+            resources: ["policy.subjectmapping.*"]
+            actions: ["read"]
+        bindings:
+          - subject: alice@opentdf.io
+            role: standard
 
-      ## Custom policy (see examples https://github.com/casbin/casbin/tree/master/examples)
-      ## This will overwrite the builtin policy. Use with caution. 
-      csv: |
-        p, role:admin, *, *, allow
-        p, role:standard, policy:attributes, read, allow
-        p, role:standard, policy:subject-mappings, read, allow
-        p, role:standard, policy:resource-mappings, read, allow
-        p, role:standard, policy:kas-registry, read, allow
-        p, role:unknown, entityresolution.EntityResolutionService.ResolveEntities, write, allow
-        p, role:unknown, kas.AccessService/Rewrap, *, allow
-
-      ## Custom model (see https://casbin.org/docs/syntax-for-models/)
-      ## Avoid setting this unless you have a deep understanding of how casbin works. 
-      model: |
-        [request_definition]
-        r = sub, res, act, obj
-        
-        [policy_definition]
-        p = sub, res, act, obj, eft
-        
-        [role_definition]
-        g = _, _
-        
-        [policy_effect]
-        e = some(where (p.eft == allow)) && !some(where (p.eft == deny))
-        
-        [matchers]
-        m = g(r.sub, p.sub) && globOrRegexMatch(r.res, p.res) && globOrRegexMatch(r.act, p.act) && globOrRegexMatch(r.obj, p.obj)
+      ## Replace the built-in grant table entirely
+      grants: |
+        grants:
+          - subjects: ["role:admin"]
+            resources: ["*"]
+            actions: ["*"]
+          - subjects: ["role:standard"]
+            resources: ["policy.*", "kasregistry.*"]
+            actions: ["read"]
+          - subjects: ["role:standard", "role:unknown"]
+            resources: ["kas.AccessService/Rewrap"]
+            actions: ["*"]
+        bindings:
+          - subject: opentdf-admin
+            role: admin
 ```
 
-#### Role Permissions
+The built-in table binds the conventional `opentdf-admin` and
+`opentdf-standard` groups. Those bindings are the platform's opinion about an
+unconfigured deployment: as soon as `map` or `extension` states bindings of
+your own, the built-in ones step aside.
 
-- **Admin**: Can perform all operations.
-- **Standard User**: Can read.
-- **Public Endpoints**: Accessible without specific roles.
+Configuration written in the platform's previous comma-separated policy format
+still loads — the lines are translated into grants at startup — so upgrading
+does not require rewriting policy:
 
-#### Managing Authorization Policy
+```yaml
+      extension: |
+        p, role:standard, new.service.*, read, allow
+        g, opentdf-admin, role:admin
+```
 
-Admins can manage the authorization policy directly in the YAML configuration file. For detailed configuration options, refer to the [Casbin documentation](https://casbin.org/docs/en/syntax-for-models).
+#### Policy-governed endpoints
+
+With `endpoint_policy` enabled, each platform operation is addressed as a
+registered resource value FQN and decided by the policy graph:
+
+```text
+https://<namespace>/reg_res/<resource_name>/value/<sanitized endpoint id>
+```
+
+For example, `policy.attributes.AttributeService/CreateAttribute` becomes
+`https://platform.example.com/reg_res/endpoint/value/policy_attributes_attributeservice_createattribute`.
+
+```yaml
+      endpoint_policy:
+        enabled: true
+        namespace: platform.example.com
+        resource_name: endpoint
+```
+
+Adoption is incremental: endpoints with no registered resource fall back to
+the grant table, so operations can be moved into policy one at a time. Policy
+must define actions matching the platform's action names (`read`, `write`,
+`delete`, `unsafe`, `other`) for the endpoints it governs.
+
+#### Bootstrap root of trust
+
+A request to write a subject mapping is governed by the same policy graph it is
+about to modify. Without a way in, a platform with an empty or broken policy
+graph could not be administered. The root of trust is that way in, and nothing
+more: a small, fixed set of capabilities asserted by a token from a configured
+authority.
+
+| Capability          | Authorizes                                    |
+| ------------------- | --------------------------------------------- |
+| `policy.bootstrap`  | Seeding the policy graph                      |
+| `policy.admin`      | Administering policy and the KAS registry     |
+| `authority.rotate`  | Rotating platform keys                        |
+
+```yaml
+      bootstrap:
+        enabled: true
+        issuers:
+          - https://root.example.com
+        capabilities_claim: capabilities
+        require_confirmation: true
+```
+
+Capabilities are honored only for the named issuers, and — with
+`require_confirmation` — only when the token is key-bound (`cnf`), so a root
+capability is not a bearer secret. They are never granted by policy, and they
+can only permit.
+
+#### AuthZEN Authorization API
+
+The PDP's public contract is the AuthZEN Authorization API, served behind the
+platform's own authentication:
+
+```text
+POST /access/v1/evaluation
+POST /access/v1/evaluations
+```
+
+```json
+{
+  "subject": { "type": "user", "id": "alice@opentdf.io" },
+  "action": { "name": "read" },
+  "resource": {
+    "type": "attribute_values",
+    "id": "tdf-1",
+    "properties": {
+      "attribute_value_fqns": ["https://example.com/attr/classification/value/secret"]
+    }
+  }
+}
+```
+
+Callers may ask about any subject, but may not assert what that subject is
+entitled to: roles and root capabilities are taken from the caller's verified
+token only. A question about another subject is answered from policy alone.
+
+```yaml
+      authzen:
+        enabled: true
+```
+
+#### Role permissions
+
+- **Admin**: can perform all operations.
+- **Standard user**: can read policy, ask the PDP for decisions, and rewrap.
+- **Public endpoints**: accessible without specific roles.
 
 ## Cache Configuration
 

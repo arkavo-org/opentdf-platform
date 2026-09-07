@@ -6,7 +6,9 @@ import (
 	"github.com/lestrrat-go/jwx/v2/jwt"
 )
 
-// RoleProvider returns role/group identifiers used as Casbin subjects.
+// RoleProvider resolves the role/group identifiers carried by a subject.
+// The identifiers it returns become subject facts on the SARC decision
+// request; how they are matched is the PDP's business, not the provider's.
 type RoleProvider interface {
 	Roles(ctx context.Context, token jwt.Token, req RoleRequest) ([]string, error)
 }
