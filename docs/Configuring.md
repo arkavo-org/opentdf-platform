@@ -751,7 +751,9 @@ the PDP assembles its policy view once for the request and answers every item
 from it. An item the PDP cannot answer is denied in its own result, with
 `context.error` set, so one failure does not discard the rest of the batch; a
 malformed item is reported as a `400` naming its index, since the caller can
-fix it.
+fix it. A caller the platform cannot resolve — a degraded role provider, say
+— fails the whole request with a `500`: that is an outage, not a decision,
+and reporting it as denials would hide it in the denial rate.
 
 ```yaml
       authzen:

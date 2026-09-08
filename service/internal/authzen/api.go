@@ -105,7 +105,13 @@ func (a *API) handleEvaluation(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := authz.ContextWithSession(r.Context(), authz.NewSession())
-	decision, err := a.evaluate(ctx, body, evaluationRequest{})
+	caller, err := a.caller(ctx)
+	if err != nil {
+		a.writeEvaluationError(w, r, err)
+		return
+	}
+
+	decision, err := a.evaluate(ctx, caller, body, evaluationRequest{})
 	if err != nil {
 		a.writeEvaluationError(w, r, err)
 		return
@@ -142,9 +148,19 @@ func (a *API) handleEvaluations(w http.ResponseWriter, r *http.Request) {
 	// graph once and answers every item from it.
 	ctx := authz.ContextWithSession(r.Context(), authz.NewSession())
 
+	// Who is asking is a property of the request, not of any one item, so
+	// it is resolved once. A caller the platform cannot resolve is a
+	// request-wide outage; reporting it as N denials would hide it in the
+	// very denial rate the distinction exists to keep it out of.
+	caller, err := a.caller(ctx)
+	if err != nil {
+		a.writeEvaluationError(w, r, err)
+		return
+	}
+
 	out := evaluationsResponse{Evaluations: make([]evaluationResponse, 0, len(body.Evaluations))}
 	for i, item := range body.Evaluations {
-		decision, err := a.evaluate(ctx, item, defaults)
+		decision, err := a.evaluate(ctx, caller, item, defaults)
 		switch {
 		case errors.Is(err, ErrInvalidRequest):
 			// The request is malformed rather than unanswerable, and the
@@ -177,12 +193,14 @@ func (a *API) handleEvaluations(w http.ResponseWriter, r *http.Request) {
 }
 
 // evaluate turns an AuthZEN request into a SARC decision request and asks
-// the engine.
+// the engine. The caller is resolved by the handler, once per request, so
+// that an unresolvable caller can only ever be reported as the request-wide
+// failure it is.
 //
 // The subject's roles and root capabilities are only ever taken from the
 // caller's verified token, never from the request body: a PEP may ask about
 // any subject, but it may not assert what that subject is entitled to.
-func (a *API) evaluate(ctx context.Context, req, defaults evaluationRequest) (authz.Decision, error) {
+func (a *API) evaluate(ctx context.Context, caller authz.Subject, req, defaults evaluationRequest) (authz.Decision, error) {
 	subject := firstSubject(req.Subject, defaults.Subject)
 	action := firstAction(req.Action, defaults.Action)
 	resource := firstResource(req.Resource, defaults.Resource)
@@ -198,10 +216,6 @@ func (a *API) evaluate(ctx context.Context, req, defaults evaluationRequest) (au
 		return authz.Decision{}, fmt.Errorf("%w: resource is required", ErrInvalidRequest)
 	}
 
-	caller, err := a.caller(ctx)
-	if err != nil {
-		return authz.Decision{}, err
-	}
 	decisionSubject := caller
 	if subject != nil && subject.ID != "" && subject.ID != caller.ID {
 		// A question about somebody else is answered from policy alone.

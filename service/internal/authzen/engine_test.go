@@ -515,6 +515,49 @@ func TestAuthZENReportsCallerResolutionFailure(t *testing.T) {
 	require.Equal(t, http.StatusInternalServerError, rec.Code)
 }
 
+// A caller the platform cannot resolve is a request-wide outage. The batch
+// path must report it as one, not bury it in N per-item denials — that is
+// the failure mode the deny/outage distinction exists to prevent.
+func TestAuthZENBatchReportsCallerResolutionFailure(t *testing.T) {
+	evaluator := &sessionEvaluator{}
+	registry := authz.NewEvaluatorRegistry()
+	registry.Register(evaluator)
+
+	engine := testEngine(t, authzen.Config{Evaluators: registry})
+	api := authzen.NewAPI(engine, func(context.Context) (authz.Subject, error) {
+		return authz.Subject{}, errors.New("role provider unreachable")
+	}, logger.CreateTestLogger())
+	mux := http.NewServeMux()
+	api.Mount(mux)
+
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, authzen.EvaluationsPath, strings.NewReader(dataEvaluationsBody(5))))
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
+	require.NotContains(t, rec.Body.String(), `"decision":false`, "an outage must not be answered as denials")
+	require.Zero(t, evaluator.decisions, "no item should be evaluated once the caller is unresolvable")
+}
+
+// The caller is a property of the request, so it is resolved once however
+// many questions the request asks.
+func TestAuthZENResolvesCallerOncePerRequest(t *testing.T) {
+	registry := authz.NewEvaluatorRegistry()
+	registry.Register(&sessionEvaluator{})
+
+	engine := testEngine(t, authzen.Config{Evaluators: registry})
+	resolutions := 0
+	api := authzen.NewAPI(engine, func(context.Context) (authz.Subject, error) {
+		resolutions++
+		return authz.Subject{ID: "someone"}, nil
+	}, logger.CreateTestLogger())
+	mux := http.NewServeMux()
+	api.Mount(mux)
+
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, authzen.EvaluationsPath, strings.NewReader(dataEvaluationsBody(10))))
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, 1, resolutions)
+}
+
 func TestSessionBuildsOnce(t *testing.T) {
 	session := authz.NewSession()
 	builds := 0
