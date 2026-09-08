@@ -289,7 +289,7 @@ func TestEngineRequiresNamespaceForEndpointPolicy(t *testing.T) {
 func TestAuthZENEvaluationEndpoint(t *testing.T) {
 	engine := testEngine(t, authzen.Config{})
 	caller := authz.Subject{ID: "admin-user", Roles: []string{"opentdf-admin"}}
-	api := authzen.NewAPI(engine, func(context.Context) authz.Subject { return caller }, logger.CreateTestLogger())
+	api := authzen.NewAPI(engine, func(context.Context) (authz.Subject, error) { return caller, nil }, logger.CreateTestLogger())
 
 	mux := http.NewServeMux()
 	api.Mount(mux)
@@ -320,7 +320,7 @@ func TestAuthZENEvaluationEndpoint(t *testing.T) {
 func TestAuthZENBatchEvaluation(t *testing.T) {
 	engine := testEngine(t, authzen.Config{})
 	caller := authz.Subject{ID: "standard-user", Roles: []string{"opentdf-standard"}}
-	api := authzen.NewAPI(engine, func(context.Context) authz.Subject { return caller }, logger.CreateTestLogger())
+	api := authzen.NewAPI(engine, func(context.Context) (authz.Subject, error) { return caller, nil }, logger.CreateTestLogger())
 
 	mux := http.NewServeMux()
 	api.Mount(mux)
@@ -350,7 +350,7 @@ func TestAuthZENBatchEvaluation(t *testing.T) {
 
 func TestAuthZENRejectsBadRequests(t *testing.T) {
 	engine := testEngine(t, authzen.Config{})
-	api := authzen.NewAPI(engine, func(context.Context) authz.Subject { return authz.Subject{} }, logger.CreateTestLogger())
+	api := authzen.NewAPI(engine, func(context.Context) (authz.Subject, error) { return authz.Subject{}, nil }, logger.CreateTestLogger())
 	mux := http.NewServeMux()
 	api.Mount(mux)
 
@@ -372,4 +372,186 @@ func TestEvaluatorRegistryAbstainsWhenEmpty(t *testing.T) {
 	decision, err := registry.Evaluate(context.Background(), authz.DecisionRequest{})
 	require.NoError(t, err)
 	require.Equal(t, authz.EffectAbstain, decision.Effect)
+}
+
+// sessionEvaluator records how many times it had to build its per-request
+// state, so a batch that shares one session is visible as one build.
+type sessionEvaluator struct {
+	builds    int
+	decisions int
+}
+
+type sessionEvaluatorKey struct{}
+
+func (e *sessionEvaluator) Evaluate(ctx context.Context, _ authz.DecisionRequest) (authz.Decision, error) {
+	e.decisions++
+	session := authz.SessionFromContext(ctx)
+	if session == nil {
+		return authz.Decision{}, errors.New("no decision session on the context")
+	}
+	if _, err := session.Do(sessionEvaluatorKey{}, func() (any, error) {
+		e.builds++
+		return struct{}{}, nil
+	}); err != nil {
+		return authz.Decision{}, err
+	}
+	return authz.Decision{Effect: authz.EffectPermit}, nil
+}
+
+func dataEvaluationsBody(count int) string {
+	items := make([]string, 0, count)
+	for range count {
+		items = append(items, `{"action":{"name":"read"}}`)
+	}
+	return `{
+	  "resource": {"type":"attribute_values","id":"tdf-1","properties":{"attribute_value_fqns":["https://example.com/attr/classification/value/secret"]}},
+	  "evaluations": [` + strings.Join(items, ",") + `]
+	}`
+}
+
+// A batch asks many questions; the evaluator should only assemble its
+// policy state once for the whole request.
+func TestAuthZENBatchSharesOneSession(t *testing.T) {
+	evaluator := &sessionEvaluator{}
+	registry := authz.NewEvaluatorRegistry()
+	registry.Register(evaluator)
+
+	engine := testEngine(t, authzen.Config{Evaluators: registry})
+	api := authzen.NewAPI(engine, func(context.Context) (authz.Subject, error) {
+		return authz.Subject{ID: "someone"}, nil
+	}, logger.CreateTestLogger())
+	mux := http.NewServeMux()
+	api.Mount(mux)
+
+	const items = 25
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, authzen.EvaluationsPath, strings.NewReader(dataEvaluationsBody(items))))
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	require.Equal(t, items, evaluator.decisions)
+	require.Equal(t, 1, evaluator.builds, "a batch must assemble policy state once, not once per item")
+
+	// A second request is a second session, and so a second build: a
+	// session is request-scoped, never a cache.
+	rec = httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, authzen.EvaluationsPath, strings.NewReader(dataEvaluationsBody(1))))
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, 2, evaluator.builds)
+}
+
+// One unanswerable item denies that item; the rest of the batch is still
+// answered, as the AuthZEN batch contract expects.
+type flakyEvaluator struct{ calls int }
+
+// failOnCall is the 1-based item the evaluator refuses to answer.
+const failOnCall = 2
+
+func (e *flakyEvaluator) Evaluate(context.Context, authz.DecisionRequest) (authz.Decision, error) {
+	e.calls++
+	if e.calls == failOnCall {
+		return authz.Decision{}, errors.New("policy unavailable")
+	}
+	return authz.Decision{Effect: authz.EffectPermit}, nil
+}
+
+func TestAuthZENBatchSurvivesOneFailingItem(t *testing.T) {
+	registry := authz.NewEvaluatorRegistry()
+	registry.Register(&flakyEvaluator{})
+
+	engine := testEngine(t, authzen.Config{Evaluators: registry})
+	api := authzen.NewAPI(engine, func(context.Context) (authz.Subject, error) {
+		return authz.Subject{ID: "someone"}, nil
+	}, logger.CreateTestLogger())
+	mux := http.NewServeMux()
+	api.Mount(mux)
+
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, authzen.EvaluationsPath, strings.NewReader(dataEvaluationsBody(3))))
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var out struct {
+		Evaluations []struct {
+			Decision bool           `json:"decision"`
+			Context  map[string]any `json:"context"`
+		} `json:"evaluations"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	require.Len(t, out.Evaluations, 3)
+	require.True(t, out.Evaluations[0].Decision)
+	require.False(t, out.Evaluations[1].Decision)
+	require.Equal(t, true, out.Evaluations[1].Context["error"])
+	require.True(t, out.Evaluations[2].Decision)
+}
+
+// A malformed item is the caller's to fix, so the batch says so rather than
+// handing back a denial they might act on.
+func TestAuthZENBatchRejectsMalformedItem(t *testing.T) {
+	engine := testEngine(t, authzen.Config{})
+	api := authzen.NewAPI(engine, func(context.Context) (authz.Subject, error) {
+		return authz.Subject{ID: "someone"}, nil
+	}, logger.CreateTestLogger())
+	mux := http.NewServeMux()
+	api.Mount(mux)
+
+	body := `{"resource":{"type":"endpoint","id":"policy.attributes.List"},"evaluations":[{"action":{"name":"read"}},{}]}`
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, authzen.EvaluationsPath, strings.NewReader(body)))
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	require.Contains(t, rec.Body.String(), "evaluations[1]")
+}
+
+// A caller whose subject cannot be resolved is an outage, not a denial.
+func TestAuthZENReportsCallerResolutionFailure(t *testing.T) {
+	engine := testEngine(t, authzen.Config{})
+	api := authzen.NewAPI(engine, func(context.Context) (authz.Subject, error) {
+		return authz.Subject{}, errors.New("role provider unreachable")
+	}, logger.CreateTestLogger())
+	mux := http.NewServeMux()
+	api.Mount(mux)
+
+	body := `{"action":{"name":"read"},"resource":{"type":"endpoint","id":"policy.attributes.List"}}`
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, authzen.EvaluationPath, strings.NewReader(body)))
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
+}
+
+func TestSessionBuildsOnce(t *testing.T) {
+	session := authz.NewSession()
+	builds := 0
+	build := func() (any, error) {
+		builds++
+		return "value", nil
+	}
+
+	for range 3 {
+		v, err := session.Do(sessionEvaluatorKey{}, build)
+		require.NoError(t, err)
+		require.Equal(t, "value", v)
+	}
+	require.Equal(t, 1, builds)
+}
+
+func TestSessionRemembersFailure(t *testing.T) {
+	session := authz.NewSession()
+	builds := 0
+	build := func() (any, error) {
+		builds++
+		return nil, errors.New("cannot build")
+	}
+
+	for range 3 {
+		_, err := session.Do(sessionEvaluatorKey{}, build)
+		require.Error(t, err)
+	}
+	require.Equal(t, 1, builds, "a failed build is not retried for every question in the request")
+}
+
+// Without a session, Do still answers: an enforcement point that asks one
+// question need not establish one.
+func TestNilSessionStillBuilds(t *testing.T) {
+	var session *authz.Session
+	v, err := session.Do(sessionEvaluatorKey{}, func() (any, error) { return 42, nil })
+	require.NoError(t, err)
+	require.Equal(t, 42, v)
+	require.Nil(t, authz.SessionFromContext(context.Background()))
 }

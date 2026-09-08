@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 
@@ -12,6 +13,13 @@ import (
 	ctxAuth "github.com/opentdf/platform/service/pkg/auth"
 	"github.com/opentdf/platform/service/pkg/authz"
 )
+
+// ErrSubjectResolution reports that the platform could not work out who the
+// caller is — a role provider that could not be reached, say. The request is
+// still refused, but it is refused because the platform is degraded, not
+// because the caller lacks permission, and enforcement points report it as
+// an internal error so an outage does not hide inside the denial rate.
+var ErrSubjectResolution = errors.New("failed to resolve subject")
 
 // subjectResolver derives the SARC subject the PDP reasons about from a
 // verified token. Everything the PDP is told about a caller — identity,
@@ -64,8 +72,8 @@ func (r subjectResolver) resolve(ctx context.Context, token jwt.Token, roleReq a
 	if r.roleProvider != nil {
 		roles, err := r.roleProvider.Roles(ctx, token, roleReq)
 		if err != nil {
-			r.logger.WarnContext(ctx, "role provider error", slog.Any("error", err))
-			return s, ErrPermissionDenied
+			r.logger.ErrorContext(ctx, "role provider error", slog.Any("error", err))
+			return s, errors.Join(ErrSubjectResolution, err)
 		}
 		s.Roles = roles
 	}
@@ -103,16 +111,12 @@ func (r subjectResolver) resolve(ctx context.Context, token jwt.Token, roleReq a
 // SubjectFromContext resolves the authenticated caller from a request
 // context. Used by the AuthZEN endpoint, which is reached after the
 // authentication middleware has run.
-func (a *Authentication) SubjectFromContext(ctx context.Context) authz.Subject {
+func (a *Authentication) SubjectFromContext(ctx context.Context) (authz.Subject, error) {
 	token := ctxAuth.GetAccessTokenFromContext(ctx, a.logger)
 	if token == nil {
-		return authz.Subject{Type: authz.SubjectTypeUnknown}
+		return authz.Subject{Type: authz.SubjectTypeUnknown}, nil
 	}
-	subject, err := a.subjects().resolve(ctx, token, authz.RoleRequest{Issuer: a.oidcConfiguration.Issuer})
-	if err != nil {
-		return authz.Subject{Type: authz.SubjectTypeUnknown, Token: token}
-	}
-	return subject
+	return a.subjects().resolve(ctx, token, authz.RoleRequest{Issuer: a.oidcConfiguration.Issuer})
 }
 
 // Evaluators returns the registry the OpenTDF authorization service uses to

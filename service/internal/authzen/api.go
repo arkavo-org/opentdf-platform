@@ -32,12 +32,14 @@ type API struct {
 	pdp    authz.PDP
 	logger *logger.Logger
 	// callerSubject resolves the authenticated caller from the request
-	// context. Supplied by the authentication layer.
-	callerSubject func(ctx context.Context) authz.Subject
+	// context. Supplied by the authentication layer. It fails when the
+	// caller's subject cannot be resolved — a degraded role provider, say —
+	// which is an outage, not a denial.
+	callerSubject func(ctx context.Context) (authz.Subject, error)
 }
 
 // NewAPI builds the AuthZEN endpoint handler.
-func NewAPI(pdp authz.PDP, callerSubject func(ctx context.Context) authz.Subject, log *logger.Logger) *API {
+func NewAPI(pdp authz.PDP, callerSubject func(ctx context.Context) (authz.Subject, error), log *logger.Logger) *API {
 	return &API{pdp: pdp, callerSubject: callerSubject, logger: log}
 }
 
@@ -102,7 +104,8 @@ func (a *API) handleEvaluation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	decision, err := a.evaluate(r.Context(), body, evaluationRequest{})
+	ctx := authz.ContextWithSession(r.Context(), authz.NewSession())
+	decision, err := a.evaluate(ctx, body, evaluationRequest{})
 	if err != nil {
 		a.writeEvaluationError(w, r, err)
 		return
@@ -135,14 +138,40 @@ func (a *API) handleEvaluations(w http.ResponseWriter, r *http.Request) {
 		Resource: body.Resource,
 		Context:  body.Context,
 	}
+	// One session for the whole batch: the evaluator assembles the policy
+	// graph once and answers every item from it.
+	ctx := authz.ContextWithSession(r.Context(), authz.NewSession())
+
 	out := evaluationsResponse{Evaluations: make([]evaluationResponse, 0, len(body.Evaluations))}
-	for _, item := range body.Evaluations {
-		decision, err := a.evaluate(r.Context(), item, defaults)
-		if err != nil {
-			a.writeEvaluationError(w, r, err)
+	for i, item := range body.Evaluations {
+		decision, err := a.evaluate(ctx, item, defaults)
+		switch {
+		case errors.Is(err, ErrInvalidRequest):
+			// The request is malformed rather than unanswerable, and the
+			// caller can fix it. Say so for the batch rather than
+			// returning a deny they might act on.
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("evaluations[%d]: %s", i, err.Error()))
 			return
+		case err != nil:
+			// One item the PDP could not answer denies that item and is
+			// reported in its own result. The rest of the batch still gets
+			// answered, as the AuthZEN batch contract expects.
+			a.logger.WarnContext(ctx, "authzen evaluation failed",
+				slog.Int("index", i),
+				slog.Any("error", err),
+			)
+			out.Evaluations = append(out.Evaluations, evaluationResponse{
+				Decision: false,
+				Context: map[string]any{
+					"decision": string(authz.EffectDeny),
+					"source":   SourceDefault,
+					"reason":   "evaluation failed",
+					"error":    true,
+				},
+			})
+		default:
+			out.Evaluations = append(out.Evaluations, decisionResponse(decision))
 		}
-		out.Evaluations = append(out.Evaluations, decisionResponse(decision))
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -169,7 +198,10 @@ func (a *API) evaluate(ctx context.Context, req, defaults evaluationRequest) (au
 		return authz.Decision{}, fmt.Errorf("%w: resource is required", ErrInvalidRequest)
 	}
 
-	caller := a.caller(ctx)
+	caller, err := a.caller(ctx)
+	if err != nil {
+		return authz.Decision{}, err
+	}
 	decisionSubject := caller
 	if subject != nil && subject.ID != "" && subject.ID != caller.ID {
 		// A question about somebody else is answered from policy alone.
@@ -212,9 +244,9 @@ func (a *API) writeEvaluationError(w http.ResponseWriter, r *http.Request, err e
 	writeError(w, http.StatusInternalServerError, "evaluation failed")
 }
 
-func (a *API) caller(ctx context.Context) authz.Subject {
+func (a *API) caller(ctx context.Context) (authz.Subject, error) {
 	if a.callerSubject == nil {
-		return authz.Subject{Type: authz.SubjectTypeUnknown}
+		return authz.Subject{Type: authz.SubjectTypeUnknown}, nil
 	}
 	return a.callerSubject(ctx)
 }

@@ -66,9 +66,9 @@ func (as *Service) Evaluate(ctx context.Context, req authz.DecisionRequest) (aut
 		return abstain(err.Error())
 	}
 
-	pdp, err := access.NewJustInTimePDP(ctx, as.logger, as.sdk, as.cache, as.config.AllowDirectEntitlements, as.config.EnforceNamespacedEntitlements)
+	pdp, err := as.decisionPDP(ctx)
 	if err != nil {
-		return authz.Decision{}, errors.Join(ErrFailedToInitPDP, err)
+		return authz.Decision{}, err
 	}
 
 	decision, err := pdp.GetDecision(
@@ -98,6 +98,33 @@ func (as *Service) Evaluate(ctx context.Context, req authz.DecisionRequest) (aut
 		Obligations: result.RequiredObligationValueFQNs,
 	}, nil
 }
+
+// decisionPDP returns the just-in-time PDP to answer this request with.
+//
+// Assembling one loads the whole entitlement policy graph, so a request that
+// asks several questions — an AuthZEN batch, say — assembles it once and
+// reuses it for every question in that request. Without a session (a single
+// endpoint decision, for instance) this is one PDP per request, exactly as
+// the authorization RPCs already build one per call: policy is never staler
+// than the request that reads it.
+func (as *Service) decisionPDP(ctx context.Context) (*access.JustInTimePDP, error) {
+	build := func() (any, error) {
+		return access.NewJustInTimePDP(ctx, as.logger, as.sdk, as.cache, as.config.AllowDirectEntitlements, as.config.EnforceNamespacedEntitlements)
+	}
+
+	value, err := authz.SessionFromContext(ctx).Do(decisionPDPKey{}, build)
+	if err != nil {
+		return nil, errors.Join(ErrFailedToInitPDP, err)
+	}
+	pdp, ok := value.(*access.JustInTimePDP)
+	if !ok || pdp == nil {
+		return nil, ErrFailedToInitPDP
+	}
+	return pdp, nil
+}
+
+// decisionPDPKey addresses the just-in-time PDP within a decision session.
+type decisionPDPKey struct{}
 
 // policyResource maps a SARC resource onto the resource shape the PDP
 // evaluates. It returns nil when policy has nothing to say about it.

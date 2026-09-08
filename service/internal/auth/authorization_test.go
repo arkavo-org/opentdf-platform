@@ -187,11 +187,17 @@ func (s *AuthorizationSuite) Test_ExternalRoleProvider() {
 	s.True(s.decide(engine, resolver, jwt.New(), "policy.attributes.List", "read"))
 }
 
-func (s *AuthorizationSuite) Test_RoleProviderErrorDenies() {
+// A role provider that cannot be reached refuses the request, but it is an
+// outage rather than a denial and must be distinguishable as one.
+func (s *AuthorizationSuite) Test_RoleProviderErrorIsNotADenial() {
 	cfg := s.defaultPolicyConfig()
 	engine, resolver := s.newPDP(cfg, staticProvider{err: context.DeadlineExceeded})
 
-	s.False(s.decide(engine, resolver, jwt.New(), "policy.attributes.List", "read"))
+	allowed, err := s.decideE(engine, resolver, jwt.New(), "policy.attributes.List", "read")
+	s.False(allowed)
+	s.Require().ErrorIs(err, ErrSubjectResolution)
+	s.Require().ErrorIs(err, context.DeadlineExceeded)
+	s.Require().NotErrorIs(err, ErrPermissionDenied)
 }
 
 func (s *AuthorizationSuite) Test_RoleMapBindsGroups() {
@@ -323,20 +329,30 @@ func (s *AuthorizationSuite) newPDP(cfg PolicyConfig, provider authz.RoleProvide
 
 func (s *AuthorizationSuite) decide(engine *authzen.Engine, resolver subjectResolver, tok jwt.Token, resource, action string) bool {
 	s.T().Helper()
+	allowed, err := s.decideE(engine, resolver, tok, resource, action)
+	s.Require().NoError(err)
+	return allowed
+}
+
+// decideE resolves the subject and asks the PDP, surfacing the error a
+// caller would see.
+func (s *AuthorizationSuite) decideE(engine *authzen.Engine, resolver subjectResolver, tok jwt.Token, resource, action string) (bool, error) {
+	s.T().Helper()
 	ctx := context.Background()
-	req := authz.DecisionRequest{
+	subject, err := resolver.resolve(ctx, tok, authz.RoleRequest{Resource: resource, Action: action})
+	if err != nil {
+		return false, err
+	}
+	decision, err := engine.Decide(ctx, authz.DecisionRequest{
+		Subject:  subject,
 		Action:   authz.Action{Name: action},
 		Resource: authz.Resource{Type: authz.ResourceTypeEndpoint, ID: resource},
 		Context:  authz.RequestContext{Transport: authz.TransportConnect, Issuer: tok.Issuer()},
-	}
-	subject, err := resolver.resolve(ctx, tok, authz.RoleRequest{Resource: resource, Action: action})
+	})
 	if err != nil {
-		return false
+		return false, err
 	}
-	req.Subject = subject
-	decision, err := engine.Decide(ctx, req)
-	s.Require().NoError(err)
-	return decision.Allowed()
+	return decision.Allowed(), nil
 }
 
 func (s *AuthorizationSuite) defaultPolicyConfig() PolicyConfig {

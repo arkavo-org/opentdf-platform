@@ -746,6 +746,13 @@ Callers may ask about any subject, but may not assert what that subject is
 entitled to: roles and root capabilities are taken from the caller's verified
 token only. A question about another subject is answered from policy alone.
 
+A batch (`/access/v1/evaluations`, up to 100 items) is evaluated as one pass:
+the PDP assembles its policy view once for the request and answers every item
+from it. An item the PDP cannot answer is denied in its own result, with
+`context.error` set, so one failure does not discard the rest of the batch; a
+malformed item is reported as a `400` naming its index, since the caller can
+fix it.
+
 ```yaml
       authzen:
         enabled: true

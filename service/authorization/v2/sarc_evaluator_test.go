@@ -141,3 +141,33 @@ func TestRequestContextNamesThePEP(t *testing.T) {
 	})
 	require.Equal(t, authz.TransportConnect, fallback.GetPep().GetClientId())
 }
+
+// Assembling a just-in-time PDP loads the whole entitlement policy graph, so
+// every question in one request must share one.
+func TestDecisionPDPIsSharedWithinASession(t *testing.T) {
+	svc := &Service{logger: logger.CreateTestLogger(), config: &Config{}}
+	session := authz.NewSession()
+	ctx := authz.ContextWithSession(context.Background(), session)
+
+	_, err := svc.decisionPDP(ctx)
+	require.ErrorIs(t, err, ErrFailedToInitPDP)
+
+	// The session remembers the attempt: a later question in the same
+	// request reuses it instead of assembling the graph again.
+	rebuilt := false
+	_, err = session.Do(decisionPDPKey{}, func() (any, error) {
+		rebuilt = true
+		return struct{}{}, nil
+	})
+	require.Error(t, err)
+	require.False(t, rebuilt, "a request must assemble its PDP once")
+}
+
+// Without a session — a single endpoint decision — the evaluator still
+// answers, assembling one PDP for that request.
+func TestDecisionPDPWithoutSession(t *testing.T) {
+	svc := &Service{logger: logger.CreateTestLogger(), config: &Config{}}
+
+	_, err := svc.decisionPDP(context.Background())
+	require.ErrorIs(t, err, ErrFailedToInitPDP)
+}

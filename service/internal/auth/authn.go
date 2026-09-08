@@ -283,6 +283,11 @@ func (a Authentication) MuxHandler(handler http.Handler) http.Handler {
 		// operation on this resource.
 		decisionReq := authzen.HTTPRequest(r.Method, r.URL.Path)
 		if err := a.contextualize(ctx, accessTok, &decisionReq); err != nil {
+			if errors.Is(err, ErrSubjectResolution) {
+				log.ErrorContext(ctx, "could not resolve subject for authorization", slog.Any("error", err))
+				http.Error(w, "internal server error", http.StatusInternalServerError)
+				return
+			}
 			log.WarnContext(ctx, "permission denied", slog.Any("error", err))
 			http.Error(w, "permission denied", http.StatusForbidden)
 			return
@@ -368,6 +373,10 @@ func (a Authentication) ConnectUnaryServerInterceptor() connect.UnaryInterceptor
 			// Ask the platform PDP whether this subject may invoke this
 			// procedure.
 			if err := a.contextualize(ctxWithJWK, token, &decisionReq); err != nil {
+				if errors.Is(err, ErrSubjectResolution) {
+					log.ErrorContext(ctxWithJWK, "could not resolve subject for authorization", slog.Any("error", err))
+					return nil, connect.NewError(connect.CodeInternal, errors.New("internal server error"))
+				}
 				log.WarnContext(ctxWithJWK, "permission denied", slog.Any("error", err))
 				return nil, connect.NewError(connect.CodePermissionDenied, ErrPermissionDenied)
 			}
