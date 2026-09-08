@@ -1,0 +1,53 @@
+# Platform baseline grants.
+#
+# This is the control plane's default authorization table, expressed in the
+# same SARC shape the PDP uses everywhere else: which subjects may take
+# which actions on which platform resources. Resources are RPC procedures
+# ("<package>.<Service>/<Method>") or HTTP routes ("/path"); actions are
+# read, write, delete, unsafe and other.
+#
+# Operators replace this table with server.auth.policy.grants, extend it
+# with server.auth.policy.extension, and bind idP groups to roles with
+# server.auth.policy.map. Endpoints represented as registered resources in
+# platform policy are governed by policy instead — see
+# server.auth.policy.endpoint_policy.
+
+grants:
+  # Platform administrators.
+  - subjects: ["role:admin"]
+    resources: ["*"]
+    actions: ["*"]
+
+  # Standard callers may read policy and the KAS registry.
+  - subjects: ["role:standard"]
+    resources:
+      - "policy.*"
+      - "kasregistry.*"
+    actions: ["read"]
+
+  # Standard callers may ask the PDP for decisions, over RPC or over the
+  # AuthZEN evaluation API.
+  - subjects: ["role:standard"]
+    resources:
+      - "authorization.AuthorizationService/GetDecisions"
+      - "authorization.AuthorizationService/GetDecisionsByToken"
+      - "authorization.v2.AuthorizationService/GetDecision"
+      - "authorization.v2.AuthorizationService/GetDecisionMultiResource"
+      - "authorization.v2.AuthorizationService/GetDecisionBulk"
+    actions: ["read"]
+  - subjects: ["role:standard"]
+    resources: ["/access/v1/*"]
+    actions: ["read", "write"]
+
+  # Key access is authorized by the PDP inside the rewrap path itself: any
+  # authenticated caller may ask, and the answer is decided on the data's
+  # attributes, not on the caller's platform role.
+  - subjects: ["role:standard", "role:unknown"]
+    resources: ["kas.AccessService/Rewrap"]
+    actions: ["*"]
+
+bindings:
+  - subject: opentdf-admin
+    role: admin
+  - subject: opentdf-standard
+    role: standard

@@ -4,7 +4,6 @@ import (
 	"context"
 
 	"connectrpc.com/connect"
-	"github.com/casbin/casbin/v2/persist"
 	"github.com/opentdf/platform/service/pkg/authz"
 	"github.com/opentdf/platform/service/pkg/config"
 	"github.com/opentdf/platform/service/pkg/serviceregistry"
@@ -22,7 +21,6 @@ type StartConfig struct {
 	builtinPolicyOverride string
 	extraCoreServices     []serviceregistry.IService
 	extraServices         []serviceregistry.IService
-	casbinAdapter         persist.Adapter
 	configLoaders         []config.Loader
 	configLoaderOrder     []string
 
@@ -92,13 +90,22 @@ func WithIPCReauthRoutes(routes []string) StartOptions {
 	}
 }
 
-// WithAuthZPolicy option sets the default casbin policy to be used.
+// WithBuiltinAuthZPolicy option replaces the platform's built-in grant
+// table — the baseline of which subjects may take which actions on which
+// platform resources. Accepts the YAML grant form or the legacy
+// comma-separated policy lines.
+//
 // Example:
 //
-//	  opentdf.WithAuthZPolicy(strings.Join([]string{
-//		   "p, role:admin, pep*, *, allow",
-//		   "p, role:standard, pep*, read, allow",
-//		 }, "\n")),
+//	opentdf.WithBuiltinAuthZPolicy(`
+//	grants:
+//	  - subjects: ["role:admin"]
+//	    resources: ["pep*"]
+//	    actions: ["*"]
+//	  - subjects: ["role:standard"]
+//	    resources: ["pep*"]
+//	    actions: ["read"]
+//	`),
 func WithBuiltinAuthZPolicy(policy string) StartOptions {
 	return func(c StartConfig) StartConfig {
 		c.builtinPolicyOverride = policy
@@ -123,14 +130,6 @@ func WithCoreServices(services ...serviceregistry.IService) StartOptions {
 func WithServices(services ...serviceregistry.IService) StartOptions {
 	return func(c StartConfig) StartConfig {
 		c.extraServices = append(c.extraServices, services...)
-		return c
-	}
-}
-
-// WithCasbinAdapter option sets the casbin adapter to be used for the casbin enforcer.
-func WithCasbinAdapter(adapter persist.Adapter) StartOptions {
-	return func(c StartConfig) StartConfig {
-		c.casbinAdapter = adapter
 		return c
 	}
 }

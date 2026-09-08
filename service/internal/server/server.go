@@ -21,6 +21,7 @@ import (
 	"github.com/opentdf/platform/sdk"
 	sdkAudit "github.com/opentdf/platform/sdk/audit"
 	"github.com/opentdf/platform/service/internal/auth"
+	"github.com/opentdf/platform/service/internal/authzen"
 	"github.com/opentdf/platform/service/internal/security"
 	"github.com/opentdf/platform/service/internal/server/memhttp"
 	"github.com/opentdf/platform/service/logger"
@@ -292,6 +293,17 @@ func NewOpenTDFServer(config Config, logger *logger.Logger, cacheManager *cache.
 	}
 
 	httpMux := http.NewServeMux()
+
+	// The AuthZEN Authorization API is the PDP's public contract. It is
+	// mounted behind the same authentication middleware as every other
+	// extra HTTP handler, and requests to it are authorized by the PDP it
+	// exposes.
+	if authN != nil && authN.MountAuthZEN(httpMux) {
+		logger.Info("authzen authorization api enabled",
+			slog.String("evaluation", authzen.EvaluationPath),
+			slog.String("evaluations", authzen.EvaluationsPath),
+		)
+	}
 
 	// Create http server
 	httpServer, err := newHTTPServer(config, connectRPC.Mux, httpMux, authN, logger)
