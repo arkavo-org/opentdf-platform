@@ -54,7 +54,8 @@ func TestTDFReader_PrefersSpecManifestWhenBothPresent(t *testing.T) {
 	r, err := NewTDFReader(rawZip(t, [][2]string{
 		{"0.manifest.json", manifestJSON("b")},
 		{"manifest.json", manifestJSON("a")},
-		{"a", "A"}, {"b", "B"},
+		{"a", "A"},
+		{"b", "B"},
 	}))
 	require.NoError(t, err)
 	got, err := r.ReadPayload(0, 1)
