@@ -19,6 +19,7 @@ import (
 
 	"github.com/opentdf/platform/service/internal/server"
 	"github.com/opentdf/platform/service/logger"
+	"github.com/opentdf/platform/service/pkg/authz"
 	"github.com/opentdf/platform/service/pkg/cache"
 	"github.com/opentdf/platform/service/pkg/config"
 	"github.com/opentdf/platform/service/pkg/db"
@@ -49,6 +50,11 @@ type RegistrationParams struct {
 	trace.Tracer
 	// AccessTokenVerifier validates request tokens using the platform's shared auth configuration.
 	AccessTokenVerifier authn.AccessTokenVerifier
+
+	// Evaluators is the registry a service implementing the platform's
+	// policy decision point registers itself with, so authorization
+	// decisions are made in-process rather than over RPC.
+	Evaluators *authz.EvaluatorRegistry
 
 	// NewCacheClient is a function that can be used to create a new cache instance for the service
 	NewCacheClient func(cache.Options) (*cache.Cache, error)

@@ -17,6 +17,7 @@ import (
 	"github.com/opentdf/platform/service/internal/server"
 	"github.com/opentdf/platform/service/kas"
 	logging "github.com/opentdf/platform/service/logger"
+	"github.com/opentdf/platform/service/pkg/authz"
 	"github.com/opentdf/platform/service/pkg/cache"
 	"github.com/opentdf/platform/service/pkg/config"
 	"github.com/opentdf/platform/service/pkg/db"
@@ -206,8 +207,10 @@ func startServices(ctx context.Context, params startServicesParams) error {
 			}
 
 			var accessTokenVerifier authn.AccessTokenVerifier
+			var evaluators *authz.EvaluatorRegistry
 			if otdf != nil && otdf.AuthN != nil {
 				accessTokenVerifier = otdf.AuthN.AccessTokenVerifier()
+				evaluators = otdf.AuthN.Evaluators()
 			}
 
 			err = svc.Start(ctx, serviceregistry.RegistrationParams{
@@ -221,6 +224,7 @@ func startServices(ctx context.Context, params startServicesParams) error {
 				OTDF:                   otdf, // TODO: REMOVE THIS
 				Tracer:                 tracer,
 				AccessTokenVerifier:    accessTokenVerifier,
+				Evaluators:             evaluators,
 				NewCacheClient:         createCacheClient,
 				KeyManagerCtxFactories: keyManagerCtxFactories,
 			})

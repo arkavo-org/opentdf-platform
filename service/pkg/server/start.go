@@ -160,11 +160,6 @@ func Start(f ...StartOptions) error {
 		cfg.Server.Auth.Policy.Builtin = startConfig.builtinPolicyOverride
 	}
 
-	// Set Casbin Adapter
-	if startConfig.casbinAdapter != nil {
-		cfg.Server.Auth.Policy.Adapter = startConfig.casbinAdapter
-	}
-
 	// Set AuthZ role provider overrides
 	if startConfig.authzRoleProvider != nil {
 		cfg.Server.Auth.RoleProvider = startConfig.authzRoleProvider
