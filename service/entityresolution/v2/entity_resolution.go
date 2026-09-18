@@ -8,6 +8,7 @@ import (
 	"github.com/go-viper/mapstructure/v2"
 	ersV2 "github.com/opentdf/platform/protocol/go/entityresolution/v2"
 	"github.com/opentdf/platform/protocol/go/entityresolution/v2/entityresolutionv2connect"
+	arkavov2 "github.com/opentdf/platform/service/entityresolution/arkavo/v2"
 	claims "github.com/opentdf/platform/service/entityresolution/claims/v2"
 	keycloak "github.com/opentdf/platform/service/entityresolution/keycloak/v2"
 	multistrategyv2 "github.com/opentdf/platform/service/entityresolution/multi-strategy/v2"
@@ -27,6 +28,7 @@ const (
 	ClaimsMode        = "claims"
 	MultiStrategyMode = "multi-strategy"
 	PatreonMode       = "patreon"
+	ArkavoMode        = "arkavo"
 )
 
 type EntityResolution struct {
@@ -80,6 +82,10 @@ func NewRegistration() *serviceregistry.Service[entityresolutionv2connect.Entity
 					patreonSVC, patreonHandler := patreonv2.RegisterPatreonERS(srp.Config, srp.Logger)
 					patreonSVC.Tracer = srp.Tracer
 					return EntityResolution{EntityResolutionServiceHandler: patreonSVC, Tracer: srp.Tracer}, patreonHandler
+				case ArkavoMode:
+					arkavoSVC, arkavoHandler := arkavov2.RegisterArkavoERS(srp.Config, srp.Logger)
+					arkavoSVC.Tracer = srp.Tracer
+					return EntityResolution{EntityResolutionServiceHandler: arkavoSVC, Tracer: srp.Tracer}, arkavoHandler
 				default:
 					// Default to Keycloak ERS with cache support
 					kcSVC, kcHandler := keycloak.RegisterKeycloakERS(srp.Config, srp.Logger, ersCache)

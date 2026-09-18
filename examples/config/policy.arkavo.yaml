@@ -1,0 +1,54 @@
+# arkavo identity-plane policy snapshot: vocabulary only. Entitlements are
+# carried in authnz-rs CWTs (arkavo_entitlements) and asserted by the
+# `arkavo` ERS mode as direct entitlements — there are no subject mappings.
+#
+#   services:
+#     authorization:
+#       policy_file: ./examples/config/policy.arkavo.yaml
+#       allow_direct_entitlements: true
+#     entityresolution:
+#       mode: arkavo
+
+namespaces:
+  - name: arkavo.ai
+
+attributes:
+  # TDF operations a subject may perform. Values are attribute values, NOT
+  # action names — the action on every direct entitlement is `read`.
+  - namespace: arkavo.ai
+    name: tdf
+    rule: anyOf
+    values:
+      - value: create
+      - value: decrypt
+
+  # Agent delegation vocabulary (authnz-rs HUMAN_DELEGABLE / stored entitlements).
+  - namespace: arkavo.ai
+    name: action
+    rule: anyOf
+    values:
+      - value: read
+      - value: write
+      - value: execute
+      - value: delegate
+      - value: admin
+
+  - namespace: arkavo.ai
+    name: mesh
+    rule: anyOf
+    values:
+      - value: orchestrator
+      - value: worker
+
+  # Data classification. HIERARCHY: the PDP ranks by index, LOWEST INDEX IS
+  # HIGHEST RANK — keep this order. Device class ceilings grant one of these.
+  - namespace: arkavo.ai
+    name: classification
+    rule: hierarchy
+    values:
+      - value: restricted
+      - value: confidential
+      - value: internal
+      - value: public
+
+subject_mappings: []

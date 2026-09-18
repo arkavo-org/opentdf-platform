@@ -1,0 +1,38 @@
+# Local contract test: arkavo ERS + arkavo policy snapshot, no Postgres, no KAS.
+#
+#   go run ./service start --config-file ../examples/config/opentdf-arkavo-local-test.yaml
+#
+# Auth is enabled and pinned to a local authnz-rs (cose-keys at the issuer).
+mode: core,entityresolution,-policy,-kas
+
+logger:
+  level: debug
+  type: text
+  output: stderr
+
+server:
+  port: 8080
+  auth:
+    enabled: true
+    enforceDPoP: false
+    issuer: http://127.0.0.1:8081
+    audience: https://platform.test
+    policy:
+      client_id_claim: arkavo_account_id
+      groups_claim: arkavo_roles
+      map:
+        standard: service-account
+
+services:
+  authorization:
+    policy_file: ./examples/config/policy.arkavo.yaml
+    allow_direct_entitlements: true
+  entityresolution:
+    mode: arkavo
+    trust_materialized_claims: true
+    trusted_issuer: http://127.0.0.1:8081
+    direct_entitlement_actions: [read]
+    device_class_ceilings:
+      unverified: ["https://arkavo.ai/attr/classification/value/internal"]
+      managed:    ["https://arkavo.ai/attr/classification/value/confidential"]
+      attested:   ["https://arkavo.ai/attr/classification/value/restricted"]

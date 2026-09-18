@@ -30,6 +30,34 @@ type authContext struct {
 	rawToken    string
 }
 
+// actorSubjectContextKey is a distinct, unexported context key type for the
+// verified X-Actor-Token subject. Kept separate from authContext (rather
+// than widening it) because authContext's constructor signature is
+// exercised directly by tests in this package and by
+// service/kas/access/rewrap_test.go and
+// service/internal/auth/authn_ipc_metadata_interceptor_test.go.
+type actorSubjectContextKey struct{}
+
+var actorSubjectKey = actorSubjectContextKey{}
+
+// ContextWithActorSubject stores the verified subject of an X-Actor-Token
+// presented alongside the bearer token, for audit purposes. checkToken
+// calls this on the success path only after verifying the actor token's
+// signature and confirming it is authorized to act on behalf of the
+// bearer's subject (self-actation, or listed in the bearer's `act` claim).
+func ContextWithActorSubject(ctx context.Context, actor string) context.Context {
+	return context.WithValue(ctx, actorSubjectKey, actor)
+}
+
+// GetActorSubjectFromContext returns the verified actor subject stored by
+// ContextWithActorSubject, or "" if no actor token was presented/verified.
+func GetActorSubjectFromContext(ctx context.Context) string {
+	if v, ok := ctx.Value(actorSubjectKey).(string); ok {
+		return v
+	}
+	return ""
+}
+
 func ContextWithAuthNInfo(ctx context.Context, key jwk.Key, accessToken jwt.Token, raw string) context.Context {
 	return context.WithValue(ctx, authnContextKey, &authContext{
 		key,
