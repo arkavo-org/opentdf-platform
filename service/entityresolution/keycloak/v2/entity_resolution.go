@@ -16,10 +16,10 @@ import (
 	"github.com/Nerzal/gocloak/v13"
 	"github.com/creasty/defaults"
 	"github.com/go-viper/mapstructure/v2"
-	"github.com/lestrrat-go/jwx/v2/jwt"
 	"github.com/opentdf/platform/protocol/go/entity"
 	entityresolutionV2 "github.com/opentdf/platform/protocol/go/entityresolution/v2"
 	ent "github.com/opentdf/platform/service/entity"
+	"github.com/opentdf/platform/service/internal/auth"
 	"github.com/opentdf/platform/service/logger"
 	"github.com/opentdf/platform/service/pkg/cache"
 	"github.com/opentdf/platform/service/pkg/config"
@@ -163,7 +163,8 @@ func EntityResolution(ctx context.Context,
 	var resolvedEntities []*entityresolutionV2.EntityRepresentation
 
 	for idx, ident := range payload {
-		logger.DebugContext(ctx,
+		logger.DebugContext(
+			ctx,
 			"lookup",
 			slog.Any("entity", ident.GetEntityType()),
 		)
@@ -173,7 +174,8 @@ func EntityResolution(ctx context.Context,
 		exactMatch := true
 		switch ident.GetEntityType().(type) {
 		case *entity.Entity_ClientId:
-			logger.DebugContext(ctx,
+			logger.DebugContext(
+				ctx,
 				"looking up",
 				slog.Any("type", ident.GetEntityType()),
 				slog.String("client_id", ident.GetClientId()),
@@ -239,7 +241,8 @@ func EntityResolution(ctx context.Context,
 				connect.NewError(connect.CodeInternal, ErrGetRetrievalFailed)
 		case len(users) == 1:
 			user := users[0]
-			logger.DebugContext(ctx,
+			logger.DebugContext(
+				ctx,
 				"user",
 				slog.Any("details", user),
 				slog.String("entity", ident.String()),
@@ -370,7 +373,8 @@ func expandGroup(ctx context.Context, groupID string, kcConnector *Connector, kc
 	if err == nil {
 		grpMembers, memberErr := retrieveGroupMembers(ctx, logger, *grp.ID, kcConfig.Realm, svcCache, kcConnector)
 		if memberErr == nil {
-			logger.DebugContext(ctx,
+			logger.DebugContext(
+				ctx,
 				"adding members",
 				slog.Int("amount", len(grpMembers)),
 				slog.String("from group", *grp.Name),
@@ -390,13 +394,12 @@ func expandGroup(ctx context.Context, groupID string, kcConnector *Connector, kc
 }
 
 func getEntitiesFromToken(ctx context.Context, kcConfig Config, connector *Connector, jwtString string, logger *logger.Logger, svcCache *cache.Cache) ([]*entity.Entity, error) {
-	token, err := jwt.ParseString(jwtString, jwt.WithVerify(false), jwt.WithValidate(false))
+	// The KAS rewrap path forwards the raw bearer, which is a COSE_Sign1 CWT
+	// on a CWT deployment, so parse either wire format. Neither is verified
+	// here; the authn layer verified it upstream on that path.
+	claims, err := auth.DecodeClaimsFromToken(ctx, jwtString)
 	if err != nil {
-		return nil, errors.New("error parsing jwt " + err.Error())
-	}
-	claims, err := token.AsMap(context.Background()) ///nolint:contextcheck // Do not want to include keys from context in map
-	if err != nil {
-		return nil, errors.New("error getting claims from jwt")
+		return nil, errors.New("error parsing bearer token: " + err.Error())
 	}
 	entities := []*entity.Entity{}
 	entityID := 0
