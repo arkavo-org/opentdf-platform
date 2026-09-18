@@ -359,3 +359,28 @@ func TestDecodeCWTClaimsFromToken_ParseOnly(t *testing.T) {
 	_, err = DecodeCWTClaimsFromToken("not-a-cwt")
 	require.Error(t, err)
 }
+
+func TestDecodeClaimsFromToken_JOSEThenCWT(t *testing.T) {
+	jose, err := encodeUnsignedJWT(map[string]any{"iss": "i", "sub": "s", "arkavo_patreon": map[string]any{"role": "consumer"}})
+	require.NoError(t, err)
+	m, err := DecodeClaimsFromToken(t.Context(), jose)
+	require.NoError(t, err)
+	assert.Equal(t, "i", m["iss"])
+	assert.Equal(t, "s", m["sub"])
+	assert.Equal(t, "consumer", m["arkavo_patreon"].(map[string]any)["role"]) //nolint:forcetypeassert // test fixture shape
+
+	priv, kid := newP256(t)
+	cwt := signCWT(t, priv, kid,
+		map[int64]any{1: "i", 2: "s"},
+		map[string]any{"arkavo_patreon": map[any]any{"role": "consumer"}},
+	)
+	m, err = DecodeClaimsFromToken(t.Context(), cwt)
+	require.NoError(t, err)
+	assert.Equal(t, "i", m["iss"])
+	assert.Equal(t, "s", m["sub"])
+	assert.Equal(t, "consumer", m["arkavo_patreon"].(map[string]any)["role"]) //nolint:forcetypeassert // test fixture shape
+
+	_, err = DecodeClaimsFromToken(t.Context(), "definitely-not-a-token")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "neither JWT nor CWT")
+}

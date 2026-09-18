@@ -9,10 +9,10 @@ import (
 
 	"connectrpc.com/connect"
 	"github.com/go-viper/mapstructure/v2"
-	"github.com/lestrrat-go/jwx/v2/jwt"
 	"github.com/opentdf/platform/protocol/go/entity"
 	entityresolutionV2 "github.com/opentdf/platform/protocol/go/entityresolution/v2"
 	ent "github.com/opentdf/platform/service/entity"
+	"github.com/opentdf/platform/service/internal/auth"
 	"github.com/opentdf/platform/service/logger"
 	"github.com/opentdf/platform/service/pkg/config"
 	"github.com/opentdf/platform/service/pkg/serviceregistry"
@@ -177,10 +177,11 @@ func (s *EntityResolutionService) ResolveEntities(
 	}), nil
 }
 
-// CreateEntityChainsFromTokens builds an entity chain per JWT: an environment
-// entity for the azp client id and a subject entity carrying the (trust-gated)
-// arkavo_patreon claim from the token, for the decision flow's resolution
-// pass. The token signature is verified upstream by the platform authn layer.
+// CreateEntityChainsFromTokens builds an entity chain per bearer token (JOSE
+// JWT or base64url CWT): an environment entity for the azp client id and a
+// subject entity carrying the (trust-gated) arkavo_patreon claim from the
+// token, for the decision flow's resolution pass. The token signature is
+// verified upstream by the platform authn layer.
 func (s *EntityResolutionService) CreateEntityChainsFromTokens(
 	ctx context.Context,
 	req *connect.Request[entityresolutionV2.CreateEntityChainsFromTokensRequest],
@@ -204,14 +205,15 @@ func (s *EntityResolutionService) CreateEntityChainsFromTokens(
 	}), nil
 }
 
-func (s *EntityResolutionService) entitiesFromToken(ctx context.Context, jwtString string) ([]*entity.Entity, error) {
-	parsed, err := jwt.ParseString(jwtString, jwt.WithVerify(false), jwt.WithValidate(false))
+// entitiesFromToken accepts the bearer in either wire format — a JOSE JWT or
+// a base64url COSE_Sign1 CWT (what the KAS rewrap path forwards since the
+// CWT migration). Signature verification happened upstream; everything below
+// reads the decoded claims map, never the token object, so both formats flow
+// through the same trust gate and passthrough.
+func (s *EntityResolutionService) entitiesFromToken(ctx context.Context, tokenRaw string) ([]*entity.Entity, error) {
+	claims, err := auth.DecodeClaimsFromToken(ctx, tokenRaw)
 	if err != nil {
-		return nil, fmt.Errorf("parse jwt: %w", err)
-	}
-	claims, err := parsed.AsMap(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("read jwt claims: %w", err)
+		return nil, fmt.Errorf("parse bearer token: %w", err)
 	}
 
 	out := []*entity.Entity{}
