@@ -463,6 +463,50 @@ func normalizeCBOR(v any) any {
 	}
 }
 
+// StructpbSafe recursively converts v into a shape structpb.NewStruct can
+// accept, dropping any element it cannot represent. It exists because the CWT
+// decode path above hands back native Go types that structpb.NewStruct
+// rejects outright — time.Time for CBOR tag-0/tag-1 timestamps, cbor.Tag for
+// any tag the decoder does not recognize, and []byte for byte strings — so a
+// legitimately signed, trusted-issuer CWT carrying e.g. a last_charge_at
+// timestamp must not fail a whole CreateEntityChainsFromTokens call with a
+// 500. Entity resolution providers apply it to the raw claim map they carry
+// through verbatim, never to values rebuilt from a typed struct, so a field
+// the spec has not yet named is still carried through for audit.
+func StructpbSafe(v any) (any, bool) {
+	switch x := v.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(x))
+		for k, vv := range x {
+			if sv, ok := StructpbSafe(vv); ok {
+				out[k] = sv
+			}
+		}
+		return out, true
+	case []any:
+		out := make([]any, 0, len(x))
+		for _, vv := range x {
+			if sv, ok := StructpbSafe(vv); ok {
+				out = append(out, sv)
+			}
+		}
+		return out, true
+	case time.Time:
+		return x.Unix(), true
+	case []byte:
+		return base64.RawURLEncoding.EncodeToString(x), true
+	case uint64:
+		return int64(x), true
+	case nil, bool, string,
+		int, int8, int16, int32, int64,
+		uint, uint8, uint16, uint32,
+		float32, float64:
+		return v, true
+	default:
+		return nil, false
+	}
+}
+
 // --- unsigned JWT bridge -----------------------------------------------------
 
 // encodeUnsignedJWT serializes the claims map as an alg=none JWT

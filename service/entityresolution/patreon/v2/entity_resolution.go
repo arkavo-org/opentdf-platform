@@ -193,7 +193,11 @@ func (s *EntityResolutionService) CreateEntityChainsFromTokens(
 	for _, tok := range req.Msg.GetTokens() {
 		entities, err := s.entitiesFromToken(ctx, tok.GetJwt())
 		if err != nil {
-			return nil, connect.NewError(connect.CodeInternal, err)
+			// A bearer with no trusted membership claim is a not-found
+			// subject, not a server fault; hard-wiring CodeInternal made an
+			// ordinary unentitled caller indistinguishable from a genuine
+			// failure. connectCodeFor draws the same line ResolveEntities does.
+			return nil, connect.NewError(connectCodeFor(err), err)
 		}
 		chains = append(chains, &entity.EntityChain{
 			EphemeralId: tok.GetEphemeralId(),
@@ -252,11 +256,19 @@ func (s *EntityResolutionService) entitiesFromToken(ctx context.Context, tokenRa
 	wrappedClaims := map[string]interface{}{
 		"patreon": patreonStruct.AsMap(),
 	}
-	// Preserve the (now trust-checked) materialized claim verbatim so the
-	// decision flow's second pass re-derives the passthrough — including its
-	// direct entitlements — without consulting Patreon.
+	// Preserve the (now trust-checked) materialized claim so the decision
+	// flow's second pass re-derives the passthrough — including its direct
+	// entitlements — without consulting Patreon. A CWT decodes CBOR-native
+	// values structpb.NewStruct rejects outright (tag-0/tag-1 timestamps
+	// become time.Time, unrecognized tags cbor.Tag), so sanitize before
+	// wrapping: otherwise a legitimately signed, trusted-issuer token whose
+	// claim carries e.g. last_charge_at fails the whole call, which the KAS
+	// rewrap path reports as "could not perform access". See
+	// auth.StructpbSafe.
 	if raw, ok := claims["arkavo_patreon"].(map[string]interface{}); ok {
-		wrappedClaims["arkavo_patreon"] = raw
+		if safe, safeOK := auth.StructpbSafe(raw); safeOK {
+			wrappedClaims["arkavo_patreon"] = safe
+		}
 	}
 	subjectClaims, err := structpb.NewStruct(wrappedClaims)
 	if err != nil {

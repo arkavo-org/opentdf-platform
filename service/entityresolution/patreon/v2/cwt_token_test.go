@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"reflect"
+	"strings"
 	"testing"
 
 	"connectrpc.com/connect"
@@ -240,5 +241,120 @@ func TestCreateEntityChainsFromTokens_GarbageTokenErrors(t *testing.T) {
 		}))
 	if err == nil {
 		t.Fatal("garbage token must fail")
+	}
+}
+
+// A trusted-issuer CWT may carry CBOR-native values inside arkavo_patreon —
+// a tag-1 epoch timestamp is what a CBOR minter emits for last_charge_at,
+// and an unregistered tag decodes to cbor.Tag. The claim is preserved
+// verbatim for the decision flow's second pass, so unless it is sanitized
+// first, structpb.NewStruct rejects the whole chain and the KAS rewrap path
+// fails with the same "could not perform access" 500 that CWT support was
+// added to remove.
+func TestCreateEntityChainsFromTokens_CWTWithCBORNativeClaimValues(t *testing.T) {
+	svc := newSvc(t, Config{
+		TrustMaterializedClaims: true,
+		TrustedIssuer:           cwtTestIssuer,
+	})
+	token := signCWT(t, cwtTestIssuer, cwtTestSub, map[any]any{
+		"azp": cwtTestAzp,
+		"arkavo_patreon": map[any]any{
+			"role":            "consumer",
+			"patreon_user_id": "p-77",
+			"last_charge_at":  cbor.Tag{Number: 1, Content: int64(1700000000)},
+			"attestation":     []byte{0xde, 0xad, 0xbe, 0xef},
+			"unknown_tag":     cbor.Tag{Number: 999, Content: "opaque"},
+			"memberships": []any{map[any]any{
+				"campaign_id":   "11111111",
+				"patron_status": "active_patron",
+				"tier_slugs":    []any{"gold-tier"},
+				"pledge_start":  cbor.Tag{Number: 0, Content: "2023-11-14T22:13:20Z"},
+			}},
+		},
+	})
+
+	ents := normalizedEntities(t, chainFor(t, svc, token))
+	if len(ents) != 2 {
+		t.Fatalf("want 2 entities (environment + subject), got %d: %#v", len(ents), ents)
+	}
+	claims, _ := ents[1]["claims"].(map[string]interface{})
+
+	// The membership still resolves, so the timestamps did not cost the
+	// caller their entitlements.
+	patreon, _ := claims["patreon"].(map[string]interface{})
+	if patreon["status"] != "active" || patreon["user_id"] != "p-77" {
+		t.Errorf("flattened patreon view: %#v", patreon)
+	}
+
+	preserved, _ := claims["arkavo_patreon"].(map[string]interface{})
+	if preserved == nil {
+		t.Fatalf("arkavo_patreon not preserved for the second pass: %#v", claims)
+	}
+	// Timestamps survive as epoch seconds (structpb numbers are float64).
+	if preserved["last_charge_at"] != float64(1700000000) {
+		t.Errorf("last_charge_at: want 1700000000, got %#v", preserved["last_charge_at"])
+	}
+	// Byte strings survive as base64url.
+	if preserved["attestation"] != "3q2-7w" {
+		t.Errorf("attestation: want base64url, got %#v", preserved["attestation"])
+	}
+	// A value with no structpb representation is dropped, not fatal.
+	if _, present := preserved["unknown_tag"]; present {
+		t.Errorf("unrepresentable value should be dropped, got %#v", preserved["unknown_tag"])
+	}
+	mems, _ := preserved["memberships"].([]interface{})
+	if len(mems) != 1 {
+		t.Fatalf("memberships: %#v", preserved["memberships"])
+	}
+	nested, _ := mems[0].(map[string]interface{})
+	if nested["pledge_start"] != float64(1700000000) {
+		t.Errorf("nested pledge_start: want 1700000000, got %#v", nested["pledge_start"])
+	}
+}
+
+// A valid bearer that simply carries no trusted membership claim is a
+// not-found subject, not an internal error. CreateEntityChainsFromTokens
+// hard-wired CodeInternal, so with infer_unknown_as_free off an ordinary
+// unentitled caller produced the same "could not perform access" 500 as a
+// genuine server fault. connectCodeFor already draws this distinction for
+// ResolveEntities.
+func TestCreateEntityChainsFromTokens_NoMembershipClaimIsNotFound(t *testing.T) {
+	svc := newSvc(t, Config{
+		TrustMaterializedClaims: true,
+		TrustedIssuer:           cwtTestIssuer,
+	})
+	token := signCWT(t, cwtTestIssuer, cwtTestSub, map[any]any{"azp": cwtTestAzp})
+
+	_, err := svc.CreateEntityChainsFromTokens(context.Background(),
+		connect.NewRequest(&ersV2.CreateEntityChainsFromTokensRequest{
+			Tokens: []*entity.Token{{EphemeralId: "t0", Jwt: token}},
+		}))
+	if err == nil {
+		t.Fatal("token with no membership claim must fail when infer_unknown_as_free is off")
+	}
+	if got := connect.CodeOf(err); got != connect.CodeNotFound {
+		t.Errorf("want CodeNotFound for an unentitled subject, got %v (%v)", got, err)
+	}
+}
+
+// A bearer in neither wire format is a caller error the ERS cannot resolve,
+// and must stay distinguishable from the not-found case above.
+func TestCreateEntityChainsFromTokens_GarbageTokenIsInternal(t *testing.T) {
+	svc := newSvc(t, Config{
+		TrustMaterializedClaims: true,
+		TrustedIssuer:           cwtTestIssuer,
+	})
+	_, err := svc.CreateEntityChainsFromTokens(context.Background(),
+		connect.NewRequest(&ersV2.CreateEntityChainsFromTokensRequest{
+			Tokens: []*entity.Token{{EphemeralId: "t0", Jwt: "definitely-not-a-token"}},
+		}))
+	if err == nil {
+		t.Fatal("garbage token must fail")
+	}
+	if got := connect.CodeOf(err); got != connect.CodeInternal {
+		t.Errorf("want CodeInternal for an unparseable bearer, got %v", got)
+	}
+	if !strings.Contains(err.Error(), "parse bearer token") {
+		t.Errorf("want a parse failure, got %v", err)
 	}
 }
