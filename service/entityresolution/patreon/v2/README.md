@@ -68,8 +68,9 @@ campaign-tier values to be honored.
 Only a **claims** entity carrying `arkavo_patreon` resolves to a membership.
 Other entity types (username/email/client id) have no Patreon source — live
 lookups were removed — so they resolve as not-found (→ free when
-`infer_unknown_as_free`). `CreateEntityChainsFromTokens` parses each JWT
-(signature verified upstream by the platform authn layer), emits an
+`infer_unknown_as_free`). `CreateEntityChainsFromTokens` parses each bearer
+token — JOSE JWT or base64url CWT, the format the KAS rewrap path forwards
+(signature verified upstream by the platform authn layer) — emits an
 `ENVIRONMENT` entity for the `azp` client id, and a trust-gated `SUBJECT`
 entity carrying the `patreon` block plus the preserved claim for the decision
 flow's second pass.

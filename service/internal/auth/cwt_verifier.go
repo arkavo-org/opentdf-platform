@@ -380,6 +380,33 @@ func DecodeCWTClaimsFromToken(tokenRaw string) (map[string]any, error) {
 	return decodeCWTClaims(msg.Payload)
 }
 
+// DecodeClaimsFromToken decodes the claims of a bearer token in either wire
+// format the platform accepts — a JOSE JWT (including the alg=none bridge
+// from encodeUnsignedJWT) or a base64url COSE_Sign1 CWT — WITHOUT verifying
+// its signature. JOSE is tried first; on failure the token is decoded as a
+// CWT, whose integer-label claims are renamed to their JWT names (iss, sub,
+// aud, exp, ...) so callers read one map shape regardless of format.
+//
+// It exists for entity resolution providers that receive the raw bearer
+// already verified upstream by the auth interceptor (the KAS rewrap path
+// hands the ERS entity.Token{Jwt: bearer} verbatim, and that bearer is a
+// CWT since the CWT migration). Never use it as an authentication step.
+func DecodeClaimsFromToken(ctx context.Context, tokenRaw string) (map[string]any, error) {
+	parsed, joseErr := jwt.ParseString(tokenRaw, jwt.WithVerify(false), jwt.WithValidate(false))
+	if joseErr == nil {
+		m, err := parsed.AsMap(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("read jwt claims: %w", err)
+		}
+		return m, nil
+	}
+	m, cwtErr := DecodeCWTClaimsFromToken(tokenRaw)
+	if cwtErr != nil {
+		return nil, fmt.Errorf("token is neither JWT nor CWT: %w", errors.Join(joseErr, cwtErr))
+	}
+	return m, nil
+}
+
 // cwtIntLabelToName maps CWT integer claim labels (RFC 8392 §4) to JWT
 // claim names so downstream code can read them with familiar keys.
 func cwtIntLabelToName(label int64) (string, bool) {
@@ -433,6 +460,50 @@ func normalizeCBOR(v any) any {
 		return int64(x)
 	default:
 		return v
+	}
+}
+
+// StructpbSafe recursively converts v into a shape structpb.NewStruct can
+// accept, dropping any element it cannot represent. It exists because the CWT
+// decode path above hands back native Go types that structpb.NewStruct
+// rejects outright — time.Time for CBOR tag-0/tag-1 timestamps, cbor.Tag for
+// any tag the decoder does not recognize, and []byte for byte strings — so a
+// legitimately signed, trusted-issuer CWT carrying e.g. a last_charge_at
+// timestamp must not fail a whole CreateEntityChainsFromTokens call with a
+// 500. Entity resolution providers apply it to the raw claim map they carry
+// through verbatim, never to values rebuilt from a typed struct, so a field
+// the spec has not yet named is still carried through for audit.
+func StructpbSafe(v any) (any, bool) {
+	switch x := v.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(x))
+		for k, vv := range x {
+			if sv, ok := StructpbSafe(vv); ok {
+				out[k] = sv
+			}
+		}
+		return out, true
+	case []any:
+		out := make([]any, 0, len(x))
+		for _, vv := range x {
+			if sv, ok := StructpbSafe(vv); ok {
+				out = append(out, sv)
+			}
+		}
+		return out, true
+	case time.Time:
+		return x.Unix(), true
+	case []byte:
+		return base64.RawURLEncoding.EncodeToString(x), true
+	case uint64:
+		return int64(x), true
+	case nil, bool, string,
+		int, int8, int16, int32, int64,
+		uint, uint8, uint16, uint32,
+		float32, float64:
+		return v, true
+	default:
+		return nil, false
 	}
 }
 

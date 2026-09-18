@@ -6,17 +6,16 @@ package arkavo
 
 import (
 	"context"
-	"encoding/base64"
 	"fmt"
 	"log/slog"
 	"strings"
-	"time"
 
 	"connectrpc.com/connect"
 	"github.com/go-viper/mapstructure/v2"
 	"github.com/opentdf/platform/protocol/go/entity"
 	entityresolutionV2 "github.com/opentdf/platform/protocol/go/entityresolution/v2"
 	ent "github.com/opentdf/platform/service/entity"
+	"github.com/opentdf/platform/service/internal/auth"
 	"github.com/opentdf/platform/service/logger"
 	"github.com/opentdf/platform/service/pkg/config"
 	"github.com/opentdf/platform/service/pkg/serviceregistry"
@@ -192,7 +191,7 @@ func addTrustedClaims(subjectClaims map[string]any, c arkavoClaims, m map[string
 	if !ok {
 		return
 	}
-	if safe, safeOK := structpbSafe(raw); safeOK {
+	if safe, safeOK := auth.StructpbSafe(raw); safeOK {
 		subjectClaims["arkavo_npe"] = safe
 	}
 }
@@ -212,50 +211,6 @@ func toAnySlice(in []string) []any {
 		out[i] = s
 	}
 	return out
-}
-
-// structpbSafe recursively converts v into a shape structpb.NewStruct can
-// accept, dropping any element it cannot represent. It exists because
-// normalizeCBOR's CWT decode path (service/internal/auth/cwt_verifier.go)
-// hands back native Go types for values structpb.NewStruct rejects outright —
-// time.Time for CBOR tag-0/tag-1 timestamps, []byte for byte strings, and
-// uint64 — so a legitimately signed, trusted-issuer CWT carrying e.g. an
-// attestation_expiry timestamp must not fail the whole
-// CreateEntityChainsFromTokens call with a 500. It is applied only to the raw
-// arkavo_npe map, never rebuilt from the typed npeClaim struct, so any field
-// the spec has not yet named is still carried through for audit.
-func structpbSafe(v any) (any, bool) {
-	switch x := v.(type) {
-	case map[string]any:
-		out := make(map[string]any, len(x))
-		for k, vv := range x {
-			if sv, ok := structpbSafe(vv); ok {
-				out[k] = sv
-			}
-		}
-		return out, true
-	case []any:
-		out := make([]any, 0, len(x))
-		for _, vv := range x {
-			if sv, ok := structpbSafe(vv); ok {
-				out = append(out, sv)
-			}
-		}
-		return out, true
-	case time.Time:
-		return x.Unix(), true
-	case []byte:
-		return base64.RawURLEncoding.EncodeToString(x), true
-	case uint64:
-		return int64(x), true
-	case nil, bool, string,
-		int, int8, int16, int32, int64,
-		uint, uint8, uint16, uint32,
-		float32, float64:
-		return v, true
-	default:
-		return nil, false
-	}
 }
 
 func (s *EntityResolutionService) directEntitlements(c arkavoClaims) []*entityresolutionV2.DirectEntitlement {

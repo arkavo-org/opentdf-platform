@@ -132,7 +132,8 @@ func TestCWTVerifier_HappyPath(t *testing.T) {
 	}, nil)
 	require.NoError(t, err)
 
-	subjectToken := signCWT(t, priv, kid,
+	subjectToken := signCWT(
+		t, priv, kid,
 		standardClaims("https://idp.example", "opentdf-platform", "user-1", time.Hour),
 		map[string]any{
 			"email":             "alice@example.com",
@@ -160,7 +161,8 @@ func TestCWTVerifier_RejectsWrongIssuer(t *testing.T) {
 		CacheTTL:    time.Minute,
 	}, nil)
 	require.NoError(t, err)
-	tok := signCWT(t, priv, kid,
+	tok := signCWT(
+		t, priv, kid,
 		standardClaims("https://imposter.example", "opentdf-platform", "user-1", time.Hour),
 		nil,
 	)
@@ -180,7 +182,8 @@ func TestCWTVerifier_RejectsWrongAudience(t *testing.T) {
 		CacheTTL:    time.Minute,
 	}, nil)
 	require.NoError(t, err)
-	tok := signCWT(t, priv, kid,
+	tok := signCWT(
+		t, priv, kid,
 		standardClaims("https://idp.example", "some-other-rs", "user-1", time.Hour),
 		nil,
 	)
@@ -200,7 +203,8 @@ func TestCWTVerifier_RejectsExpired(t *testing.T) {
 		CacheTTL:    time.Minute,
 	}, nil)
 	require.NoError(t, err)
-	tok := signCWT(t, priv, kid,
+	tok := signCWT(
+		t, priv, kid,
 		standardClaims("https://idp.example", "opentdf-platform", "user-1", -time.Minute),
 		nil,
 	)
@@ -223,7 +227,8 @@ func TestCWTVerifier_RejectsUnknownKid(t *testing.T) {
 	}, nil)
 	require.NoError(t, err)
 	// Sign with priv2 and kid2 — server doesn't know it.
-	tok := signCWT(t, priv2, kid2,
+	tok := signCWT(
+		t, priv2, kid2,
 		standardClaims("https://idp.example", "opentdf-platform", "user-1", time.Hour),
 		nil,
 	)
@@ -275,7 +280,8 @@ func TestCWTVerifier_CustomClaimsRoundTrip(t *testing.T) {
 		CacheTTL:    time.Minute,
 	}, nil)
 	require.NoError(t, err)
-	subjectToken := signCWT(t, priv, kid,
+	subjectToken := signCWT(
+		t, priv, kid,
 		standardClaims("https://idp.example", "opentdf-platform", "user-1", time.Hour),
 		map[string]any{
 			"arkavo_roles":        []any{"admin", "reader"},
@@ -335,7 +341,8 @@ func TestNewCWTVerifier_RejectsBadConfig(t *testing.T) {
 
 func TestDecodeCWTClaimsFromToken_ParseOnly(t *testing.T) {
 	priv, kid := newP256(t)
-	tokenRaw := signCWT(t, priv, kid,
+	tokenRaw := signCWT(
+		t, priv, kid,
 		map[int64]any{
 			1: "https://identity.arkavo.net",
 			2: "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK",
@@ -358,4 +365,34 @@ func TestDecodeCWTClaimsFromToken_ParseOnly(t *testing.T) {
 
 	_, err = DecodeCWTClaimsFromToken("not-a-cwt")
 	require.Error(t, err)
+}
+
+func TestDecodeClaimsFromToken_JOSEThenCWT(t *testing.T) {
+	jose, err := encodeUnsignedJWT(map[string]any{"iss": "i", "sub": "s", "arkavo_patreon": map[string]any{"role": "consumer"}})
+	require.NoError(t, err)
+	m, err := DecodeClaimsFromToken(t.Context(), jose)
+	require.NoError(t, err)
+	assert.Equal(t, "i", m["iss"])
+	assert.Equal(t, "s", m["sub"])
+	pat, ok := m["arkavo_patreon"].(map[string]any)
+	require.True(t, ok, "JOSE: arkavo_patreon should decode to a map")
+	assert.Equal(t, "consumer", pat["role"])
+
+	priv, kid := newP256(t)
+	cwt := signCWT(
+		t, priv, kid,
+		map[int64]any{1: "i", 2: "s"},
+		map[string]any{"arkavo_patreon": map[any]any{"role": "consumer"}},
+	)
+	m, err = DecodeClaimsFromToken(t.Context(), cwt)
+	require.NoError(t, err)
+	assert.Equal(t, "i", m["iss"])
+	assert.Equal(t, "s", m["sub"])
+	pat, ok = m["arkavo_patreon"].(map[string]any)
+	require.True(t, ok, "CWT: arkavo_patreon should decode to a map")
+	assert.Equal(t, "consumer", pat["role"])
+
+	_, err = DecodeClaimsFromToken(t.Context(), "definitely-not-a-token")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "neither JWT nor CWT")
 }
