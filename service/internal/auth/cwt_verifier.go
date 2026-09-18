@@ -439,8 +439,8 @@ func normalizeClaims(m map[string]any) map[string]any {
 		}
 	}
 	// A JWT aud may be a string or a list; a CWT encodes a single audience as
-	// a bare string. Callers get a list either way. StructpbSafe drops a
-	// []string, so this reads from the source map.
+	// a bare string. Callers get a []string either way — StructpbSafe would
+	// have widened it to []any, so this re-pins the canonical type.
 	if aud, ok := asStringList(m["aud"]); ok {
 		out["aud"] = aud
 	}
@@ -565,6 +565,14 @@ func StructpbSafe(v any) (any, bool) {
 			if sv, ok := StructpbSafe(vv); ok {
 				out = append(out, sv)
 			}
+		}
+		return out, true
+	case []string:
+		// aud is canonically a []string, so dropping it here would silently
+		// lose the audience of every JOSE token.
+		out := make([]any, len(x))
+		for i, vv := range x {
+			out[i] = vv
 		}
 		return out, true
 	case time.Time:

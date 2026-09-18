@@ -444,3 +444,24 @@ func TestDecodeClaimsFromToken_NormalizesCBORNativeValues(t *testing.T) {
 	_, err = structpb.NewStruct(pat)
 	require.NoError(t, err, "normalized claims must be structpb-safe")
 }
+
+// StructpbSafe is what callers run a normalized claims map through before
+// structpb.NewStruct. A []string is trivially representable, and the aud
+// claim is canonically one, so dropping it would silently lose the audience
+// of every JOSE token.
+func TestStructpbSafe_StringSlice(t *testing.T) {
+	safe, ok := StructpbSafe(map[string]any{
+		"aud":   []string{"https://platform.arkavo.net", "https://kas.arkavo.net"},
+		"empty": []string{},
+	})
+	require.True(t, ok)
+
+	m, isMap := safe.(map[string]any)
+	require.True(t, isMap)
+	assert.Equal(t, []any{"https://platform.arkavo.net", "https://kas.arkavo.net"}, m["aud"],
+		"[]string must survive as a list, not be dropped")
+	assert.Equal(t, []any{}, m["empty"])
+
+	_, err := structpb.NewStruct(m)
+	require.NoError(t, err)
+}
