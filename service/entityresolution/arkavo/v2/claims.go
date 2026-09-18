@@ -1,20 +1,5 @@
 package arkavo
 
-import (
-	"context"
-
-	"github.com/opentdf/platform/service/internal/auth"
-)
-
-// claimsFromToken accepts either a JOSE JWT (the RAR endpoint's unsigned
-// bridge, or a real JWT) or a base64url CWT (the with_request_token path
-// hands the ERS the raw bearer). Signature verification happened upstream.
-// The JOSE-then-CWT parse is shared with the Patreon provider via
-// auth.DecodeClaimsFromToken.
-func claimsFromToken(ctx context.Context, tokenRaw string) (map[string]any, error) {
-	return auth.DecodeClaimsFromToken(ctx, tokenRaw)
-}
-
 type npeClaim struct {
 	Type              string
 	Class             string

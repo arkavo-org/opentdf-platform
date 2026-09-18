@@ -3,31 +3,21 @@ package auth
 import (
 	"context"
 	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
 	"encoding/base64"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 
 	"github.com/fxamacker/cbor/v2"
+	"github.com/opentdf/platform/service/internal/cwttest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/veraison/go-cose"
+	"google.golang.org/protobuf/types/known/structpb"
 )
 
 // --- helpers ----------------------------------------------------------------
-
-// newP256 returns a fresh ECDSA P-256 keypair plus the RFC 7638-style
-// thumbprint we use as a kid throughout the tests.
-func newP256(t *testing.T) (*ecdsa.PrivateKey, []byte) {
-	t.Helper()
-	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	require.NoError(t, err)
-	kid := append([]byte("kid-"), byteSlicePad(priv.X.Bytes(), 4)...)
-	return priv, kid
-}
 
 func byteSlicePad(b []byte, n int) []byte {
 	if len(b) >= n {
@@ -55,38 +45,6 @@ func coseKeySetFromPub(t *testing.T, pub *ecdsa.PublicKey, kid []byte) []byte {
 	buf, err := cbor.Marshal([]map[int64]any{key})
 	require.NoError(t, err)
 	return buf
-}
-
-// signCWT signs a CWT with claims and returns base64url(COSE_Sign1) — the
-// same wire format the RAR endpoint will accept as a subject_token.
-func signCWT(t *testing.T, priv *ecdsa.PrivateKey, kid []byte, claims map[int64]any, custom map[string]any) string {
-	t.Helper()
-	// Encode claims as CBOR.
-	payload := map[any]any{}
-	for k, v := range claims {
-		payload[k] = v
-	}
-	for k, v := range custom {
-		payload[k] = v
-	}
-	payloadCBOR, err := cbor.Marshal(payload)
-	require.NoError(t, err)
-
-	signer, err := cose.NewSigner(cose.AlgorithmES256, priv)
-	require.NoError(t, err)
-	msg := cose.Sign1Message{
-		Headers: cose.Headers{
-			Protected: cose.ProtectedHeader{
-				cose.HeaderLabelAlgorithm: cose.AlgorithmES256,
-				cose.HeaderLabelKeyID:     kid,
-			},
-		},
-		Payload: payloadCBOR,
-	}
-	require.NoError(t, msg.Sign(rand.Reader, nil, signer))
-	raw, err := msg.MarshalCBOR()
-	require.NoError(t, err)
-	return base64.RawURLEncoding.EncodeToString(raw)
 }
 
 // keySetServer wraps a tiny httptest.Server that serves a COSE Key Set,
@@ -118,7 +76,7 @@ func standardClaims(iss, aud, sub string, ttl time.Duration) map[int64]any {
 // --- tests ------------------------------------------------------------------
 
 func TestCWTVerifier_HappyPath(t *testing.T) {
-	priv, kid := newP256(t)
+	priv, kid := cwttest.NewKey(t)
 	keySet := coseKeySetFromPub(t, &priv.PublicKey, kid)
 	srv := keySetServer(t, keySet)
 	defer srv.Close()
@@ -132,7 +90,7 @@ func TestCWTVerifier_HappyPath(t *testing.T) {
 	}, nil)
 	require.NoError(t, err)
 
-	subjectToken := signCWT(
+	subjectToken := cwttest.SignLabeled(
 		t, priv, kid,
 		standardClaims("https://idp.example", "opentdf-platform", "user-1", time.Hour),
 		map[string]any{
@@ -151,7 +109,7 @@ func TestCWTVerifier_HappyPath(t *testing.T) {
 }
 
 func TestCWTVerifier_RejectsWrongIssuer(t *testing.T) {
-	priv, kid := newP256(t)
+	priv, kid := cwttest.NewKey(t)
 	srv := keySetServer(t, coseKeySetFromPub(t, &priv.PublicKey, kid))
 	defer srv.Close()
 	v, err := NewCWTVerifier(context.Background(), CWTVerifierConfig{
@@ -161,7 +119,7 @@ func TestCWTVerifier_RejectsWrongIssuer(t *testing.T) {
 		CacheTTL:    time.Minute,
 	}, nil)
 	require.NoError(t, err)
-	tok := signCWT(
+	tok := cwttest.SignLabeled(
 		t, priv, kid,
 		standardClaims("https://imposter.example", "opentdf-platform", "user-1", time.Hour),
 		nil,
@@ -172,7 +130,7 @@ func TestCWTVerifier_RejectsWrongIssuer(t *testing.T) {
 }
 
 func TestCWTVerifier_RejectsWrongAudience(t *testing.T) {
-	priv, kid := newP256(t)
+	priv, kid := cwttest.NewKey(t)
 	srv := keySetServer(t, coseKeySetFromPub(t, &priv.PublicKey, kid))
 	defer srv.Close()
 	v, err := NewCWTVerifier(context.Background(), CWTVerifierConfig{
@@ -182,7 +140,7 @@ func TestCWTVerifier_RejectsWrongAudience(t *testing.T) {
 		CacheTTL:    time.Minute,
 	}, nil)
 	require.NoError(t, err)
-	tok := signCWT(
+	tok := cwttest.SignLabeled(
 		t, priv, kid,
 		standardClaims("https://idp.example", "some-other-rs", "user-1", time.Hour),
 		nil,
@@ -193,7 +151,7 @@ func TestCWTVerifier_RejectsWrongAudience(t *testing.T) {
 }
 
 func TestCWTVerifier_RejectsExpired(t *testing.T) {
-	priv, kid := newP256(t)
+	priv, kid := cwttest.NewKey(t)
 	srv := keySetServer(t, coseKeySetFromPub(t, &priv.PublicKey, kid))
 	defer srv.Close()
 	v, err := NewCWTVerifier(context.Background(), CWTVerifierConfig{
@@ -203,7 +161,7 @@ func TestCWTVerifier_RejectsExpired(t *testing.T) {
 		CacheTTL:    time.Minute,
 	}, nil)
 	require.NoError(t, err)
-	tok := signCWT(
+	tok := cwttest.SignLabeled(
 		t, priv, kid,
 		standardClaims("https://idp.example", "opentdf-platform", "user-1", -time.Minute),
 		nil,
@@ -214,8 +172,8 @@ func TestCWTVerifier_RejectsExpired(t *testing.T) {
 }
 
 func TestCWTVerifier_RejectsUnknownKid(t *testing.T) {
-	priv1, kid1 := newP256(t)
-	priv2, kid2 := newP256(t)
+	priv1, kid1 := cwttest.NewKey(t)
+	priv2, kid2 := cwttest.NewKey(t)
 	// Server publishes priv1's public key.
 	srv := keySetServer(t, coseKeySetFromPub(t, &priv1.PublicKey, kid1))
 	defer srv.Close()
@@ -227,7 +185,7 @@ func TestCWTVerifier_RejectsUnknownKid(t *testing.T) {
 	}, nil)
 	require.NoError(t, err)
 	// Sign with priv2 and kid2 — server doesn't know it.
-	tok := signCWT(
+	tok := cwttest.SignLabeled(
 		t, priv2, kid2,
 		standardClaims("https://idp.example", "opentdf-platform", "user-1", time.Hour),
 		nil,
@@ -238,7 +196,7 @@ func TestCWTVerifier_RejectsUnknownKid(t *testing.T) {
 }
 
 func TestCWTVerifier_RejectsMalformedBase64(t *testing.T) {
-	priv, kid := newP256(t)
+	priv, kid := cwttest.NewKey(t)
 	srv := keySetServer(t, coseKeySetFromPub(t, &priv.PublicKey, kid))
 	defer srv.Close()
 	v, err := NewCWTVerifier(context.Background(), CWTVerifierConfig{
@@ -253,7 +211,7 @@ func TestCWTVerifier_RejectsMalformedBase64(t *testing.T) {
 }
 
 func TestCWTVerifier_RejectsMalformedCBOR(t *testing.T) {
-	priv, kid := newP256(t)
+	priv, kid := cwttest.NewKey(t)
 	srv := keySetServer(t, coseKeySetFromPub(t, &priv.PublicKey, kid))
 	defer srv.Close()
 	v, err := NewCWTVerifier(context.Background(), CWTVerifierConfig{
@@ -270,7 +228,7 @@ func TestCWTVerifier_RejectsMalformedCBOR(t *testing.T) {
 }
 
 func TestCWTVerifier_CustomClaimsRoundTrip(t *testing.T) {
-	priv, kid := newP256(t)
+	priv, kid := cwttest.NewKey(t)
 	srv := keySetServer(t, coseKeySetFromPub(t, &priv.PublicKey, kid))
 	defer srv.Close()
 	v, err := NewCWTVerifier(context.Background(), CWTVerifierConfig{
@@ -280,7 +238,7 @@ func TestCWTVerifier_CustomClaimsRoundTrip(t *testing.T) {
 		CacheTTL:    time.Minute,
 	}, nil)
 	require.NoError(t, err)
-	subjectToken := signCWT(
+	subjectToken := cwttest.SignLabeled(
 		t, priv, kid,
 		standardClaims("https://idp.example", "opentdf-platform", "user-1", time.Hour),
 		map[string]any{
@@ -307,7 +265,7 @@ func TestCWTVerifier_CustomClaimsRoundTrip(t *testing.T) {
 }
 
 func TestCWTVerifier_AudienceArrayMatches(t *testing.T) {
-	priv, kid := newP256(t)
+	priv, kid := cwttest.NewKey(t)
 	srv := keySetServer(t, coseKeySetFromPub(t, &priv.PublicKey, kid))
 	defer srv.Close()
 	v, err := NewCWTVerifier(context.Background(), CWTVerifierConfig{
@@ -319,7 +277,7 @@ func TestCWTVerifier_AudienceArrayMatches(t *testing.T) {
 	require.NoError(t, err)
 	claims := standardClaims("https://idp.example", "", "user-1", time.Hour)
 	claims[3] = []any{"some-other-rs", "opentdf-platform"} // aud as array
-	tok := signCWT(t, priv, kid, claims, nil)
+	tok := cwttest.SignLabeled(t, priv, kid, claims, nil)
 	_, _, err = v.VerifyCWTSubjectToken(context.Background(), tok)
 	require.NoError(t, err)
 }
@@ -340,8 +298,8 @@ func TestNewCWTVerifier_RejectsBadConfig(t *testing.T) {
 }
 
 func TestDecodeCWTClaimsFromToken_ParseOnly(t *testing.T) {
-	priv, kid := newP256(t)
-	tokenRaw := signCWT(
+	priv, kid := cwttest.NewKey(t)
+	tokenRaw := cwttest.SignLabeled(
 		t, priv, kid,
 		map[int64]any{
 			1: "https://identity.arkavo.net",
@@ -378,8 +336,8 @@ func TestDecodeClaimsFromToken_JOSEThenCWT(t *testing.T) {
 	require.True(t, ok, "JOSE: arkavo_patreon should decode to a map")
 	assert.Equal(t, "consumer", pat["role"])
 
-	priv, kid := newP256(t)
-	cwt := signCWT(
+	priv, kid := cwttest.NewKey(t)
+	cwt := cwttest.SignLabeled(
 		t, priv, kid,
 		map[int64]any{1: "i", 2: "s"},
 		map[string]any{"arkavo_patreon": map[any]any{"role": "consumer"}},
@@ -395,4 +353,115 @@ func TestDecodeClaimsFromToken_JOSEThenCWT(t *testing.T) {
 	_, err = DecodeClaimsFromToken(t.Context(), "definitely-not-a-token")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "neither JWT nor CWT")
+}
+
+// The combined parse failure reaches clients as a connect/gRPC status message
+// and structured logs, both of which are single-line. errors.Join separates
+// with a newline, which has to be percent-encoded in the grpc-message header
+// and breaks single-line log ingestion.
+func TestDecodeClaimsFromToken_ParseErrorIsSingleLine(t *testing.T) {
+	_, err := DecodeClaimsFromToken(t.Context(), "definitely-not-a-token")
+	require.Error(t, err)
+
+	assert.NotContains(t, err.Error(), "\n", "parse error must stay on one line")
+	// Both reasons still survive, and the CWT error stays unwrappable.
+	assert.Contains(t, err.Error(), "neither JWT nor CWT")
+	assert.Contains(t, err.Error(), "jwt:")
+	assert.Contains(t, err.Error(), "cwt:")
+	assert.Error(t, errors.Unwrap(err), "cwt error must remain wrapped")
+}
+
+// The helper's contract is that callers read one map shape regardless of wire
+// format. Standard claims must therefore come back as the same Go types from
+// both branches: a caller comparing exp numerically, or handing the map to
+// structpb.NewStruct, must not behave differently per format.
+func TestDecodeClaimsFromToken_UniformStandardClaimTypes(t *testing.T) {
+	const expUnix = int64(4102444800)
+
+	jose, err := encodeUnsignedJWT(map[string]any{
+		"iss": "https://identity.arkavo.net",
+		"sub": "did:key:zSub",
+		"aud": []string{"https://platform.arkavo.net"},
+		"exp": expUnix,
+	})
+	require.NoError(t, err)
+	joseClaims, err := DecodeClaimsFromToken(t.Context(), jose)
+	require.NoError(t, err)
+
+	priv, kid := cwttest.NewKey(t)
+	cwt := cwttest.SignLabeled(t, priv, kid, map[int64]any{
+		1: "https://identity.arkavo.net",
+		2: "did:key:zSub",
+		3: "https://platform.arkavo.net", // CWT aud is a bare string
+		4: expUnix,
+	}, nil)
+	cwtClaims, err := DecodeClaimsFromToken(t.Context(), cwt)
+	require.NoError(t, err)
+
+	for _, k := range []string{"iss", "sub", "aud", "exp"} {
+		assert.IsType(t, joseClaims[k], cwtClaims[k],
+			"claim %q has a different Go type per wire format", k)
+		assert.Equal(t, joseClaims[k], cwtClaims[k], "claim %q differs per wire format", k)
+	}
+
+	// Pin the canonical shapes so the equality above is not vacuous.
+	assert.Equal(t, expUnix, cwtClaims["exp"], "exp must be epoch seconds, not time.Time")
+	assert.Equal(t, []string{"https://platform.arkavo.net"}, cwtClaims["aud"],
+		"aud must always be a list")
+}
+
+// A CWT's custom claims decode to CBOR-native Go types. The helper normalizes
+// them so every consumer — structpb.NewStruct, JSON serialization, a subject
+// mapping selector — sees one JSON-shaped map, instead of each provider
+// re-deriving its own sanitizer.
+func TestDecodeClaimsFromToken_NormalizesCBORNativeValues(t *testing.T) {
+	priv, kid := cwttest.NewKey(t)
+	cwt := cwttest.SignLabeled(
+		t, priv, kid,
+		map[int64]any{1: "https://identity.arkavo.net", 2: "did:key:zSub"},
+		map[string]any{
+			"arkavo_patreon": map[any]any{
+				"last_charge_at": cbor.Tag{Number: 1, Content: int64(1700000000)},
+				"attestation":    []byte{0xde, 0xad, 0xbe, 0xef},
+				"depth":          uint64(3),
+				"unknown_tag":    cbor.Tag{Number: 999, Content: "opaque"},
+			},
+		},
+	)
+
+	claims, err := DecodeClaimsFromToken(t.Context(), cwt)
+	require.NoError(t, err)
+
+	pat, ok := claims["arkavo_patreon"].(map[string]any)
+	require.True(t, ok, "arkavo_patreon should decode to a map")
+	assert.Equal(t, int64(1700000000), pat["last_charge_at"], "tag-1 timestamp -> epoch seconds")
+	assert.Equal(t, "3q2-7w", pat["attestation"], "byte string -> base64url")
+	assert.Equal(t, int64(3), pat["depth"], "uint64 -> int64")
+	assert.NotContains(t, pat, "unknown_tag", "value with no JSON representation is dropped")
+
+	// The normalized map is directly usable by structpb, which is what the
+	// entity resolution providers hand it to.
+	_, err = structpb.NewStruct(pat)
+	require.NoError(t, err, "normalized claims must be structpb-safe")
+}
+
+// StructpbSafe is what callers run a normalized claims map through before
+// structpb.NewStruct. A []string is trivially representable, and the aud
+// claim is canonically one, so dropping it would silently lose the audience
+// of every JOSE token.
+func TestStructpbSafe_StringSlice(t *testing.T) {
+	safe, ok := StructpbSafe(map[string]any{
+		"aud":   []string{"https://platform.arkavo.net", "https://kas.arkavo.net"},
+		"empty": []string{},
+	})
+	require.True(t, ok)
+
+	m, isMap := safe.(map[string]any)
+	require.True(t, isMap)
+	assert.Equal(t, []any{"https://platform.arkavo.net", "https://kas.arkavo.net"}, m["aud"],
+		"[]string must survive as a list, not be dropped")
+	assert.Equal(t, []any{}, m["empty"])
+
+	_, err := structpb.NewStruct(m)
+	require.NoError(t, err)
 }

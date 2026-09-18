@@ -2,62 +2,18 @@ package patreon
 
 import (
 	"context"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
-	"encoding/base64"
 	"reflect"
 	"strings"
 	"testing"
 
 	"connectrpc.com/connect"
 	"github.com/fxamacker/cbor/v2"
-	"github.com/veraison/go-cose"
+	"github.com/opentdf/platform/service/internal/cwttest"
 	"google.golang.org/protobuf/types/known/structpb"
 
 	"github.com/opentdf/platform/protocol/go/entity"
 	ersV2 "github.com/opentdf/platform/protocol/go/entityresolution/v2"
 )
-
-// signCWT mints an in-package COSE_Sign1 CWT — the wire format the KAS
-// rewrap path (tdf3Rewrap → canAccess → entity.Token{Jwt: bearer}) hands
-// this provider since the bearer became a CWT. The ERS never verifies it
-// (the authn interceptor did upstream). Mirrors the helper in
-// service/entityresolution/arkavo/v2/entity_resolution_test.go; package
-// auth's signCWT test helper is not importable.
-func signCWT(t *testing.T, iss, sub string, custom map[any]any) string {
-	t.Helper()
-	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatalf("generate key: %v", err)
-	}
-	payload := map[any]any{1: iss, 2: sub}
-	for k, v := range custom {
-		payload[k] = v
-	}
-	payloadCBOR, err := cbor.Marshal(payload)
-	if err != nil {
-		t.Fatalf("marshal payload: %v", err)
-	}
-	signer, err := cose.NewSigner(cose.AlgorithmES256, priv)
-	if err != nil {
-		t.Fatalf("new signer: %v", err)
-	}
-	msg := cose.Sign1Message{
-		Headers: cose.Headers{
-			Protected: cose.ProtectedHeader{cose.HeaderLabelAlgorithm: cose.AlgorithmES256},
-		},
-		Payload: payloadCBOR,
-	}
-	if err := msg.Sign(rand.Reader, nil, signer); err != nil {
-		t.Fatalf("sign: %v", err)
-	}
-	raw, err := msg.MarshalCBOR()
-	if err != nil {
-		t.Fatalf("marshal cose: %v", err)
-	}
-	return base64.RawURLEncoding.EncodeToString(raw)
-}
 
 const (
 	cwtTestIssuer = "https://identity.arkavo.net"
@@ -94,7 +50,7 @@ func patreonJWT(t *testing.T) string {
 
 func patreonCWT(t *testing.T) string {
 	t.Helper()
-	return signCWT(t, cwtTestIssuer, cwtTestSub, map[any]any{
+	return cwttest.SignEphemeral(t, cwtTestIssuer, cwtTestSub, map[any]any{
 		"azp": cwtTestAzp,
 		"arkavo_patreon": map[any]any{
 			"role":            "consumer",
@@ -207,7 +163,7 @@ func TestCreateEntityChainsFromTokens_CWTUntrustedIssuerDropsClaim(t *testing.T)
 		TrustedIssuer:           cwtTestIssuer,
 		InferUnknownAsFree:      true,
 	})
-	forged := signCWT(t, "https://evil.example.com", "attacker", map[any]any{
+	forged := cwttest.SignEphemeral(t, "https://evil.example.com", "attacker", map[any]any{
 		"arkavo_patreon": map[any]any{
 			"role":            "consumer",
 			"patreon_user_id": "p-evil",
@@ -256,7 +212,7 @@ func TestCreateEntityChainsFromTokens_CWTWithCBORNativeClaimValues(t *testing.T)
 		TrustMaterializedClaims: true,
 		TrustedIssuer:           cwtTestIssuer,
 	})
-	token := signCWT(t, cwtTestIssuer, cwtTestSub, map[any]any{
+	token := cwttest.SignEphemeral(t, cwtTestIssuer, cwtTestSub, map[any]any{
 		"azp": cwtTestAzp,
 		"arkavo_patreon": map[any]any{
 			"role":            "consumer",
@@ -323,7 +279,7 @@ func TestCreateEntityChainsFromTokens_NoMembershipClaimIsNotFound(t *testing.T) 
 		TrustMaterializedClaims: true,
 		TrustedIssuer:           cwtTestIssuer,
 	})
-	token := signCWT(t, cwtTestIssuer, cwtTestSub, map[any]any{"azp": cwtTestAzp})
+	token := cwttest.SignEphemeral(t, cwtTestIssuer, cwtTestSub, map[any]any{"azp": cwtTestAzp})
 
 	_, err := svc.CreateEntityChainsFromTokens(context.Background(),
 		connect.NewRequest(&ersV2.CreateEntityChainsFromTokensRequest{

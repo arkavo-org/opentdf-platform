@@ -2,9 +2,6 @@ package arkavo
 
 import (
 	"context"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
 	"encoding/base64"
 	"reflect"
 	"sort"
@@ -16,8 +13,8 @@ import (
 	"github.com/fxamacker/cbor/v2"
 	"github.com/opentdf/platform/protocol/go/entity"
 	entityresolutionV2 "github.com/opentdf/platform/protocol/go/entityresolution/v2"
+	"github.com/opentdf/platform/service/internal/cwttest"
 	"github.com/opentdf/platform/service/logger"
-	"github.com/veraison/go-cose"
 	"go.opentelemetry.io/otel/trace/noop"
 	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/structpb"
@@ -225,46 +222,9 @@ func TestClaimsEntityPreservesRawForSecondPass(t *testing.T) {
 
 // --- real base64url CWT end-to-end ------------------------------------------
 
-// signCWT mints an in-package COSE_Sign1 CWT (unverified by the ERS, exactly
-// as the with_request_token path hands it the raw bearer). Kept local since
-// package auth's signCWT test helper is not importable.
-func signCWT(t *testing.T, iss, sub string, custom map[any]any) string {
-	t.Helper()
-	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatalf("generate key: %v", err)
-	}
-	payload := map[any]any{1: iss, 2: sub}
-	for k, v := range custom {
-		payload[k] = v
-	}
-	payloadCBOR, err := cbor.Marshal(payload)
-	if err != nil {
-		t.Fatalf("marshal payload: %v", err)
-	}
-	signer, err := cose.NewSigner(cose.AlgorithmES256, priv)
-	if err != nil {
-		t.Fatalf("new signer: %v", err)
-	}
-	msg := cose.Sign1Message{
-		Headers: cose.Headers{
-			Protected: cose.ProtectedHeader{cose.HeaderLabelAlgorithm: cose.AlgorithmES256},
-		},
-		Payload: payloadCBOR,
-	}
-	if err := msg.Sign(rand.Reader, nil, signer); err != nil {
-		t.Fatalf("sign: %v", err)
-	}
-	raw, err := msg.MarshalCBOR()
-	if err != nil {
-		t.Fatalf("marshal cose: %v", err)
-	}
-	return base64.RawURLEncoding.EncodeToString(raw)
-}
-
 func agentCWT(t *testing.T, iss string) string {
 	t.Helper()
-	return signCWT(t, iss, "did:key:z6Mkagent", map[any]any{
+	return cwttest.SignEphemeral(t, iss, "did:key:z6Mkagent", map[any]any{
 		"arkavo_account_id": "00000000-0000-0000-0000-000000000001",
 		"arkavo_roles":      []any{"agent"},
 		"arkavo_entitlements": []any{
@@ -400,7 +360,7 @@ func TestCWTToken_NpeEpochTimestampAndByteString_Sanitized(t *testing.T) {
 	svc := newSvc(t, Config{TrustMaterializedClaims: true, TrustedIssuer: issuer})
 	expiry := time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)
 	nonce := []byte{0xDE, 0xAD, 0xBE, 0xEF}
-	tok := signCWT(t, issuer, "did:key:z6Mkdevice", map[any]any{
+	tok := cwttest.SignEphemeral(t, issuer, "did:key:z6Mkdevice", map[any]any{
 		"arkavo_npe": map[any]any{
 			"type":               "device",
 			"device_id":          "K1",
@@ -438,7 +398,7 @@ func TestCWTToken_NpeEpochTimestampAndByteString_Sanitized(t *testing.T) {
 // The call must still succeed, keep representable values, and drop the rest.
 func TestCWTToken_NpeNestedStructures_Sanitized(t *testing.T) {
 	svc := newSvc(t, Config{TrustMaterializedClaims: true, TrustedIssuer: issuer})
-	tok := signCWT(t, issuer, "did:key:z6Mkdevice", map[any]any{
+	tok := cwttest.SignEphemeral(t, issuer, "did:key:z6Mkdevice", map[any]any{
 		"arkavo_npe": map[any]any{
 			"type":      "device",
 			"device_id": "K1",
