@@ -9,12 +9,12 @@ import (
 
 	"connectrpc.com/connect"
 	"github.com/go-viper/mapstructure/v2"
-	"github.com/lestrrat-go/jwx/v2/jwt"
 	"github.com/opentdf/platform/protocol/go/entity"
 	ersV2 "github.com/opentdf/platform/protocol/go/entityresolution/v2"
 	ent "github.com/opentdf/platform/service/entity"
 	multistrategy "github.com/opentdf/platform/service/entityresolution/multi-strategy"
 	"github.com/opentdf/platform/service/entityresolution/multi-strategy/types"
+	"github.com/opentdf/platform/service/internal/auth"
 	"github.com/opentdf/platform/service/logger"
 	"github.com/opentdf/platform/service/pkg/serviceregistry"
 	"go.opentelemetry.io/otel/trace"
@@ -386,16 +386,12 @@ func (ers *ERSV2) createEntityFromResultV2(ctx context.Context, result *types.En
 
 // Helper functions for v2
 func (ers *ERSV2) parseJWTClaims(ctx context.Context, jwtString string) (types.JWTClaims, error) {
-	// For now, use a simple JWT parser (in production, this should validate signatures)
-	// This is similar to how Keycloak ERS parses JWTs
-	token, err := jwt.ParseString(jwtString, jwt.WithVerify(false), jwt.WithValidate(false))
+	// Accepts either wire format the platform issues — a JOSE JWT or the
+	// base64url COSE_Sign1 CWT the KAS rewrap path forwards. Signatures are
+	// verified by the authn layer upstream, not here.
+	claims, err := auth.DecodeClaimsFromToken(ctx, jwtString)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse JWT: %w", err)
-	}
-
-	claims, err := token.AsMap(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to extract claims from JWT: %w", err)
+		return nil, fmt.Errorf("failed to parse bearer token: %w", err)
 	}
 
 	return types.JWTClaims(claims), nil

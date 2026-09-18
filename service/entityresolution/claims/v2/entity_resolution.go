@@ -2,15 +2,16 @@ package claims
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strconv"
 
 	"connectrpc.com/connect"
-	"github.com/lestrrat-go/jwx/v2/jwt"
 	"github.com/opentdf/platform/protocol/go/entity"
 	entityresolutionV2 "github.com/opentdf/platform/protocol/go/entityresolution/v2"
 	ent "github.com/opentdf/platform/service/entity"
+	"github.com/opentdf/platform/service/internal/auth"
 	"github.com/opentdf/platform/service/logger"
 	"github.com/opentdf/platform/service/pkg/config"
 	"github.com/opentdf/platform/service/pkg/serviceregistry"
@@ -45,14 +46,14 @@ func (s EntityResolutionServiceV2) CreateEntityChainsFromTokens(ctx context.Cont
 }
 
 func CreateEntityChainsFromTokens(
-	_ context.Context,
+	ctx context.Context,
 	req *entityresolutionV2.CreateEntityChainsFromTokensRequest,
 	_ *logger.Logger,
 ) (entityresolutionV2.CreateEntityChainsFromTokensResponse, error) {
 	entityChains := []*entity.EntityChain{}
 	// for each token in the tokens form an entity chain
 	for _, tok := range req.GetTokens() {
-		entities, err := getEntitiesFromToken(tok.GetJwt())
+		entities, err := getEntitiesFromToken(ctx, tok.GetJwt())
 		if err != nil {
 			return entityresolutionV2.CreateEntityChainsFromTokensResponse{}, err
 		}
@@ -103,37 +104,31 @@ func EntityResolution(_ context.Context,
 	return entityresolutionV2.ResolveEntitiesResponse{EntityRepresentations: resolvedEntities}, nil
 }
 
-func getEntitiesFromToken(jwtString string) ([]*entity.Entity, error) {
-	token, err := jwt.ParseString(jwtString, jwt.WithVerify(false), jwt.WithValidate(false))
+func getEntitiesFromToken(ctx context.Context, jwtString string) ([]*entity.Entity, error) {
+	// Either wire format: a JOSE JWT, or the base64url COSE_Sign1 CWT the KAS
+	// rewrap path forwards. The helper returns one claim shape for both,
+	// registered claims included — jwx keeps those out of PrivateClaims, and
+	// selectors like .sub in subject mapping conditions need them.
+	claims, err := auth.DecodeClaimsFromToken(ctx, jwtString)
 	if err != nil {
-		return nil, fmt.Errorf("error parsing jwt: %w", err)
+		return nil, fmt.Errorf("error parsing bearer token: %w", err)
 	}
 
-	claims := token.PrivateClaims()
-	// PrivateClaims() excludes standard registered JWT claims (sub, iss, aud, etc.)
-	// because the jwx library stores them as typed fields. Add them back so selectors
-	// like .sub work in subject mapping conditions.
-	if sub := token.Subject(); sub != "" {
-		claims["sub"] = sub
+	// aud is canonically a []string and a CWT decodes CBOR-native values;
+	// widen both to what structpb accepts.
+	safeClaims, ok := auth.StructpbSafe(claims)
+	if !ok {
+		return nil, errors.New("error normalizing claims for structpb")
 	}
-	if iss := token.Issuer(); iss != "" {
-		claims["iss"] = iss
+	safeMap, ok := safeClaims.(map[string]any)
+	if !ok {
+		return nil, errors.New("normalized claims are not a map")
 	}
-	if jti := token.JwtID(); jti != "" {
-		claims["jti"] = jti
-	}
-	if aud := token.Audience(); len(aud) > 0 {
-		// Convert []string to []interface{} for structpb compatibility
-		audSlice := make([]interface{}, len(aud))
-		for i, a := range aud {
-			audSlice[i] = a
-		}
-		claims["aud"] = audSlice
-	}
+
 	entities := []*entity.Entity{}
 
 	// Convert map[string]interface{} to *structpb.Struct
-	structClaims, err := structpb.NewStruct(claims)
+	structClaims, err := structpb.NewStruct(safeMap)
 	if err != nil {
 		return nil, fmt.Errorf("error converting to structpb.Struct: %w", err)
 	}

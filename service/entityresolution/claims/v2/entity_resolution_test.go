@@ -115,6 +115,9 @@ func Test_JWTToEntityChainClaims(t *testing.T) {
 	assert.Equal(t, "helloworld", claimsMap["name"])
 	// Standard registered claims like "sub" must be included for subject mapping selectors
 	assert.Equal(t, "1234567890", claimsMap["sub"])
-	// Time-based claims (iat, exp, nbf) are excluded — structpb cannot serialize time.Time
-	assert.NotContains(t, claimsMap, "iat")
+	// Time-based claims (iat, exp, nbf) used to be dropped because jwx types
+	// them time.Time, which structpb cannot serialize. auth.DecodeClaimsFromToken
+	// now normalizes them to epoch seconds, so they reach subject mapping
+	// selectors like any other claim.
+	assert.InDelta(t, float64(1516239022), claimsMap["iat"], 0)
 }
