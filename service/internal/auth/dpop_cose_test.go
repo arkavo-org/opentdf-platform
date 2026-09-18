@@ -20,6 +20,7 @@ import (
 	"github.com/lestrrat-go/jwx/v2/jwk"
 	"github.com/lestrrat-go/jwx/v2/jws"
 	"github.com/lestrrat-go/jwx/v2/jwt"
+	"github.com/opentdf/platform/service/internal/cwttest"
 	"github.com/opentdf/platform/service/logger"
 	ctxAuth "github.com/opentdf/platform/service/pkg/auth"
 	"github.com/stretchr/testify/assert"
@@ -32,7 +33,7 @@ const rewrapProcedure = "/kas.AccessService/Rewrap"
 // does, and returns the key that signs the CWTs it issues.
 func fakeIDP(t *testing.T) (*httptest.Server, *ecdsa.PrivateKey, []byte) {
 	t.Helper()
-	priv, kid := newP256(t)
+	priv, kid := cwttest.NewKey(t)
 	keySetCBOR := coseKeySetFromPub(t, &priv.PublicKey, kid)
 	var srv *httptest.Server
 	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -67,7 +68,7 @@ func newAgentAuth(t *testing.T) (*Authentication, func(cnf map[any]any) string) 
 	mint := func(cnf map[any]any) string {
 		claims := standardClaims(srv.URL, "test", agentDID, time.Hour)
 		claims[cwtLabelCnf] = cnf
-		return signCWT(t, priv, kid, claims, nil)
+		return cwttest.SignLabeled(t, priv, kid, claims, nil)
 	}
 	return a, mint
 }

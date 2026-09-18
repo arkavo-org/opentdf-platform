@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/fxamacker/cbor/v2"
+	"github.com/opentdf/platform/service/internal/cwttest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -157,7 +158,7 @@ func TestCnfClaim_TextKeyedJKTUnchanged(t *testing.T) {
 }
 
 func TestCWTVerifier_RendersCOSEKeyCnfAsJWK(t *testing.T) {
-	priv, kid := newP256(t)
+	priv, kid := cwttest.NewKey(t)
 	srv := keySetServer(t, coseKeySetFromPub(t, &priv.PublicKey, kid))
 	defer srv.Close()
 	v, err := NewCWTVerifier(t.Context(), CWTVerifierConfig{
@@ -169,7 +170,7 @@ func TestCWTVerifier_RendersCOSEKeyCnfAsJWK(t *testing.T) {
 	claims := standardClaims("https://identity.test", "https://platform.test", agentDID, time.Hour)
 	claims[cwtLabelCnf] = ed25519CNF(pub)
 
-	tok, err := v.VerifyAccessToken(t.Context(), signCWT(t, priv, kid, claims, nil))
+	tok, err := v.VerifyAccessToken(t.Context(), cwttest.SignLabeled(t, priv, kid, claims, nil))
 	require.NoError(t, err)
 
 	cnf, ok := tok.Get("cnf")

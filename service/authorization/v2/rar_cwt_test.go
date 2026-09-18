@@ -5,7 +5,6 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
-	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -21,11 +20,11 @@ import (
 	entityresolutionV2 "github.com/opentdf/platform/protocol/go/entityresolution/v2"
 	otdf "github.com/opentdf/platform/sdk"
 	authn "github.com/opentdf/platform/service/internal/auth"
+	"github.com/opentdf/platform/service/internal/cwttest"
 	"github.com/opentdf/platform/service/logger"
 	"github.com/opentdf/platform/service/policy/filestore"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/veraison/go-cose"
 	"go.opentelemetry.io/otel/trace/noop"
 	"google.golang.org/protobuf/types/known/structpb"
 )
@@ -58,29 +57,6 @@ func coseKeySetCBOR(t *testing.T, pub *ecdsa.PublicKey, kid []byte) []byte {
 	buf, err := cbor.Marshal([]map[int64]any{key})
 	require.NoError(t, err)
 	return buf
-}
-
-// signCWT returns a base64url-encoded COSE_Sign1 CWT with the supplied
-// standard and custom claims, mirroring the shape of an authnz-rs token.
-func signCWT(t *testing.T, priv *ecdsa.PrivateKey, kid []byte, claims map[any]any) string {
-	t.Helper()
-	payload, err := cbor.Marshal(claims)
-	require.NoError(t, err)
-	signer, err := cose.NewSigner(cose.AlgorithmES256, priv)
-	require.NoError(t, err)
-	msg := cose.Sign1Message{
-		Headers: cose.Headers{
-			Protected: cose.ProtectedHeader{
-				cose.HeaderLabelAlgorithm: cose.AlgorithmES256,
-				cose.HeaderLabelKeyID:     kid,
-			},
-		},
-		Payload: payload,
-	}
-	require.NoError(t, msg.Sign(rand.Reader, nil, signer))
-	raw, err := msg.MarshalCBOR()
-	require.NoError(t, err)
-	return base64.RawURLEncoding.EncodeToString(raw)
 }
 
 // cwtClaims builds a CWT claims map (CBOR integer labels for standard claims,
@@ -204,7 +180,7 @@ func TestRAREndpoint_CWT_HappyPath(t *testing.T) {
 	srv := newServer(endpoint)
 	defer srv.Close()
 
-	subjectToken := signCWT(t, priv, kid, cwtClaims(
+	subjectToken := cwttest.Sign(t, priv, kid, cwtClaims(
 		"https://authnz.example",
 		"opentdf-platform",
 		"user-1",
@@ -248,8 +224,9 @@ func TestRAREndpoint_CWT_RejectsBadSignature(t *testing.T) {
 	defer srv.Close()
 
 	// Sign with the wrong key; the published COSE Key Set has the other key.
-	subjectToken := signCWT(t, other, kid, cwtClaims(
-		"https://authnz.example", "opentdf-platform", "user-1", time.Hour, nil))
+	subjectToken := cwttest.Sign(t, other, kid, cwtClaims(
+		"https://authnz.example", "opentdf-platform", "user-1", time.Hour, nil,
+	))
 
 	form := url.Values{}
 	form.Set("grant_type", grantTypeTokenExchange)
