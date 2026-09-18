@@ -19,17 +19,6 @@ func buildJWT(t *testing.T, claims map[string]interface{}) string {
 	return header + "." + base64.RawURLEncoding.EncodeToString(body) + "."
 }
 
-func TestClaimsFromToken_JOSEThenCWT(t *testing.T) {
-	jose := buildJWT(t, map[string]interface{}{"iss": "i", "sub": "s"})
-	m, err := claimsFromToken(t.Context(), jose)
-	if err != nil || m["sub"] != "s" {
-		t.Fatalf("jose: %v %v", m, err)
-	}
-	if _, err := claimsFromToken(t.Context(), "definitely-not-a-token"); err == nil {
-		t.Error("garbage must fail")
-	}
-}
-
 func TestParseArkavoClaims_AgentShape(t *testing.T) {
 	m := map[string]any{
 		"iss":                 "https://identity.arkavo.net",

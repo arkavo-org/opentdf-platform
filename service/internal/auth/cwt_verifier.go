@@ -138,7 +138,8 @@ func NewCWTVerifier(ctx context.Context, cfg CWTVerifierConfig, log *logger.Logg
 	// error here doesn't prevent the verifier from being constructed because
 	// the cache is refreshed lazily on first use, but we surface the warning.
 	if _, err := v.keys(ctx); err != nil && log != nil {
-		log.WarnContext(ctx, "initial COSE key set fetch failed; will retry on first verification",
+		log.WarnContext(
+			ctx, "initial COSE key set fetch failed; will retry on first verification",
 			slog.String("url", cfg.COSEKeysURL),
 			slog.Any("error", err),
 		)
@@ -385,7 +386,14 @@ func DecodeCWTClaimsFromToken(tokenRaw string) (map[string]any, error) {
 // from encodeUnsignedJWT) or a base64url COSE_Sign1 CWT — WITHOUT verifying
 // its signature. JOSE is tried first; on failure the token is decoded as a
 // CWT, whose integer-label claims are renamed to their JWT names (iss, sub,
-// aud, exp, ...) so callers read one map shape regardless of format.
+// aud, exp, ...).
+//
+// Both branches are normalized to one shape, so a caller cannot behave
+// differently per wire format: iss and sub are strings, aud is always a
+// []string (a CWT encodes a single audience as a bare string), exp/nbf/iat
+// are epoch seconds as int64 (jwx types them time.Time), and every remaining
+// value is JSON-safe — CBOR-native types are converted and anything with no
+// JSON representation is dropped. See normalizeClaims.
 //
 // It exists for entity resolution providers that receive the raw bearer
 // already verified upstream by the auth interceptor (the KAS rewrap path
@@ -398,13 +406,81 @@ func DecodeClaimsFromToken(ctx context.Context, tokenRaw string) (map[string]any
 		if err != nil {
 			return nil, fmt.Errorf("read jwt claims: %w", err)
 		}
-		return m, nil
+		return normalizeClaims(m), nil
 	}
 	m, cwtErr := DecodeCWTClaimsFromToken(tokenRaw)
 	if cwtErr != nil {
-		return nil, fmt.Errorf("token is neither JWT nor CWT: %w", errors.Join(joseErr, cwtErr))
+		// Deliberately not errors.Join: it separates with a newline, and this
+		// error reaches clients as a connect/gRPC status message (where the
+		// newline must be percent-encoded) and structured logs (where it
+		// breaks single-line ingestion). The CWT error stays unwrappable.
+		//nolint:errorlint // only one error can be wrapped; joseErr is context, cwtErr unwraps
+		return nil, fmt.Errorf("token is neither JWT nor CWT: jwt: %v; cwt: %w", joseErr, cwtErr)
 	}
-	return m, nil
+	return normalizeClaims(m), nil
+}
+
+// normalizeClaims coerces a decoded claims map into the single shape
+// DecodeClaimsFromToken promises, so JOSE and CWT callers read the same
+// types. Standard claims are pinned to their canonical Go types; everything
+// else goes through StructpbSafe, which converts CBOR-native values and drops
+// what cannot be represented.
+func normalizeClaims(m map[string]any) map[string]any {
+	out := make(map[string]any, len(m))
+	for k, v := range m {
+		if sv, ok := StructpbSafe(v); ok {
+			out[k] = sv
+		}
+	}
+	// jwx types these time.Time; a CWT carries them as integers.
+	for _, k := range []string{"exp", "nbf", "iat"} {
+		if n, ok := asUnixSeconds(m[k]); ok {
+			out[k] = n
+		}
+	}
+	// A JWT aud may be a string or a list; a CWT encodes a single audience as
+	// a bare string. Callers get a list either way. StructpbSafe drops a
+	// []string, so this reads from the source map.
+	if aud, ok := asStringList(m["aud"]); ok {
+		out["aud"] = aud
+	}
+	return out
+}
+
+func asUnixSeconds(v any) (int64, bool) {
+	switch x := v.(type) {
+	case time.Time:
+		return x.Unix(), true
+	case int64:
+		return x, true
+	case int:
+		return int64(x), true
+	case uint64:
+		return int64(x), true
+	case float64:
+		return int64(x), true
+	}
+	return 0, false
+}
+
+func asStringList(v any) ([]string, bool) {
+	switch x := v.(type) {
+	case string:
+		return []string{x}, true
+	case []string:
+		return append([]string(nil), x...), true
+	case []any:
+		out := make([]string, 0, len(x))
+		for _, e := range x {
+			s, isStr := e.(string)
+			if !isStr {
+				return nil, false
+			}
+			out = append(out, s)
+		}
+		return out, true
+	}
+	return nil, false
 }
 
 // cwtIntLabelToName maps CWT integer claim labels (RFC 8392 §4) to JWT

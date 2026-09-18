@@ -106,7 +106,8 @@ func (s *EntityResolutionService) ResolveEntities(
 		if claimsEntity, ok := e.GetEntityType().(*entity.Entity_Claims); ok {
 			var st structpb.Struct
 			if err := claimsEntity.Claims.UnmarshalTo(&st); err != nil {
-				s.logger.ErrorContext(ctx, "failed to unpack claims entity",
+				s.logger.ErrorContext(
+					ctx, "failed to unpack claims entity",
 					slog.Any("error", err),
 					slog.String("entity_id", id),
 				)
@@ -133,7 +134,7 @@ func (s *EntityResolutionService) issuerTrusted(c arkavoClaims) bool {
 }
 
 func (s *EntityResolutionService) entitiesFromToken(ctx context.Context, tokenRaw string) ([]*entity.Entity, error) {
-	m, err := claimsFromToken(ctx, tokenRaw)
+	m, err := auth.DecodeClaimsFromToken(ctx, tokenRaw)
 	if err != nil {
 		return nil, err
 	}
@@ -191,9 +192,10 @@ func addTrustedClaims(subjectClaims map[string]any, c arkavoClaims, m map[string
 	if !ok {
 		return
 	}
-	if safe, safeOK := auth.StructpbSafe(raw); safeOK {
-		subjectClaims["arkavo_npe"] = safe
-	}
+	// auth.DecodeClaimsFromToken normalized these values already, so the raw
+	// map is carried through as-is — including any field the spec has not yet
+	// named, for audit.
+	subjectClaims["arkavo_npe"] = raw
 }
 
 func npeID(c arkavoClaims) string {

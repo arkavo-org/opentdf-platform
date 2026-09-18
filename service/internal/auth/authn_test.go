@@ -29,6 +29,7 @@ import (
 	"github.com/opentdf/platform/protocol/go/kas/kasconnect"
 	sdkauth "github.com/opentdf/platform/sdk/auth"
 	"github.com/opentdf/platform/sdk/httputil"
+	"github.com/opentdf/platform/service/internal/cwttest"
 	"github.com/opentdf/platform/service/internal/server/memhttp"
 	"github.com/opentdf/platform/service/logger"
 	ctxAuth "github.com/opentdf/platform/service/pkg/auth"
@@ -109,7 +110,7 @@ func (fake FakeAccessTokenSource) MakeToken(tokenMaker func(jwk.Key) ([]byte, er
 func (s *AuthSuite) SetupTest() {
 	// Generate the EC P-256 signing key and a small COSE Key Set wrapping
 	// its public half. Helpers come from cwt_verifier_test.go (same package).
-	priv, kid := newP256(s.T())
+	priv, kid := cwttest.NewKey(s.T())
 	s.priv = priv
 	s.kid = kid
 	keySetCBOR := coseKeySetFromPub(s.T(), &priv.PublicKey, kid)
@@ -568,7 +569,8 @@ func (s *AuthSuite) Test_Allowing_Auth_With_No_DPoP() {
 	}
 	config := Config{}
 	config.AuthNConfig = authnConfig
-	auth, err := NewAuthenticator(context.Background(), config, logger.CreateTestLogger(),
+	auth, err := NewAuthenticator(
+		context.Background(), config, logger.CreateTestLogger(),
 		func(_ string, _ any) error { return nil },
 	)
 	s.Require().NoError(err)
@@ -753,14 +755,14 @@ func Test_GetClientIDFromToken(t *testing.T) {
 // tests, or "cnf" for DPoP).
 func (s *AuthSuite) mintCWT(custom map[string]any) string {
 	claims := standardClaims(s.server.URL, "test", "user-1", time.Hour)
-	return signCWT(s.T(), s.priv, s.kid, claims, custom)
+	return cwttest.SignLabeled(s.T(), s.priv, s.kid, claims, custom)
 }
 
 // TestActorToken covers X-Actor-Token enforcement against the bearer's
 // `act` claim. Standalone (not a suite method) so `go test -run
 // TestActorToken` selects exactly this test and its subtests.
 func TestActorToken(t *testing.T) {
-	priv, kid := newP256(t)
+	priv, kid := cwttest.NewKey(t)
 	keySetCBOR := coseKeySetFromPub(t, &priv.PublicKey, kid)
 
 	// Fake IdP serving OIDC discovery + the COSE Key Set, mirroring
@@ -803,7 +805,7 @@ func TestActorToken(t *testing.T) {
 	// mint signs a CWT with the given subject and custom text-label claims,
 	// using the key the fake IdP's COSE Key Set advertises.
 	mint := func(sub string, custom map[string]any) string {
-		return signCWT(t, priv, kid, standardClaims(srv.URL, "test", sub, time.Hour), custom)
+		return cwttest.SignLabeled(t, priv, kid, standardClaims(srv.URL, "test", sub, time.Hour), custom)
 	}
 
 	t.Run("actor authorized via bearer's act claim passes and is recorded in context", func(t *testing.T) {
@@ -836,8 +838,8 @@ func TestActorToken(t *testing.T) {
 		})
 
 		t.Run("wrong signing key", func(t *testing.T) {
-			otherPriv, otherKid := newP256(t) // not in the fake IdP's published key set
-			badActorTok := signCWT(t, otherPriv, otherKid, standardClaims(srv.URL, "test", "https://arks.test", time.Hour), nil)
+			otherPriv, otherKid := cwttest.NewKey(t) // not in the fake IdP's published key set
+			badActorTok := cwttest.SignLabeled(t, otherPriv, otherKid, standardClaims(srv.URL, "test", "https://arks.test", time.Hour), nil)
 			_, _, err := auth.checkToken(context.Background(), []string{"Bearer " + bearer}, receiverInfo{}, nil, []string{badActorTok})
 			require.ErrorContains(t, err, "invalid actor token")
 		})

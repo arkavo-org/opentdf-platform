@@ -180,8 +180,14 @@ func (s *EntityResolutionService) ResolveEntities(
 // CreateEntityChainsFromTokens builds an entity chain per bearer token (JOSE
 // JWT or base64url CWT): an environment entity for the azp client id and a
 // subject entity carrying the (trust-gated) arkavo_patreon claim from the
-// token, for the decision flow's resolution pass. The token signature is
-// verified upstream by the platform authn layer.
+// token, for the decision flow's resolution pass.
+//
+// On the KAS rewrap path the bearer's signature was verified by the platform
+// authn layer before it reached here. That is NOT an invariant of this RPC:
+// it is reachable directly by any caller the platform authorizes, and this
+// method never verifies a signature itself. The TrustedIssuer pin below
+// therefore reads iss out of an unverified payload — see the warning on
+// Config.TrustMaterializedClaims for what that means for the operator.
 func (s *EntityResolutionService) CreateEntityChainsFromTokens(
 	ctx context.Context,
 	req *connect.Request[entityresolutionV2.CreateEntityChainsFromTokensRequest],
@@ -211,9 +217,13 @@ func (s *EntityResolutionService) CreateEntityChainsFromTokens(
 
 // entitiesFromToken accepts the bearer in either wire format — a JOSE JWT or
 // a base64url COSE_Sign1 CWT (what the KAS rewrap path forwards since the
-// CWT migration). Signature verification happened upstream; everything below
-// reads the decoded claims map, never the token object, so both formats flow
-// through the same trust gate and passthrough.
+// CWT migration). It reads the decoded claims map, never the token object,
+// so both formats flow through the same trust gate and passthrough.
+//
+// auth.DecodeClaimsFromToken does not verify the signature, and neither does
+// anything below. On the rewrap path the authn layer verified it first; a
+// direct caller of CreateEntityChainsFromTokens supplies the string
+// unchecked.
 func (s *EntityResolutionService) entitiesFromToken(ctx context.Context, tokenRaw string) ([]*entity.Entity, error) {
 	claims, err := auth.DecodeClaimsFromToken(ctx, tokenRaw)
 	if err != nil {
@@ -258,17 +268,12 @@ func (s *EntityResolutionService) entitiesFromToken(ctx context.Context, tokenRa
 	}
 	// Preserve the (now trust-checked) materialized claim so the decision
 	// flow's second pass re-derives the passthrough — including its direct
-	// entitlements — without consulting Patreon. A CWT decodes CBOR-native
-	// values structpb.NewStruct rejects outright (tag-0/tag-1 timestamps
-	// become time.Time, unrecognized tags cbor.Tag), so sanitize before
-	// wrapping: otherwise a legitimately signed, trusted-issuer token whose
-	// claim carries e.g. last_charge_at fails the whole call, which the KAS
-	// rewrap path reports as "could not perform access". See
-	// auth.StructpbSafe.
+	// entitlements — without consulting Patreon. The CBOR-native values a CWT
+	// decodes to (tag-0/tag-1 timestamps, byte strings, unrecognized tags)
+	// were normalized by auth.DecodeClaimsFromToken, so what lands here is
+	// already safe for structpb.NewStruct.
 	if raw, ok := claims["arkavo_patreon"].(map[string]interface{}); ok {
-		if safe, safeOK := auth.StructpbSafe(raw); safeOK {
-			wrappedClaims["arkavo_patreon"] = safe
-		}
+		wrappedClaims["arkavo_patreon"] = raw
 	}
 	subjectClaims, err := structpb.NewStruct(wrappedClaims)
 	if err != nil {
