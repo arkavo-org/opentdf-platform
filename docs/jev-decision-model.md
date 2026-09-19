@@ -170,3 +170,25 @@ Jev responds in roughly 70–500 ms. KAS reaches the obligations seam through it
 existing `GetDecision` RPC, so rewrap inherits that latency without code changes.
 Set `timeout` to bound it, and consider `cache_ttl` (off by default) only after
 thinking carefully about what it means to cache an authorization input.
+
+## Running the live tests
+
+The unit tests run against a fake transport and need no credentials. A separate
+set of tests exercises the real model, and is excluded from ordinary builds by
+the `jevlive` build tag, because `make test` runs `go test ./...` and these
+tests cost money and need network access.
+
+```sh
+cp .env.example .env        # then add your OpenRouter key; .env is gitignored
+set -a; . ./.env; set +a
+cd service
+go test -tags jevlive -v ./internal/jev/...
+go test -tags jevlive -v ./internal/access/v2/jevrestrictor/...
+```
+
+They skip rather than fail when `OPENROUTER_API_KEY` is unset. What they check
+is the contract we depend on — that the wire format still matches our structs,
+that each question type returns the answer type we expect, and that redaction
+holds end to end — plus one behavioural check that the model can actually tell
+a bulk overnight pull from a routine read. A seam whose model cannot make that
+distinction would be worthless.
