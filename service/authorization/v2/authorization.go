@@ -16,6 +16,7 @@ import (
 	"github.com/opentdf/platform/protocol/go/policy"
 	otdf "github.com/opentdf/platform/sdk"
 	"github.com/opentdf/platform/service/internal/access/v2"
+	"github.com/opentdf/platform/service/internal/access/v2/obligations/jevtrigger"
 	authn "github.com/opentdf/platform/service/internal/auth"
 	"github.com/opentdf/platform/service/logger"
 	ctxAuth "github.com/opentdf/platform/service/pkg/auth"
@@ -39,6 +40,9 @@ type Service struct {
 	logger *logger.Logger
 	trace.Tracer
 	cache access.EntitlementPolicyStore
+	// jitOptions carry the optional decision-model trigger. Built once at
+	// registration rather than per request, since the trigger is stateless.
+	jitOptions []access.JITPDPOption
 }
 
 func NewRegistration() *serviceregistry.Service[authzV2Connect.AuthorizationServiceHandler] {
@@ -82,6 +86,18 @@ func NewRegistration() *serviceregistry.Service[authzV2Connect.AuthorizationServ
 					panic(fmt.Errorf("invalid authorization svc config %w", err))
 				}
 				l.Debug("authorization service config", slog.Any("config", authZCfg.LogValue()))
+
+				trigger, err := jevtrigger.New(authZCfg.Jev, l)
+				if err != nil {
+					l.Error("failed to build jev obligation trigger", slog.Any("error", err))
+					panic(fmt.Errorf("failed to build jev obligation trigger: %w", err))
+				}
+				if trigger != nil {
+					as.jitOptions = append(as.jitOptions, access.WithObligationDynamicTrigger(trigger))
+					l.Info("authorization service consulting jev decision model for obligations",
+						slog.String("mode", string(authZCfg.Jev.Client.Seams.Obligations.Mode)),
+					)
+				}
 
 				rarHandler := buildRARHandler(as, authZCfg, srp)
 
@@ -259,7 +275,7 @@ func (as *Service) GetEntitlements(ctx context.Context, req *connect.Request[aut
 	withComprehensiveHierarchy := req.Msg.GetWithComprehensiveHierarchy()
 
 	// When authorization service can consume cached policy, switch to the other PDP (process based on policy passed in)
-	pdp, err := access.NewJustInTimePDP(ctx, as.logger, as.sdk, as.cache, as.config.AllowDirectEntitlements, as.config.EnforceNamespacedEntitlements)
+	pdp, err := access.NewJustInTimePDP(ctx, as.logger, as.sdk, as.cache, as.config.AllowDirectEntitlements, as.config.EnforceNamespacedEntitlements, as.jitOptions...)
 	if err != nil {
 		return nil, statusifyError(ctx, as.logger, errors.Join(ErrFailedToGetEntitlements, ErrFailedToInitPDP, err))
 	}
@@ -282,7 +298,7 @@ func (as *Service) GetDecision(ctx context.Context, req *connect.Request[authzV2
 	ctx, span := as.Start(ctx, "GetDecision")
 	defer span.End()
 
-	pdp, err := access.NewJustInTimePDP(ctx, as.logger, as.sdk, as.cache, as.config.AllowDirectEntitlements, as.config.EnforceNamespacedEntitlements)
+	pdp, err := access.NewJustInTimePDP(ctx, as.logger, as.sdk, as.cache, as.config.AllowDirectEntitlements, as.config.EnforceNamespacedEntitlements, as.jitOptions...)
 	if err != nil {
 		return nil, statusifyError(ctx, as.logger, errors.Join(ErrFailedToInitPDP, err))
 	}
@@ -328,7 +344,7 @@ func (as *Service) GetDecisionMultiResource(ctx context.Context, req *connect.Re
 	ctx, span := as.Start(ctx, "GetDecisionMultiResource")
 	defer span.End()
 
-	pdp, err := access.NewJustInTimePDP(ctx, as.logger, as.sdk, as.cache, as.config.AllowDirectEntitlements, as.config.EnforceNamespacedEntitlements)
+	pdp, err := access.NewJustInTimePDP(ctx, as.logger, as.sdk, as.cache, as.config.AllowDirectEntitlements, as.config.EnforceNamespacedEntitlements, as.jitOptions...)
 	if err != nil {
 		return nil, statusifyError(ctx, as.logger, errors.Join(ErrFailedToInitPDP, err))
 	}
@@ -377,7 +393,7 @@ func (as *Service) GetDecisionBulk(ctx context.Context, req *connect.Request[aut
 	ctx, span := as.Start(ctx, "GetDecisionBulk")
 	defer span.End()
 
-	pdp, err := access.NewJustInTimePDP(ctx, as.logger, as.sdk, as.cache, as.config.AllowDirectEntitlements, as.config.EnforceNamespacedEntitlements)
+	pdp, err := access.NewJustInTimePDP(ctx, as.logger, as.sdk, as.cache, as.config.AllowDirectEntitlements, as.config.EnforceNamespacedEntitlements, as.jitOptions...)
 	if err != nil {
 		return nil, statusifyError(ctx, as.logger, errors.Join(ErrFailedToInitPDP, err))
 	}

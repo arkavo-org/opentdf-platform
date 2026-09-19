@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 
 	authz "github.com/opentdf/platform/protocol/go/authorization/v2"
@@ -40,6 +41,48 @@ type ObligationsPolicyDecisionPoint struct {
 	// pep-client : read : attrValFQN : []string{obl2}
 	// other-pep-client : read : attrValFQN : []string{obl2,obl3}
 	clientIDScopedTriggerActionsToAttributes map[string]obligationValuesByActionOnAnAttributeValue
+
+	// Optional. Consulted after the precomputed graph, and able only to add.
+	dynamicTrigger DynamicTrigger
+}
+
+// TriggerRequest describes one resource being evaluated, for a DynamicTrigger
+// to reason about.
+type TriggerRequest struct {
+	// ActionName is the lowercased action being taken.
+	ActionName string
+	// ResourceIndex is the position of this resource in the request.
+	ResourceIndex int
+	// AttributeValueFQNs are the attribute values carried by this resource
+	// that are relevant to the action.
+	AttributeValueFQNs []string
+	// PEPClientID identifies the calling PEP, when known.
+	PEPClientID string
+	// PolicyTriggered lists the obligations the precomputed policy graph
+	// already requires for this resource.
+	PolicyTriggered []string
+}
+
+// DynamicTrigger supplies obligations that policy alone did not trigger.
+//
+// Implementations may only add. Obligations resolved from policy are never
+// removed on the strength of a dynamic trigger, so a trigger can tighten a
+// decision but never loosen one. An error fails the decision, which is how an
+// implementation expresses fail-closed behavior; to fail open, return no
+// obligations and no error.
+type DynamicTrigger interface {
+	AdditionalObligations(ctx context.Context, req TriggerRequest) ([]string, error)
+}
+
+// Option configures an ObligationsPolicyDecisionPoint.
+type Option func(*ObligationsPolicyDecisionPoint)
+
+// WithDynamicTrigger installs a trigger consulted for every resource, after
+// the precomputed graph has been traversed.
+func WithDynamicTrigger(t DynamicTrigger) Option {
+	return func(p *ObligationsPolicyDecisionPoint) {
+		p.dynamicTrigger = t
+	}
 }
 
 type PerResourceDecision struct {
@@ -64,11 +107,15 @@ func NewObligationsPolicyDecisionPoint(
 	attributesByValueFQN map[string]*attrs.GetAttributeValuesByFqnsResponse_AttributeAndValue,
 	registeredResourceValuesByFQN map[string]*policy.RegisteredResourceValue,
 	allObligations []*policy.Obligation,
+	opts ...Option,
 ) (*ObligationsPolicyDecisionPoint, error) {
 	pdp := &ObligationsPolicyDecisionPoint{
 		logger:                        l,
 		attributesByValueFQN:          attributesByValueFQN,
 		registeredResourceValuesByFQN: registeredResourceValuesByFQN,
+	}
+	for _, opt := range opts {
+		opt(pdp)
 	}
 
 	simpleTriggered := make(obligationValuesByActionOnAnAttributeValue)
@@ -245,7 +292,9 @@ func (p *ObligationsPolicyDecisionPoint) getTriggeredObligations(
 	if triggersOnClientIDExist {
 		_, triggersOnClientIDExist = clientScoped[actionName]
 	}
-	if !triggersOnActionExist && !triggersOnClientIDExist {
+	// A dynamic trigger must still be consulted even when policy defines no
+	// static trigger for this action, so the short-circuit does not apply.
+	if !triggersOnActionExist && !triggersOnClientIDExist && p.dynamicTrigger == nil {
 		log.DebugContext(
 			ctx,
 			"no triggered obligations found",
@@ -333,6 +382,34 @@ func (p *ObligationsPolicyDecisionPoint) getTriggeredObligations(
 				}
 			}
 		}
+		if p.dynamicTrigger != nil {
+			additional, err := p.dynamicTrigger.AdditionalObligations(ctx, TriggerRequest{
+				ActionName:         actionName,
+				ResourceIndex:      i,
+				AttributeValueFQNs: attrValueFQNs,
+				PEPClientID:        pepClientID,
+				PolicyTriggered:    slices.Clone(resourceRequiredOblValueFQNsSet),
+			})
+			if err != nil {
+				return nil, nil, fmt.Errorf("dynamic obligation trigger failed: %w", err)
+			}
+
+			// Additions only: nothing the policy graph required is removed here.
+			for _, oblValFQN := range additional {
+				oblValFQN = strings.ToLower(oblValFQN)
+				if _, seen := seenThisResource[oblValFQN]; seen {
+					continue
+				}
+				seenThisResource[oblValFQN] = struct{}{}
+				resourceRequiredOblValueFQNsSet = append(resourceRequiredOblValueFQNsSet, oblValFQN)
+
+				if _, seen := allOblValFQNsSeen[oblValFQN]; !seen {
+					allOblValFQNsSeen[oblValFQN] = struct{}{}
+					allRequiredOblValueFQNs = append(allRequiredOblValueFQNs, oblValFQN)
+				}
+			}
+		}
+
 		requiredOblValueFQNsPerResource[i] = resourceRequiredOblValueFQNsSet
 	}
 

@@ -18,6 +18,7 @@ import (
 	"google.golang.org/protobuf/types/known/wrapperspb"
 
 	"github.com/opentdf/platform/service/internal/access/v2/obligations"
+	"github.com/opentdf/platform/service/internal/jev"
 	"github.com/opentdf/platform/service/logger"
 	"github.com/opentdf/platform/service/logger/audit"
 )
@@ -45,6 +46,23 @@ type JustInTimePDP struct {
 	matcher SubjectMappingMatcher
 }
 
+// JITPDPOption configures a JustInTimePDP.
+type JITPDPOption func(*jitPDPOptions)
+
+type jitPDPOptions struct {
+	obligationOptions []obligations.Option
+}
+
+// WithObligationDynamicTrigger installs a dynamic obligation trigger, which may
+// require obligations the policy graph did not trigger. It may only add: no
+// trigger can withdraw an obligation policy required, nor turn a denial into a
+// permit.
+func WithObligationDynamicTrigger(t obligations.DynamicTrigger) JITPDPOption {
+	return func(o *jitPDPOptions) {
+		o.obligationOptions = append(o.obligationOptions, obligations.WithDynamicTrigger(t))
+	}
+}
+
 // NewJustInTimePDP creates a new Policy Decision Point instance with no in-memory policy and a remote connection
 // via authenticated SDK, then fetches all entitlement policy from provided store interface or policy services directly.
 func NewJustInTimePDP(
@@ -54,8 +72,14 @@ func NewJustInTimePDP(
 	store EntitlementPolicyStore,
 	allowDirectEntitlements bool,
 	namespacedPolicy bool,
+	opts ...JITPDPOption,
 ) (*JustInTimePDP, error) {
 	var err error
+
+	var options jitPDPOptions
+	for _, opt := range opts {
+		opt(&options)
+	}
 
 	if sdk == nil {
 		return nil, ErrMissingRequiredSDK
@@ -110,6 +134,7 @@ func NewJustInTimePDP(
 		pdp.allEntitleableAttributesByValueFQN,
 		pdp.allRegisteredResourceValuesByFQN,
 		allObligations,
+		options.obligationOptions...,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create new obligations policy decision point: %w", err)
@@ -152,6 +177,10 @@ func (p *JustInTimePDP) GetDecision(
 		err                     error
 		skipEnvironmentEntities = true
 	)
+
+	// Collect any decision-model observations made while serving this request,
+	// so they ride the single decision audit event rather than separate records.
+	ctx = jev.Collect(ctx)
 
 	// Because there are three possible types of entities, check obligations first to more easily handle decisioning logic
 	obligationDecision, err := p.obligationsPDP.GetAllTriggeredObligationsAreFulfilled(
@@ -473,5 +502,6 @@ func (p *JustInTimePDP) auditDecision(
 		FulfillableObligationValueFQNs: fulfillableObligationValueFQNs,
 		ObligationsSatisfied:           obligationDecision.AllObligationsSatisfied,
 		ResourceDecisions:              auditResourceDecisions,
+		Jev:                            jev.Observations(ctx),
 	})
 }
