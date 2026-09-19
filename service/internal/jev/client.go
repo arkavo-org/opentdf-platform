@@ -25,7 +25,13 @@ var (
 	// means no model was consulted, and callers should proceed on policy alone.
 	ErrDisabled = errors.New("jev: client disabled")
 	// ErrNoAPIKey means the configured environment variable held no key.
-	ErrNoAPIKey = errors.New("jev: api key environment variable is empty")
+	//
+	// The message deliberately names the configuration setting rather than
+	// interpolating the variable name. Anything derived from reading the
+	// credential's environment is treated as tainted, and this error is
+	// logged by callers; keeping the two apart means no analysis has to
+	// reason about whether a given string is the name or the secret.
+	ErrNoAPIKey = errors.New("jev: the environment variable named by api_key_env is unset or empty")
 	// ErrNoQuestions means the caller asked nothing.
 	ErrNoQuestions = errors.New("jev: at least one question is required")
 )
@@ -77,7 +83,7 @@ func New(cfg *Config, doer *http.Client) (Client, error) {
 
 	apiKey := strings.TrimSpace(os.Getenv(cfg.APIKeyEnv))
 	if apiKey == "" {
-		return nil, fmt.Errorf("%w: %s", ErrNoAPIKey, cfg.APIKeyEnv)
+		return nil, ErrNoAPIKey
 	}
 
 	if doer == nil {
