@@ -155,6 +155,7 @@ type OutputMapping struct {
 	SourceAttribute string `mapstructure:"source_attribute"` // LDAP attribute name
 	SourceClaim     string `mapstructure:"source_claim"`     // JWT claim name
 	SourceKey       string `mapstructure:"source_key"`       // Redis key name
+	SourceAnswer    string `mapstructure:"source_answer"`    // Jev question name
 
 	// Target claim name (field-agnostic)
 	ClaimName string `mapstructure:"claim_name"`

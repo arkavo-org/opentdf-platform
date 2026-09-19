@@ -4,7 +4,10 @@ import (
 	"context"
 	"log/slog"
 
+	"github.com/go-viper/mapstructure/v2"
+
 	"github.com/opentdf/platform/service/entityresolution/multi-strategy/providers/claims"
+	"github.com/opentdf/platform/service/entityresolution/multi-strategy/providers/jev"
 	"github.com/opentdf/platform/service/entityresolution/multi-strategy/providers/ldap"
 	"github.com/opentdf/platform/service/entityresolution/multi-strategy/providers/sql"
 	"github.com/opentdf/platform/service/entityresolution/multi-strategy/types"
@@ -282,6 +285,14 @@ func initializeProviders(ctx context.Context, logger *logger.Logger, registry *P
 			ldapConfig := parseLDAPConfig(config.Connection)
 			provider, err = ldap.NewProvider(ctx, name, ldapConfig)
 
+		case jev.ProviderType:
+			// Parse Jev decision model configuration
+			var jevConfig jev.Config
+			jevConfig, err = parseJevConfig(config.Connection)
+			if err == nil {
+				provider, err = jev.NewProvider(name, jevConfig)
+			}
+
 		default:
 			return types.NewConfigurationError(
 				"unknown provider type: "+config.Type,
@@ -386,4 +397,20 @@ func parseLDAPConfig(connectionConfig map[string]interface{}) ldap.Config {
 	}
 
 	return config
+}
+
+// parseJevConfig decodes a Jev provider's connection block. Unlike the SQL and
+// LDAP parsers this uses mapstructure, because the questions catalog is a
+// nested, heterogeneous structure rather than a flat set of scalars.
+func parseJevConfig(connectionConfig map[string]interface{}) (jev.Config, error) {
+	var config jev.Config
+	if err := mapstructure.Decode(connectionConfig, &config); err != nil {
+		return config, types.WrapMultiStrategyError(
+			types.ErrorTypeConfiguration,
+			"failed to decode jev provider configuration",
+			err,
+			map[string]interface{}{"provider_type": jev.ProviderType},
+		)
+	}
+	return config, nil
 }
