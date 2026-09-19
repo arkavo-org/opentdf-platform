@@ -17,7 +17,7 @@ func TestConfigDecodesDocumentedYAML(t *testing.T) {
 		"model":                "typesafe/jev-1.13",
 		"timeout":              "500ms",
 		"fail_mode":            "open",
-		"confidence_threshold": 0.95,
+		"confidence_threshold": 0.80,
 		"state_allowlist":      []string{StateKeyAction, StateKeyResourceCount},
 		"seams": map[string]any{
 			"restrictor": map[string]any{"enabled": true, "mode": "shadow"},
@@ -42,7 +42,7 @@ func TestConfigDecodesDocumentedYAML(t *testing.T) {
 
 	assert.True(t, cfg.Client.Enabled)
 	assert.Equal(t, jev.ModeShadow, cfg.Client.Seams.Restrictor.Mode)
-	assert.InDelta(t, 0.95, cfg.Client.ConfidenceThreshold, 1e-9)
+	assert.InDelta(t, 0.80, cfg.Client.ConfidenceThreshold, 1e-9)
 	require.Len(t, cfg.Rules, 1)
 	assert.Equal(t, "looks like bulk exfiltration", cfg.Rules[0].Reason)
 	require.NoError(t, cfg.Client.Validate())

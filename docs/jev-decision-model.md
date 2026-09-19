@@ -188,7 +188,7 @@ services:
       model: typesafe/jev-1.13
       timeout: 500ms
       fail_mode: open
-      confidence_threshold: 0.95   # deny on strong evidence only
+      confidence_threshold: 0.80   # see "Calibration" below before changing
       state_allowlist:
         - action
         - resource_count
@@ -223,9 +223,36 @@ Two properties are worth understanding before enabling it:
   denied. A property test exercises this across randomised decisions and denial
   sets, including a restrictor that tries to deny everything.
 - **A false positive denies a legitimate request.** This is the only seam where
-  the model can cost a user access. Set `confidence_threshold` high, run it in
-  shadow mode for long enough to see the false-positive rate on your traffic,
-  and prefer the obligations seam where a step-up would do instead of a denial.
+  the model can cost a user access. Run it in shadow mode for long enough to see
+  the false-positive rate on your traffic, and prefer the obligations seam where
+  a step-up would do instead of a denial.
+
+### Calibration
+
+Set the threshold from measurement, not intuition. Jev's certainty on a boolean
+question is bounded in practice well below 1.0, so a threshold chosen to mean
+"only act on overwhelming evidence" can silently make the seam inert: it never
+fires, nothing appears in the audit trail, and the configuration looks fine.
+
+Measured against `typesafe/jev-1.13-20260917`, asking whether a request looks
+like bulk exfiltration, with a request of 4812 secret resources in one call:
+
+| `confidence_threshold` | certainty observed | denied? |
+| ---------------------- | ------------------ | ------- |
+| 0.70                   | 0.82               | yes     |
+| 0.80                   | 0.83               | yes     |
+| 0.90                   | 0.81               | **no**  |
+| 0.95                   | 0.82               | **no**  |
+| 0.99                   | 0.83               | **no**  |
+
+A blatant case sits around 0.82, so anything at or above 0.90 disables the seam
+for this question. The same run has the model answering a routine single-resource
+read with a confident `false` at 0.96 certainty, so the separation is in the
+*answer*, not in the certainty — which is what confidence gating is for.
+
+Your questions will calibrate differently. `TestLiveThresholdCalibration` in
+`service/internal/access/v2/jevrestrictor` prints this table; point it at your
+own questions and read the threshold off the result.
 
 Resources policy already denied are never sent, and a decision with nothing
 permitted skips the model call entirely.
