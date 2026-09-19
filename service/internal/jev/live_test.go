@@ -217,8 +217,10 @@ func TestLiveRedactionPreventsEgress(t *testing.T) {
 
 	require.NotContains(t, redacted, "employee_ssn")
 	require.NotContains(t, redacted, "employee_email")
-	assert.ElementsMatch(t, []string{"attribute_value_fqns", "employee_email", "employee_ssn",
-		"entity_role", "recent_request_count"}, RedactedKeys(state, allowlist))
+	assert.ElementsMatch(t, []string{
+		"attribute_value_fqns", "employee_email", "employee_ssn",
+		"entity_role", "recent_request_count",
+	}, RedactedKeys(state, allowlist))
 
 	resp, err := client.Decide(context.Background(), redacted, map[string]Question{
 		"saw_identifiers": NewNoulQuestion(
