@@ -65,6 +65,9 @@ type SeamsConfig struct {
 	ERSClaims SeamConfig `mapstructure:"ers_claims" json:"ers_claims"`
 	// Obligations may add required obligations to a decision.
 	Obligations SeamConfig `mapstructure:"obligations" json:"obligations"`
+	// Restrictor may deny resources that policy permitted. It can never
+	// permit: see access.DecisionRestrictor.
+	Restrictor SeamConfig `mapstructure:"restrictor" json:"restrictor"`
 }
 
 // Config configures the Jev client and the seams that consume it.
@@ -125,6 +128,7 @@ func (c *Config) Validate() error {
 	for name, seam := range map[string]SeamConfig{
 		"ers_claims":  c.Seams.ERSClaims,
 		"obligations": c.Seams.Obligations,
+		"restrictor":  c.Seams.Restrictor,
 	} {
 		if seam.Enabled && seam.Mode != ModeShadow && seam.Mode != ModeEnforce {
 			return fmt.Errorf("jev: seam %s mode %q must be %q or %q", name, seam.Mode, ModeShadow, ModeEnforce)
@@ -169,6 +173,8 @@ func (c *Config) LogValue() slog.Value {
 			slog.String("ers_claims_mode", string(c.Seams.ERSClaims.Mode)),
 			slog.Bool("obligations_enabled", c.Seams.Obligations.Enabled),
 			slog.String("obligations_mode", string(c.Seams.Obligations.Mode)),
+			slog.Bool("restrictor_enabled", c.Seams.Restrictor.Enabled),
+			slog.String("restrictor_mode", string(c.Seams.Restrictor.Mode)),
 		)),
 	)
 }

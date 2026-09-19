@@ -1,0 +1,117 @@
+package access
+
+import (
+	"context"
+	"log/slog"
+)
+
+// DecisionRestrictor narrows a decision that policy has already made.
+//
+// The interface is deliberately one-directional: an implementation returns the
+// resources to deny, never a Decision. It therefore has no way to express
+// "permit", and no implementation — however buggy, misconfigured, or hostile —
+// can turn a denial into a grant or widen an entitlement. The most it can do is
+// deny something policy was willing to allow.
+//
+// This is what makes it safe to put a probabilistic model on the decision path.
+// The deterministic PDP remains the sole grantor of access.
+type DecisionRestrictor interface {
+	// Deny reports which resources to deny, keyed by ephemeral resource ID,
+	// with a short human-readable reason for the audit trail. Returning an
+	// empty map leaves the decision untouched.
+	//
+	// An error fails the decision, which is how an implementation expresses
+	// fail-closed behavior. To fail open, return no denials and no error.
+	Deny(ctx context.Context, req RestrictionRequest) (map[string]string, error)
+}
+
+// RestrictionRequest describes a decision that policy has already evaluated.
+type RestrictionRequest struct {
+	// EntityID identifies the requesting entity.
+	EntityID string
+	// ActionName is the action being taken.
+	ActionName string
+	// Resources are the resources evaluated, with the decision policy reached.
+	Resources []RestrictionResource
+}
+
+// RestrictionResource is one resource as policy decided it.
+type RestrictionResource struct {
+	// EphemeralID matches ResourceDecision.ResourceID, and is the key a
+	// restrictor returns to deny this resource.
+	EphemeralID string
+	// Name is the resource name, when the request carried one.
+	Name string
+	// AttributeValueFQNs are the attribute values on this resource.
+	AttributeValueFQNs []string
+	// Permitted reports what policy decided. A restrictor denying a resource
+	// that was already denied changes nothing.
+	Permitted bool
+}
+
+// buildRestrictionRequest projects a Decision into the read-only view a
+// restrictor sees.
+func buildRestrictionRequest(entityID, actionName string, decision *Decision) RestrictionRequest {
+	resources := make([]RestrictionResource, 0, len(decision.Results))
+
+	for _, result := range decision.Results {
+		fqns := make([]string, 0)
+		for _, rule := range result.DataRuleResults {
+			fqns = append(fqns, rule.ResourceValueFQNs...)
+		}
+
+		resources = append(resources, RestrictionResource{
+			EphemeralID:        result.ResourceID,
+			Name:               result.ResourceName,
+			AttributeValueFQNs: fqns,
+			Permitted:          result.Passed,
+		})
+	}
+
+	return RestrictionRequest{
+		EntityID:   entityID,
+		ActionName: actionName,
+		Resources:  resources,
+	}
+}
+
+// applyRestrictions consults the restrictor and narrows the decision.
+//
+// Narrowing is enforced here rather than trusted to the restrictor: a resource
+// only ever moves from permitted to denied, and AllPermitted is recomputed by
+// conjunction with its previous value, so it can only move from true to false.
+func (p *JustInTimePDP) applyRestrictions(ctx context.Context, entityID, actionName string, decision *Decision) error {
+	if p.restrictor == nil || decision == nil {
+		return nil
+	}
+
+	denials, err := p.restrictor.Deny(ctx, buildRestrictionRequest(entityID, actionName, decision))
+	if err != nil {
+		return err
+	}
+	if len(denials) == 0 {
+		return nil
+	}
+
+	narrowed := false
+	for i := range decision.Results {
+		result := &decision.Results[i]
+		reason, denied := denials[result.ResourceID]
+		if !denied || !result.Passed {
+			continue
+		}
+
+		result.Passed = false
+		narrowed = true
+		p.logger.WarnContext(ctx, "decision restricted by decision model",
+			slog.String("resource_id", result.ResourceID),
+			slog.String("reason", reason),
+		)
+	}
+
+	// Conjunction, never assignment: a restrictor cannot make AllPermitted true.
+	if narrowed {
+		decision.AllPermitted = false
+	}
+	return nil
+}

@@ -44,6 +44,8 @@ type JustInTimePDP struct {
 	// optional local subject mapping matcher; when set, getMatchedSubjectMappings
 	// avoids an SDK round-trip and serves from the in-memory store.
 	matcher SubjectMappingMatcher
+	// optional post-decision restrictor; may only narrow a decision.
+	restrictor DecisionRestrictor
 }
 
 // JITPDPOption configures a JustInTimePDP.
@@ -51,6 +53,7 @@ type JITPDPOption func(*jitPDPOptions)
 
 type jitPDPOptions struct {
 	obligationOptions []obligations.Option
+	restrictor        DecisionRestrictor
 }
 
 // WithObligationDynamicTrigger installs a dynamic obligation trigger, which may
@@ -60,6 +63,14 @@ type jitPDPOptions struct {
 func WithObligationDynamicTrigger(t obligations.DynamicTrigger) JITPDPOption {
 	return func(o *jitPDPOptions) {
 		o.obligationOptions = append(o.obligationOptions, obligations.WithDynamicTrigger(t))
+	}
+}
+
+// WithDecisionRestrictor installs a restrictor consulted after policy has
+// decided. It may only narrow: see DecisionRestrictor.
+func WithDecisionRestrictor(r DecisionRestrictor) JITPDPOption {
+	return func(o *jitPDPOptions) {
+		o.restrictor = r
 	}
 }
 
@@ -92,8 +103,9 @@ func NewJustInTimePDP(
 	}
 
 	p := &JustInTimePDP{
-		sdk:    sdk,
-		logger: log,
+		sdk:        sdk,
+		logger:     log,
+		restrictor: options.restrictor,
 	}
 
 	// If no store is provided, have EntitlementPolicyRetriever fetch from policy services
@@ -227,11 +239,16 @@ func (p *JustInTimePDP) GetDecision(
 		decision.AllPermitted = entitledWithAnyObligationsSatisfied
 		decision.Results = resourceDecisions
 
+		// Narrow before auditing, so the audit records the decision returned.
+		if err := p.applyRestrictions(ctx, regResValueFQN, action.GetName(), decision); err != nil {
+			return nil, fmt.Errorf("failed to apply decision restrictions: %w", err)
+		}
+
 		p.auditDecision(
 			ctx,
 			regResValueFQN,
 			action,
-			entitledWithAnyObligationsSatisfied,
+			decision.AllPermitted,
 			entitlements,
 			fulfillableObligationValueFQNs,
 			obligationDecision,
@@ -291,10 +308,27 @@ func (p *JustInTimePDP) GetDecision(
 	}
 
 	allEntitledWithAllObligationsSatisfied := allPermitted && allObligationsSatisfied
-	return &Decision{
+	decision := &Decision{
 		AllPermitted: allEntitledWithAllObligationsSatisfied,
 		Results:      resourceDecisionsAcrossAllEntityReps,
-	}, nil
+	}
+
+	// Per-entity decisions were already audited above; the restrictor acts on
+	// the consolidated decision, which is what the caller actually receives.
+	if err := p.applyRestrictions(ctx, entityIdentifierLabel(entityIdentifier), action.GetName(), decision); err != nil {
+		return nil, fmt.Errorf("failed to apply decision restrictions: %w", err)
+	}
+
+	return decision, nil
+}
+
+// entityIdentifierLabel names the requester for restrictor state and logs
+// without dereferencing entity representations, which may be many.
+func entityIdentifierLabel(entityIdentifier *authzV2.EntityIdentifier) string {
+	if fqn := entityIdentifier.GetRegisteredResourceValueFqn(); fqn != "" {
+		return fqn
+	}
+	return requestAuthTokenEphemeralID
 }
 
 // GetEntitlements retrieves the entitlements for the provided entity identifier.

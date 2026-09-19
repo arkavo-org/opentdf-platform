@@ -1,8 +1,8 @@
 # Jev decision models in authorization
 
 The platform can consult a [TypeSafe Jev](https://typesafe.ai) decision model,
-reached through OpenRouter's Decisions API, at two points in the authorization
-flow. Both are disabled by default.
+reached through OpenRouter's Decisions API, at three points in the authorization
+flow. All are disabled by default.
 
 Jev is a "System One" model: rather than generating text, it takes program state
 plus typed questions and returns typed answers with calibrated probabilities.
@@ -24,6 +24,9 @@ mapping. Concretely:
   never withdrawn, and the trigger cannot flip a denial into a permit.
 - The ERS provider derives **claims, not entitlements**. A derived claim grants
   nothing unless an operator has also written a subject mapping that consumes it.
+- The decision restrictor is **deny-only by type**. Its interface returns the
+  resources to deny and has no way to express "permit", so no implementation can
+  grant access, widen an entitlement, or resurrect a denied resource.
 - An answer below the configured confidence threshold is treated as **absent**,
   not as `false`, so an uncertain model never decides anything by omission.
 
@@ -170,6 +173,62 @@ Jev responds in roughly 70–500 ms. KAS reaches the obligations seam through it
 existing `GetDecision` RPC, so rewrap inherits that latency without code changes.
 Set `timeout` to bound it, and consider `cache_ttl` (off by default) only after
 thinking carefully about what it means to cache an authorization input.
+
+## Seam 3: decision restrictor
+
+For the case policy cannot express: a request where every attribute check passes
+but the request as a whole looks wrong — a bulk pull at an odd hour, a pattern
+unlike how this entity normally works.
+
+```yaml
+services:
+  authorization:
+    jev_restrictor:
+      enabled: true
+      model: typesafe/jev-1.13
+      timeout: 500ms
+      fail_mode: open
+      confidence_threshold: 0.95   # deny on strong evidence only
+      state_allowlist:
+        - action
+        - resource_count
+      seams:
+        restrictor:
+          enabled: true
+          mode: shadow
+      questions:
+        is_exfiltration:
+          type: noul
+          instructions: Does this request look like bulk exfiltration rather than ordinary work?
+          criteria:
+            "true": An unusually large or broad request for this entity and action.
+            "false": A request consistent with ordinary use.
+      rules:
+        - question: is_exfiltration
+          reason: looks like bulk exfiltration
+```
+
+State keys available to the allowlist: `entity_id`, `action`, `resource_count`,
+`attribute_value_fqns`, `permitted_count`.
+
+A rule that fires denies every resource policy permitted in that decision, so
+this seam is aimed at request-shaped anomalies rather than per-resource
+judgements. That also keeps it to one model call per decision.
+
+Two properties are worth understanding before enabling it:
+
+- **It cannot grant.** The `DecisionRestrictor` interface returns denials, not a
+  decision. The narrowing is also re-applied by the caller, which recomputes
+  `AllPermitted` by conjunction, so a resource only ever moves from permitted to
+  denied. A property test exercises this across randomised decisions and denial
+  sets, including a restrictor that tries to deny everything.
+- **A false positive denies a legitimate request.** This is the only seam where
+  the model can cost a user access. Set `confidence_threshold` high, run it in
+  shadow mode for long enough to see the false-positive rate on your traffic,
+  and prefer the obligations seam where a step-up would do instead of a denial.
+
+Resources policy already denied are never sent, and a decision with nothing
+permitted skips the model call entirely.
 
 ## Running the live tests
 
