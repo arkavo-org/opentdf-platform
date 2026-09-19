@@ -38,12 +38,22 @@ with an empty allowlist is a configuration error rather than a silent no-op.
 Review the allowlist with whoever owns your data-handling obligations before
 turning a seam on.
 
+The API key is read from the environment once, when the service builds its
+client, so rotating the key requires a restart.
+
 ## Shadow mode
 
 Each seam has `mode: shadow` (the default) or `mode: enforce`. In shadow mode the
 model is consulted and its answers and certainties are recorded in the audit
 trail, but the outcome is unchanged. Run shadow against real traffic first, to
 measure calibration, latency, and cost before granting a seam authority.
+
+`fail_mode` applies only in enforce mode. A shadow-mode seam has no authority
+over the outcome, so it can never fail a decision, whatever `fail_mode` says.
+
+For the ERS provider, shadow-mode results surface on the entity representation
+as `metadata_*` fields — `metadata_certainties`, `metadata_applied`,
+`metadata_response_id` — alongside the resolved claims.
 
 ## Audit
 
@@ -101,7 +111,9 @@ Rule conditions, by question type:
 | `score`  | `when_score_at_or_above` | the score meets the bound           |
 
 `fail_mode: open` means an unreachable model requires no obligation, which can
-only lose a restriction policy never required. `fail_mode: closed` denies.
+only lose a restriction policy never required. `fail_mode: closed` denies — but
+only while the seam is enforcing; in shadow mode an unreachable model is
+recorded and otherwise ignored.
 
 ## Seam 2: derived entity claims
 

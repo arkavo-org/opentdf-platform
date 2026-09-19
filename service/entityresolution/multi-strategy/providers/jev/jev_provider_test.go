@@ -10,6 +10,7 @@ import (
 	jevclient "github.com/opentdf/platform/service/internal/jev"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/types/known/structpb"
 )
 
 // modelResponse answers the two questions the test catalog poses: a confident
@@ -163,4 +164,53 @@ func TestNewProviderRejectsEmptyQuestionCatalog(t *testing.T) {
 
 	_, err := NewProvider("risk", cfg)
 	require.ErrorIs(t, err, ErrNoQuestions)
+}
+
+func TestShadowModeNeverFailsClosed(t *testing.T) {
+	// fail_mode must not give a shadow-mode seam the power to break entity
+	// resolution, since shadow mode is meant to be free of consequence.
+	t.Setenv(jevclient.DefaultAPIKeyEnv, "test-key")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(srv.Close)
+
+	cfg := testConfig(t, srv.URL, jevclient.SeamConfig{Enabled: true, Mode: jevclient.ModeShadow})
+	cfg.Client.FailMode = jevclient.FailClosed
+
+	p, err := NewProvider("risk", cfg)
+	require.NoError(t, err)
+
+	result, err := p.ResolveEntity(context.Background(), types.MappingStrategy{Name: "s"},
+		map[string]any{"department": "finance"})
+
+	require.NoError(t, err, "shadow mode must never fail resolution")
+	assert.Empty(t, result.Data)
+	assert.NotEmpty(t, result.Metadata["error"])
+}
+
+func TestMetadataSurvivesStructpbConversion(t *testing.T) {
+	// The ERS registration layer marshals result metadata through
+	// structpb.NewStruct on its way into the entity representation. structpb
+	// rejects concrete Go types such as map[string]float64 and []string, and
+	// the registration layer responds to that failure by logging and skipping
+	// the entity -- so emitting the wrong type here silently drops entities
+	// rather than merely losing observability.
+	p := newProvider(t, jevclient.SeamConfig{Enabled: true, Mode: jevclient.ModeEnforce}, nil)
+
+	result, err := p.ResolveEntity(context.Background(), types.MappingStrategy{Name: "s"},
+		map[string]any{"department": "finance", "ssn": "123-45-6789"})
+	require.NoError(t, err)
+
+	// Mirror what multi-strategy/v2/registration.go does with the result.
+	resultData := make(map[string]any)
+	for k, v := range result.Data {
+		resultData[k] = v
+	}
+	for k, v := range result.Metadata {
+		resultData["metadata_"+k] = v
+	}
+
+	_, err = structpb.NewStruct(resultData)
+	require.NoError(t, err, "provider metadata must be representable as a protobuf struct")
 }

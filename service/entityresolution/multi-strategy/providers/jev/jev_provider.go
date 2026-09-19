@@ -75,7 +75,7 @@ func (p *Provider) ResolveEntity(ctx context.Context, strategy types.MappingStra
 
 	state := jevclient.RedactState(params, p.config.Client.StateAllowlist)
 	if withheld := jevclient.RedactedKeys(params, p.config.Client.StateAllowlist); len(withheld) > 0 {
-		result.Metadata["withheld_parameters"] = withheld
+		result.Metadata["withheld_parameters"] = toAnySlice(withheld)
 	}
 
 	resp, err := p.client.Decide(ctx, state, p.config.Questions)
@@ -115,10 +115,15 @@ func (p *Provider) Close() error { return nil }
 
 // confidentAnswers converts answers that clear the threshold into plain Go
 // values, and reports the certainty of every answer for observability.
-func (p *Provider) confidentAnswers(resp *jevclient.Response) (map[string]any, map[string]float64) {
+//
+// Metadata eventually passes through structpb.NewStruct on its way into the
+// entity representation, and structpb rejects concrete types like
+// map[string]float64. Returning map[string]any keeps that conversion working;
+// getting it wrong makes the whole entity be dropped, not merely unobserved.
+func (p *Provider) confidentAnswers(resp *jevclient.Response) (map[string]any, map[string]any) {
 	threshold := p.config.Client.ConfidenceThreshold
 	answers := make(map[string]any, len(resp.Answers))
-	certainties := make(map[string]float64, len(resp.Answers))
+	certainties := make(map[string]any, len(resp.Answers))
 
 	for name, answer := range resp.Answers {
 		certainties[name] = answer.Certainty()
@@ -141,7 +146,8 @@ func (p *Provider) confidentAnswers(resp *jevclient.Response) (map[string]any, m
 	return answers, certainties
 }
 
-// handleDecideError applies fail mode. Failing open yields no claims, which
+// handleDecideError applies fail mode, which only bites in enforce mode.
+// Failing open yields no claims, which
 // can only withhold entitlements a subject mapping would have granted; failing
 // closed surfaces the error and aborts resolution.
 func (p *Provider) handleDecideError(result *types.RawResult, err error) (*types.RawResult, error) {
@@ -149,11 +155,22 @@ func (p *Provider) handleDecideError(result *types.RawResult, err error) (*types
 	result.Metadata["applied"] = false
 	result.Metadata["error"] = err.Error()
 
-	if p.config.Client.FailMode == jevclient.FailClosed {
+	// fail_mode applies only where the seam has authority; a shadow-mode seam
+	// must never fail a resolution it is not allowed to influence.
+	if p.config.Client.Seams.ERSClaims.Enforcing() && p.config.Client.FailMode == jevclient.FailClosed {
 		return nil, types.NewProviderError("jev model unavailable and fail_mode is closed", map[string]any{
 			"provider": p.name,
 			"error":    err.Error(),
 		})
 	}
 	return result, nil
+}
+
+// toAnySlice converts a string slice into the []any form structpb accepts.
+func toAnySlice(values []string) []any {
+	out := make([]any, len(values))
+	for i, v := range values {
+		out[i] = v
+	}
+	return out
 }

@@ -202,7 +202,10 @@ func (t *Trigger) handleDecideError(ctx context.Context, err error) ([]string, e
 		Error:   err.Error(),
 	})
 
-	if t.config.Client.FailMode == jev.FailClosed {
+	// fail_mode applies only where the seam has authority. A shadow-mode seam
+	// must never fail a decision it is not allowed to influence, so an
+	// unreachable model in shadow mode is recorded and otherwise ignored.
+	if t.config.Client.Seams.Obligations.Enforcing() && t.config.Client.FailMode == jev.FailClosed {
 		return nil, fmt.Errorf("jevtrigger: model unavailable and fail_mode is closed: %w", err)
 	}
 

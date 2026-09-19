@@ -244,3 +244,23 @@ func TestNewRejectsRuleWithoutObligation(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "no obligation")
 }
+
+func TestShadowModeNeverFailsClosed(t *testing.T) {
+	// A shadow-mode seam has no authority over the decision, so it must not be
+	// able to fail one. Without this guard, fail_mode: closed plus an
+	// unreachable model would break every decision -- and so every KAS rewrap
+	// -- which is precisely what shadow mode exists to prevent.
+	trigger := newTrigger(t, jev.ModeShadow, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}, func(c *Config) { c.Client.FailMode = jev.FailClosed })
+	ctx := jev.Collect(t.Context())
+
+	got, err := trigger.AdditionalObligations(ctx, request())
+
+	require.NoError(t, err, "shadow mode must never fail a decision it cannot influence")
+	assert.Empty(t, got)
+
+	obs := jev.Observations(ctx)
+	require.Len(t, obs, 1)
+	assert.NotEmpty(t, obs[0].Error, "the unreachable model is still recorded")
+}
