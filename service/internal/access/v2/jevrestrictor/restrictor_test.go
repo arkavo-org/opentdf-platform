@@ -235,3 +235,23 @@ func TestNewRejectsEmptyRules(t *testing.T) {
 	_, err := New(cfg, logger.CreateTestLogger())
 	require.ErrorIs(t, err, ErrNoRules)
 }
+
+func TestAllRulesAreObservedEvenAfterOneFires(t *testing.T) {
+	// Observability must not depend on rule order: a later rule's answer is
+	// recorded even when an earlier rule already decided to deny.
+	r := newRestrictor(t, jev.ModeEnforce, nil, func(c *Config) {
+		c.Questions["also_asked"] = jev.NewNoulQuestion("Other?", "yes", "no")
+		c.Rules = []Rule{
+			{Question: "is_exfiltration", Reason: "first"},
+			{Question: "also_asked", Reason: "second"},
+		}
+	})
+	ctx := jev.Collect(t.Context())
+
+	denials, err := r.Deny(ctx, request(true))
+	require.NoError(t, err)
+
+	assert.Equal(t, "first", denials["r-0"], "the first matching rule supplies the reason")
+	assert.Len(t, jev.Observations(ctx), 2,
+		"both rules must be observed regardless of which one fired")
+}

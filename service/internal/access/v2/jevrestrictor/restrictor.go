@@ -118,6 +118,10 @@ func (r *Restrictor) Deny(ctx context.Context, req access.RestrictionRequest) (m
 
 	enforcing := r.config.Client.Seams.Restrictor.Enforcing()
 
+	// Every rule is evaluated and observed before any is acted on, so the audit
+	// trail is the same whether or not an earlier rule already fired, and
+	// shadow and enforce modes record the same thing.
+	reason := ""
 	for _, rule := range r.config.Rules {
 		met, obs := r.evaluate(resp, rule)
 		obs.Applied = met && enforcing
@@ -126,22 +130,23 @@ func (r *Restrictor) Deny(ctx context.Context, req access.RestrictionRequest) (m
 		}
 		jev.Observe(ctx, obs)
 
-		if !met || !enforcing {
-			continue
+		if met && reason == "" {
+			reason = rule.Reason
+			if reason == "" {
+				reason = "restricted by decision model"
+			}
 		}
-
-		reason := rule.Reason
-		if reason == "" {
-			reason = "restricted by decision model"
-		}
-		denials := make(map[string]string, len(permitted))
-		for _, id := range permitted {
-			denials[id] = reason
-		}
-		return denials, nil
 	}
 
-	return noDenials(), nil
+	if reason == "" || !enforcing {
+		return noDenials(), nil
+	}
+
+	denials := make(map[string]string, len(permitted))
+	for _, id := range permitted {
+		denials[id] = reason
+	}
+	return denials, nil
 }
 
 // state builds the request shape the model reasons about, redacted to the

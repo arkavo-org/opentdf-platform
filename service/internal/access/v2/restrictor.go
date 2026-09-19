@@ -78,22 +78,27 @@ func buildRestrictionRequest(entityID, actionName string, decision *Decision) Re
 // applyRestrictions consults the restrictor and narrows the decision.
 //
 // Narrowing is enforced here rather than trusted to the restrictor: a resource
-// only ever moves from permitted to denied, and AllPermitted is recomputed by
-// conjunction with its previous value, so it can only move from true to false.
-func (p *JustInTimePDP) applyRestrictions(ctx context.Context, entityID, actionName string, decision *Decision) error {
+// only ever moves from permitted to denied, and AllPermitted is only ever
+// cleared, never set.
+//
+// It returns the denials actually applied, so callers can mirror them into the
+// audit copies of the resource decisions before emitting the audit event.
+func (p *JustInTimePDP) applyRestrictions(ctx context.Context, entityID, actionName string, decision *Decision) (map[string]string, error) {
+	// "Nothing was restricted" is an empty map rather than nil: identical to
+	// callers, and every success path returns a usable value.
 	if p.restrictor == nil || decision == nil {
-		return nil
+		return noRestrictions(), nil
 	}
 
 	denials, err := p.restrictor.Deny(ctx, buildRestrictionRequest(entityID, actionName, decision))
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if len(denials) == 0 {
-		return nil
+		return noRestrictions(), nil
 	}
 
-	narrowed := false
+	applied := make(map[string]string, len(denials))
 	for i := range decision.Results {
 		result := &decision.Results[i]
 		reason, denied := denials[result.ResourceID]
@@ -102,7 +107,7 @@ func (p *JustInTimePDP) applyRestrictions(ctx context.Context, entityID, actionN
 		}
 
 		result.Passed = false
-		narrowed = true
+		applied[result.ResourceID] = reason
 		p.logger.WarnContext(ctx, "decision restricted by decision model",
 			slog.String("resource_id", result.ResourceID),
 			slog.String("reason", reason),
@@ -110,8 +115,28 @@ func (p *JustInTimePDP) applyRestrictions(ctx context.Context, entityID, actionN
 	}
 
 	// Conjunction, never assignment: a restrictor cannot make AllPermitted true.
-	if narrowed {
+	if len(applied) > 0 {
 		decision.AllPermitted = false
 	}
-	return nil
+	return applied, nil
+}
+
+// noRestrictions is the empty result: policy's decision stands unchanged.
+func noRestrictions() map[string]string {
+	return map[string]string{}
+}
+
+// markRestrictedAuditDecisions mirrors applied denials into the audit copies of
+// the resource decisions. Those copies are built before the restrictor runs, so
+// without this the audit record would disagree with the decision the caller
+// received.
+func markRestrictedAuditDecisions(auditResourceDecisions []ResourceDecision, denials map[string]string) {
+	if len(denials) == 0 {
+		return
+	}
+	for i := range auditResourceDecisions {
+		if _, denied := denials[auditResourceDecisions[i].ResourceID]; denied {
+			auditResourceDecisions[i].Passed = false
+		}
+	}
 }

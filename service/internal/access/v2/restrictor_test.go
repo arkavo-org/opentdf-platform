@@ -57,7 +57,8 @@ func TestRestrictorDeniesPermittedResource(t *testing.T) {
 	pdp := newPDP(&hostileRestrictor{denyIDs: map[string]string{"r-1": "anomalous"}})
 	decision := decisionWith(true, true, true)
 
-	require.NoError(t, pdp.applyRestrictions(t.Context(), "e", "read", decision))
+	_, err := pdp.applyRestrictions(t.Context(), "e", "read", decision)
+	require.NoError(t, err)
 
 	assert.True(t, decision.Results[0].Passed)
 	assert.False(t, decision.Results[1].Passed, "the named resource must be denied")
@@ -71,7 +72,8 @@ func TestRestrictorCannotGrantDeniedResource(t *testing.T) {
 	pdp := newPDP(&hostileRestrictor{denyAll: true})
 	decision := decisionWith(false, false)
 
-	require.NoError(t, pdp.applyRestrictions(t.Context(), "e", "read", decision))
+	_, err := pdp.applyRestrictions(t.Context(), "e", "read", decision)
+	require.NoError(t, err)
 
 	assert.False(t, decision.Results[0].Passed)
 	assert.False(t, decision.Results[1].Passed)
@@ -83,7 +85,8 @@ func TestRestrictorCannotSetAllPermittedTrue(t *testing.T) {
 	decision := decisionWith(true, false) // policy already denied r-1
 	require.False(t, decision.AllPermitted)
 
-	require.NoError(t, pdp.applyRestrictions(t.Context(), "e", "read", decision))
+	_, err := pdp.applyRestrictions(t.Context(), "e", "read", decision)
+	require.NoError(t, err)
 
 	assert.False(t, decision.AllPermitted,
 		"an empty denial set must not resurrect a denied decision")
@@ -121,7 +124,8 @@ func TestRestrictionsAreMonotonic(t *testing.T) {
 		}
 
 		pdp := newPDP(&hostileRestrictor{denyIDs: denials})
-		require.NoError(t, pdp.applyRestrictions(t.Context(), "e", "read", decision))
+		_, err := pdp.applyRestrictions(t.Context(), "e", "read", decision)
+		require.NoError(t, err)
 
 		for i, r := range decision.Results {
 			if !before[i] {
@@ -152,7 +156,8 @@ func TestRestrictorSeesPolicyOutcomeAndAttributes(t *testing.T) {
 		}},
 	}
 
-	require.NoError(t, pdp.applyRestrictions(t.Context(), "entity-7", "read", decision))
+	_, err := pdp.applyRestrictions(t.Context(), "entity-7", "read", decision)
+	require.NoError(t, err)
 
 	require.Len(t, restrictor.captured.Resources, 1)
 	assert.Equal(t, "entity-7", restrictor.captured.EntityID)
@@ -167,7 +172,7 @@ func TestRestrictorErrorFailsTheDecision(t *testing.T) {
 	pdp := newPDP(&hostileRestrictor{err: errors.New("model unreachable")})
 	decision := decisionWith(true)
 
-	err := pdp.applyRestrictions(t.Context(), "e", "read", decision)
+	_, err := pdp.applyRestrictions(t.Context(), "e", "read", decision)
 
 	require.Error(t, err, "an error is how a restrictor expresses fail-closed")
 	assert.True(t, decision.Results[0].Passed, "a failed call must not half-apply")
@@ -177,11 +182,51 @@ func TestNoRestrictorLeavesDecisionUntouched(t *testing.T) {
 	pdp := newPDP(nil)
 	decision := decisionWith(true, true)
 
-	require.NoError(t, pdp.applyRestrictions(t.Context(), "e", "read", decision))
+	_, err := pdp.applyRestrictions(t.Context(), "e", "read", decision)
+	require.NoError(t, err)
 	assert.True(t, decision.AllPermitted)
 }
 
 func TestNilDecisionIsSafe(t *testing.T) {
 	pdp := newPDP(&hostileRestrictor{denyAll: true})
-	require.NoError(t, pdp.applyRestrictions(t.Context(), "e", "read", nil))
+	_, err := pdp.applyRestrictions(t.Context(), "e", "read", nil)
+	require.NoError(t, err)
+}
+
+func TestMarkRestrictedAuditDecisionsMirrorsDenials(t *testing.T) {
+	// Audit copies of the resource decisions are built before the restrictor
+	// runs, so they must be reconciled or the audit record would disagree with
+	// the decision the caller received.
+	auditDecisions := []ResourceDecision{
+		{ResourceID: "r-0", Passed: true},
+		{ResourceID: "r-1", Passed: true},
+	}
+
+	markRestrictedAuditDecisions(auditDecisions, map[string]string{"r-1": "anomalous"})
+
+	assert.True(t, auditDecisions[0].Passed)
+	assert.False(t, auditDecisions[1].Passed,
+		"the audit record must show the resource as denied")
+}
+
+func TestMarkRestrictedAuditDecisionsIsNoopWithoutDenials(t *testing.T) {
+	auditDecisions := []ResourceDecision{{ResourceID: "r-0", Passed: true}}
+
+	markRestrictedAuditDecisions(auditDecisions, nil)
+
+	assert.True(t, auditDecisions[0].Passed)
+}
+
+func TestAppliedDenialsExcludeAlreadyDeniedResources(t *testing.T) {
+	// Only denials that actually changed something are reported, so audit
+	// reconciliation does not claim credit for policy's own denials.
+	pdp := newPDP(&hostileRestrictor{denyAll: true})
+	decision := decisionWith(true, false)
+
+	applied, err := pdp.applyRestrictions(t.Context(), "e", "read", decision)
+	require.NoError(t, err)
+
+	assert.Contains(t, applied, "r-0")
+	assert.NotContains(t, applied, "r-1",
+		"policy already denied r-1; the restrictor did not change it")
 }
