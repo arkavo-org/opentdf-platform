@@ -502,6 +502,6 @@ func (p *JustInTimePDP) auditDecision(
 		FulfillableObligationValueFQNs: fulfillableObligationValueFQNs,
 		ObligationsSatisfied:           obligationDecision.AllObligationsSatisfied,
 		ResourceDecisions:              auditResourceDecisions,
-		Jev:                            jev.Observations(ctx),
+		Jev:                            jev.TakeObservations(ctx),
 	})
 }
