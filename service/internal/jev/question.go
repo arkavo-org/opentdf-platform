@@ -2,15 +2,20 @@
 // reached over OpenRouter's Decisions API, along with the plumbing OpenTDF needs
 // to consume probabilistic answers safely inside deterministic ABAC flows.
 //
-// The central safety property: a Jev answer may never grant access that policy
-// evaluation denies. Every consumer in this repository uses answers only to
-// restrict a decision, to require an additional obligation, or to derive claims
-// that are then subject to normal subject mapping.
+// Restrict-only consumers preserve the central safety property by independently
+// enforcing that final permits are a subset of policy permits. The ERS consumer
+// has a different threat model: its derived claims remain subject to ordinary
+// subject mapping but may influence grants.
 package jev
 
+import (
+	"errors"
+	"fmt"
+)
+
 // QuestionType enumerates the answer shapes Jev supports. The type of the
-// question fixes the type of the answer, which is what makes the exchange
-// type-safe without schema validation on our side.
+// question fixes the type of the answer. The client still validates the remote
+// representation at the HTTP trust boundary.
 type QuestionType string
 
 const (
@@ -64,4 +69,28 @@ func NewScoreQuestion(instructions any, criteria []any) Question {
 		Instructions: instructions,
 		Criteria:     criteria,
 	}
+}
+
+// Validate checks that a question defines the answer domain its type requires.
+func (q Question) Validate() error {
+	if q.Instructions == nil {
+		return errors.New("missing instructions")
+	}
+	switch q.Type {
+	case QuestionTypeNoul:
+		return nil
+	case QuestionTypeChoice:
+		criteria, ok := q.Criteria.(map[string]any)
+		if !ok || len(criteria) < 2 {
+			return errors.New("choice criteria must define at least two options")
+		}
+	case QuestionTypeScore:
+		criteria, ok := q.Criteria.([]any)
+		if !ok || len(criteria) < 2 {
+			return errors.New("score criteria must define at least two levels")
+		}
+	default:
+		return fmt.Errorf("unsupported type %q", q.Type)
+	}
+	return nil
 }

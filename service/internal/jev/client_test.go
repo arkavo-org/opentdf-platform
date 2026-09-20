@@ -33,6 +33,13 @@ func newTestClient(t *testing.T, handler http.HandlerFunc, mutate func(*Config))
 	return client
 }
 
+const noulResponse = `{
+  "id":"gen-dec-test",
+  "model":"typesafe/jev-1.13-20260917",
+  "answers":{"q":{"type":"noul","noul":0.9}},
+  "usage":{"cost":0.000001,"input_tokens":4,"output_tokens":1}
+}`
+
 func TestDecidePostsToDecisionsPathWithAuth(t *testing.T) {
 	var gotPath, gotAuth string
 	var gotBody request
@@ -100,7 +107,7 @@ func TestCacheDisabledByDefault(t *testing.T) {
 	calls := 0
 	client := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
 		calls++
-		_, _ = w.Write([]byte(apiExampleResponse))
+		_, _ = w.Write([]byte(noulResponse))
 	}, nil)
 
 	qs := map[string]Question{"q": NewNoulQuestion("x", "t", "f")}
@@ -115,7 +122,7 @@ func TestCacheServesRepeatedIdenticalRequests(t *testing.T) {
 	calls := 0
 	client := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
 		calls++
-		_, _ = w.Write([]byte(apiExampleResponse))
+		_, _ = w.Write([]byte(noulResponse))
 	}, func(c *Config) { c.CacheTTL = "1m" })
 
 	qs := map[string]Question{"q": NewNoulQuestion("x", "t", "f")}

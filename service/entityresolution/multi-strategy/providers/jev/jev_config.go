@@ -49,13 +49,8 @@ func (c *Config) Validate() error {
 		return ErrNoQuestions
 	}
 	for name, q := range c.Questions {
-		switch q.Type {
-		case jevclient.QuestionTypeNoul, jevclient.QuestionTypeChoice, jevclient.QuestionTypeScore:
-		default:
-			return fmt.Errorf("jev provider: question %q has unsupported type %q", name, q.Type)
-		}
-		if q.Instructions == nil {
-			return fmt.Errorf("jev provider: question %q is missing instructions", name)
+		if err := q.Validate(); err != nil {
+			return fmt.Errorf("jev provider: invalid question %q: %w", name, err)
 		}
 	}
 	return nil

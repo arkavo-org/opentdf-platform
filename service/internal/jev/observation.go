@@ -85,3 +85,22 @@ func Observations(ctx context.Context) []Observation {
 	copy(out, c.observations)
 	return out
 }
+
+// TakeObservations returns and clears the request's observations. Audit
+// emission uses this destructive read so a multi-entity decision does not
+// duplicate the same model calls and costs into every per-entity event.
+func TakeObservations(ctx context.Context) []Observation {
+	c, ok := ctx.Value(collectorKey{}).(*collector)
+	if !ok {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.observations) == 0 {
+		return nil
+	}
+	out := make([]Observation, len(c.observations))
+	copy(out, c.observations)
+	c.observations = nil
+	return out
+}

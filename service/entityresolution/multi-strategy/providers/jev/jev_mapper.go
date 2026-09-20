@@ -3,6 +3,7 @@ package jev
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/opentdf/platform/service/entityresolution/multi-strategy/transformation"
 	"github.com/opentdf/platform/service/entityresolution/multi-strategy/types"
@@ -80,6 +81,9 @@ func (m *Mapper) ValidateOutputMapping(outputMapping []types.OutputMapping) erro
 	for _, mapping := range outputMapping {
 		if mapping.ClaimName == "" {
 			return errors.New("claim_name cannot be empty")
+		}
+		if !strings.HasPrefix(mapping.ClaimName, "jev.") {
+			return fmt.Errorf("claim_name %q must use the reserved jev. namespace", mapping.ClaimName)
 		}
 		if mapping.SourceAnswer == "" {
 			return errors.New("source_answer cannot be empty for Jev mapper")

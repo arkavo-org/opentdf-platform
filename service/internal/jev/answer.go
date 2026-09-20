@@ -1,5 +1,12 @@
 package jev
 
+import (
+	"errors"
+	"fmt"
+	"math"
+	"strconv"
+)
+
 // noulMidpoint is the decision boundary for a boolean answer: the reported
 // value is the probability the proposition is true, so 0.5 carries no
 // information either way.
@@ -38,6 +45,93 @@ type Response struct {
 	Provider string            `json:"provider"`
 	Answers  map[string]Answer `json:"answers"`
 	Usage    Usage             `json:"usage"`
+}
+
+// ValidateAgainst verifies that the remote response inhabits the exact answer
+// domain described by the submitted questions. Typed model outputs remove the
+// need to parse prose, but the HTTP response is still untrusted input.
+func (r *Response) ValidateAgainst(questions map[string]Question) error {
+	if r == nil {
+		return errors.New("jev: nil decision response")
+	}
+	for name, question := range questions {
+		answer, ok := r.Answers[name]
+		if !ok {
+			return fmt.Errorf("jev: response missing answer for question %q", name)
+		}
+		if answer.Type != question.Type {
+			return fmt.Errorf("jev: answer %q has type %q, want %q", name, answer.Type, question.Type)
+		}
+		if err := validateAnswerAgainst(answer, question); err != nil {
+			return fmt.Errorf("jev: invalid answer %q: %w", name, err)
+		}
+	}
+	return nil
+}
+
+func validateAnswerAgainst(a Answer, question Question) error {
+	switch question.Type {
+	case QuestionTypeNoul:
+		if !inUnitInterval(a.Noul) {
+			return fmt.Errorf("noul probability %v outside [0,1]", a.Noul)
+		}
+
+	case QuestionTypeChoice:
+		if !inUnitInterval(a.Confidence) {
+			return fmt.Errorf("confidence %v outside [0,1]", a.Confidence)
+		}
+		options, ok := question.Criteria.(map[string]any)
+		if !ok || len(options) == 0 {
+			return errors.New("choice question has no option map")
+		}
+		if _, exists := options[a.Choice]; !exists {
+			return fmt.Errorf("choice %q is outside the configured option set", a.Choice)
+		}
+		if err := validateProbabilities(a.Probabilities, options); err != nil {
+			return err
+		}
+
+	case QuestionTypeScore:
+		if !inUnitInterval(a.Confidence) {
+			return fmt.Errorf("confidence %v outside [0,1]", a.Confidence)
+		}
+		levels, ok := question.Criteria.([]any)
+		if !ok || len(levels) == 0 {
+			return errors.New("score question has no levels")
+		}
+		if math.IsNaN(a.Score) || math.IsInf(a.Score, 0) || a.Score < 0 || a.Score > float64(len(levels)-1) {
+			return fmt.Errorf("score %v outside configured range [0,%d]", a.Score, len(levels)-1)
+		}
+		for option, probability := range a.Probabilities {
+			level, err := strconv.Atoi(option)
+			if err != nil || level < 0 || level >= len(levels) {
+				return fmt.Errorf("probability names unknown score level %q", option)
+			}
+			if !inUnitInterval(probability) {
+				return fmt.Errorf("probability for score level %q is outside [0,1]", option)
+			}
+		}
+
+	default:
+		return fmt.Errorf("unsupported question type %q", question.Type)
+	}
+	return nil
+}
+
+func validateProbabilities(probabilities map[string]float64, options map[string]any) error {
+	for option, probability := range probabilities {
+		if _, ok := options[option]; !ok {
+			return fmt.Errorf("probability names unknown choice %q", option)
+		}
+		if !inUnitInterval(probability) {
+			return fmt.Errorf("probability for choice %q is outside [0,1]", option)
+		}
+	}
+	return nil
+}
+
+func inUnitInterval(value float64) bool {
+	return !math.IsNaN(value) && !math.IsInf(value, 0) && value >= 0 && value <= 1
 }
 
 // Certainty normalizes how sure the model is, in [0,1], across answer types.

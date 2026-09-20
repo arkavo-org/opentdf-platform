@@ -4,8 +4,9 @@
 // The trigger can require additional obligations — a watermark, a step-up
 // authentication, an enhanced audit record — on a request that policy alone
 // would not have obligated. It can only add. An obligation the policy graph
-// already required is never withdrawn here, and no answer can turn a denial
-// into a permit, so the model can tighten a decision but never loosen one.
+// already required is never withdrawn here, and no returned answer can turn a
+// denial into a permit. The added obligation only tightens access when the PEP
+// fulfills or rejects it before releasing the resource.
 package jevtrigger
 
 import (
@@ -29,6 +30,7 @@ const (
 	StateKeyAttributeValueFQNs = "attribute_value_fqns"
 	StateKeyPEPClientID        = "pep_client_id"
 	StateKeyPolicyTriggered    = "policy_triggered_obligations"
+	StateKeyResourceCount      = "resource_count"
 )
 
 // Rule binds one answer to one obligation that the answer may require.
@@ -65,7 +67,10 @@ type Trigger struct {
 }
 
 // Ensure Trigger satisfies the obligations hook.
-var _ obligations.DynamicTrigger = (*Trigger)(nil)
+var (
+	_ obligations.DynamicTrigger      = (*Trigger)(nil)
+	_ obligations.BatchDynamicTrigger = (*Trigger)(nil)
+)
 
 // ErrNoRules reports a trigger with a question catalog but nothing to do with
 // the answers.
@@ -79,6 +84,11 @@ func New(cfg Config, log *logger.Logger) (*Trigger, error) {
 	}
 	if len(cfg.Rules) == 0 {
 		return nil, ErrNoRules
+	}
+	for name, question := range cfg.Questions {
+		if err := question.Validate(); err != nil {
+			return nil, fmt.Errorf("jevtrigger: invalid question %q: %w", name, err)
+		}
 	}
 	for _, rule := range cfg.Rules {
 		if rule.Obligation == "" {
@@ -141,27 +151,106 @@ func (t *Trigger) AdditionalObligations(ctx context.Context, req obligations.Tri
 	return required, nil
 }
 
+// AdditionalObligationsBatch evaluates the shape of the whole decision in one
+// model request. A rule that fires applies its obligation to every resource;
+// this preserves the add-only property and avoids one external round trip per
+// resource. Static policy obligations remain resource-specific.
+func (t *Trigger) AdditionalObligationsBatch(
+	ctx context.Context,
+	requests []obligations.TriggerRequest,
+) ([][]string, error) {
+	if len(requests) == 0 {
+		return [][]string{}, nil
+	}
+	for _, request := range requests[1:] {
+		if request.ActionName != requests[0].ActionName || request.PEPClientID != requests[0].PEPClientID {
+			return nil, errors.New("jevtrigger: batch contains mixed actions or PEP clients")
+		}
+	}
+
+	attributeValueFQNs := uniqueValues(requests, func(request obligations.TriggerRequest) []string {
+		return request.AttributeValueFQNs
+	})
+	policyTriggered := uniqueValues(requests, func(request obligations.TriggerRequest) []string {
+		return request.PolicyTriggered
+	})
+
+	state := jev.RedactState(map[string]any{
+		StateKeyAction:             requests[0].ActionName,
+		StateKeyAttributeValueFQNs: attributeValueFQNs,
+		StateKeyPEPClientID:        requests[0].PEPClientID,
+		StateKeyPolicyTriggered:    policyTriggered,
+		StateKeyResourceCount:      len(requests),
+	}, t.config.Client.StateAllowlist)
+
+	resp, err := t.client.Decide(ctx, state, t.config.Questions)
+	if err != nil {
+		_, handledErr := t.handleDecideError(ctx, err)
+		if handledErr != nil {
+			return nil, handledErr
+		}
+		return make([][]string, len(requests)), nil
+	}
+
+	enforcing := t.config.Client.Seams.Obligations.Enforcing()
+	additional := make([][]string, len(requests))
+	for _, rule := range t.config.Rules {
+		met, obs := t.evaluate(resp, rule)
+		obs.Applied = met && enforcing
+		if obs.Applied {
+			obs.Effect = fmt.Sprintf("required_obligation:%s;resources:%d", rule.Obligation, len(requests))
+			for i := range additional {
+				additional[i] = append(additional[i], rule.Obligation)
+			}
+		}
+		jev.Observe(ctx, obs)
+	}
+	return additional, nil
+}
+
+func uniqueValues(
+	requests []obligations.TriggerRequest,
+	values func(obligations.TriggerRequest) []string,
+) []string {
+	seen := make(map[string]struct{})
+	unique := make([]string, 0)
+	for _, request := range requests {
+		for _, value := range values(request) {
+			if _, ok := seen[value]; ok {
+				continue
+			}
+			seen[value] = struct{}{}
+			unique = append(unique, value)
+		}
+	}
+	return unique
+}
+
 // evaluate reports whether a rule's condition is met, and describes the answer
 // it read for the audit trail.
 func (t *Trigger) evaluate(resp *jev.Response, rule Rule) (bool, jev.Observation) {
+	return t.evaluateAnswer(resp, rule, rule.Question)
+}
+
+func (t *Trigger) evaluateAnswer(resp *jev.Response, rule Rule, answerName string) (bool, jev.Observation) {
 	threshold := t.config.Client.ConfidenceThreshold
 	obs := jev.Observation{
 		Seam:       seamName,
 		Mode:       t.config.Client.Seams.Obligations.Mode,
 		Model:      resp.Model,
 		ResponseID: resp.ID,
-		Question:   rule.Question,
+		Question:   answerName,
 		Threshold:  threshold,
 		Cost:       resp.Usage.Cost,
 	}
-	if answer, ok := resp.Answers[rule.Question]; ok {
+	if answer, ok := resp.Answers[answerName]; ok {
 		obs.AnswerType = answer.Type
 		obs.Certainty = answer.Certainty()
 	}
 
 	switch obs.AnswerType {
 	case jev.QuestionTypeNoul:
-		value, ok := resp.Noul(rule.Question, threshold)
+		value, ok := resp.Noul(answerName, threshold)
 		if !ok {
 			return false, obs
 		}
@@ -169,7 +258,7 @@ func (t *Trigger) evaluate(resp *jev.Response, rule Rule) (bool, jev.Observation
 		return value != rule.WhenFalse, obs
 
 	case jev.QuestionTypeChoice:
-		value, ok := resp.Choice(rule.Question, threshold)
+		value, ok := resp.Choice(answerName, threshold)
 		if !ok {
 			return false, obs
 		}
@@ -182,7 +271,7 @@ func (t *Trigger) evaluate(resp *jev.Response, rule Rule) (bool, jev.Observation
 		return false, obs
 
 	case jev.QuestionTypeScore:
-		value, ok := resp.Score(rule.Question, threshold)
+		value, ok := resp.Score(answerName, threshold)
 		if !ok {
 			return false, obs
 		}

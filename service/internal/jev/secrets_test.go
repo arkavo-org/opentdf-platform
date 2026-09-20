@@ -128,7 +128,7 @@ func TestAuthorizationHeaderIsTheOnlyPlaceTheCredentialGoes(t *testing.T) {
 	require.NoError(t, err)
 
 	_, err = client.Decide(context.Background(), map[string]any{"a": 1},
-		map[string]Question{"q": NewNoulQuestion("x", "t", "f")})
+		map[string]Question{"is_bug": NewNoulQuestion("x", "t", "f")})
 	require.NoError(t, err)
 
 	assert.Equal(t, "Bearer "+sentinelKey, authHeader)

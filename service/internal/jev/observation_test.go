@@ -35,6 +35,15 @@ func TestCollectIsIdempotent(t *testing.T) {
 	assert.Len(t, Observations(again), 1)
 }
 
+func TestTakeObservationsDrainsCollector(t *testing.T) {
+	ctx := Collect(context.Background())
+	Observe(ctx, Observation{Seam: "restrictor"})
+
+	assert.Len(t, TakeObservations(ctx), 1)
+	assert.Nil(t, TakeObservations(ctx), "an observation must be attached to only one audit event")
+	assert.Nil(t, Observations(ctx))
+}
+
 func TestObserveIsConcurrencySafe(t *testing.T) {
 	ctx := Collect(context.Background())
 

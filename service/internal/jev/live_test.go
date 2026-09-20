@@ -12,8 +12,8 @@
 //
 // They assert the contract we depend on rather than the model's judgement:
 // that the wire format matches our structs, that each question type returns
-// the answer type we expect, and that certainty is calibrated well enough for
-// confidence gating to mean something. One test does check direction of
+// the answer type we expect, and that observed certainty makes threshold gating
+// meaningful for these examples. One test does check direction of
 // judgement, because a seam whose model cannot tell a bulk 3am pull from a
 // single routine read would be worthless.
 package jev
@@ -181,9 +181,9 @@ func TestLiveModelDistinguishesBulkFromRoutine(t *testing.T) {
 		"an ordinary read must not be rated as needing scrutiny")
 }
 
-// TestLiveConfidenceGatingIsMeaningful checks that certainty is calibrated
-// enough for the threshold to be a real control: a clear-cut case should clear
-// a high bar, and an impossible bar should admit nothing.
+// TestLiveConfidenceGatingIsMeaningful checks a threshold against one clear-cut
+// example. It does not establish calibration, which requires labeled outcomes
+// across many predictions.
 func TestLiveConfidenceGatingIsMeaningful(t *testing.T) {
 	client := liveClient(t)
 

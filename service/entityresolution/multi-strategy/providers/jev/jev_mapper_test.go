@@ -39,11 +39,11 @@ func TestTransformResultsMapsAnswersToClaims(t *testing.T) {
 
 	claims, err := m.TransformResults(
 		map[string]any{"risk_tier": "elevated"},
-		[]types.OutputMapping{{SourceAnswer: "risk_tier", ClaimName: "risk", Transformation: "array"}},
+		[]types.OutputMapping{{SourceAnswer: "risk_tier", ClaimName: "jev.risk", Transformation: "array"}},
 	)
 	require.NoError(t, err)
 
-	assert.Equal(t, []any{"elevated"}, claims["risk"],
+	assert.Equal(t, []any{"elevated"}, claims["jev.risk"],
 		"subject mappings commonly match arrays, so the array transformation must apply")
 }
 
@@ -52,7 +52,7 @@ func TestTransformResultsSkipsAbsentAnswers(t *testing.T) {
 
 	claims, err := m.TransformResults(
 		map[string]any{},
-		[]types.OutputMapping{{SourceAnswer: "risk_tier", ClaimName: "risk"}},
+		[]types.OutputMapping{{SourceAnswer: "risk_tier", ClaimName: "jev.risk"}},
 	)
 	require.NoError(t, err)
 
@@ -62,13 +62,15 @@ func TestTransformResultsSkipsAbsentAnswers(t *testing.T) {
 func TestValidateOutputMappingRequiresSourceAnswer(t *testing.T) {
 	m := NewMapper()
 
-	require.Error(t, m.ValidateOutputMapping([]types.OutputMapping{{ClaimName: "risk"}}))
+	require.Error(t, m.ValidateOutputMapping([]types.OutputMapping{{ClaimName: "jev.risk"}}))
 	require.Error(t, m.ValidateOutputMapping([]types.OutputMapping{{SourceAnswer: "q"}}))
+	require.Error(t, m.ValidateOutputMapping([]types.OutputMapping{{SourceAnswer: "q", ClaimName: "risk"}}),
+		"derived claims must not collide with identity-provider claim names")
 	require.Error(t, m.ValidateOutputMapping([]types.OutputMapping{
-		{SourceAnswer: "q", ClaimName: "risk", Transformation: "ldap_dn_to_cn"},
+		{SourceAnswer: "q", ClaimName: "jev.risk", Transformation: "ldap_dn_to_cn"},
 	}), "provider-specific transformations from other providers must not be accepted")
 
 	require.NoError(t, m.ValidateOutputMapping([]types.OutputMapping{
-		{SourceAnswer: "q", ClaimName: "risk", Transformation: "array"},
+		{SourceAnswer: "q", ClaimName: "jev.risk", Transformation: "array"},
 	}))
 }
