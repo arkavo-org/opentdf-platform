@@ -8,13 +8,10 @@ import (
 // DecisionRestrictor narrows a decision that policy has already made.
 //
 // The interface is deliberately one-directional: an implementation returns the
-// resources to deny, never a Decision. It therefore has no way to express
-// "permit", and no implementation — however buggy, misconfigured, or hostile —
-// can turn a denial into a grant or widen an entitlement. The most it can do is
-// deny something policy was willing to allow.
-//
-// This is what makes it safe to put a probabilistic model on the decision path.
-// The deterministic PDP remains the sole grantor of access.
+// resources to deny, never a Decision. The caller independently applies those
+// denials only to policy's permit set, enforcing finalPermits ⊆ policyPermits.
+// This guarantee concerns returned values; an in-process interface cannot rule
+// out unrelated side effects by a malicious implementation.
 type DecisionRestrictor interface {
 	// Deny reports which resources to deny, keyed by ephemeral resource ID,
 	// with a short human-readable reason for the audit trail. Returning an

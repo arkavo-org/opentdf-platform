@@ -333,16 +333,17 @@ func (p *JustInTimePDP) GetDecision(
 		return nil, fmt.Errorf("failed to apply decision restrictions: %w", err)
 	}
 
-	// Emit the buffered audits now that the decision is final: each records the
-	// outcome the caller receives, and picks up any observations the restrictor
-	// published while narrowing.
+	// Emit the buffered audits now that the decision is final. Each audit keeps
+	// that entity representation's own headline result; applied restrictor
+	// denials are mirrored into its resource results. The request-scoped Jev
+	// observations are drained into the first event rather than duplicated.
 	for _, pending := range pendingAudits {
 		markRestrictedAuditDecisions(pending.resourceDecisions, denials)
 		p.auditDecision(
 			ctx,
 			pending.entityID,
 			action,
-			pending.permitted && decision.AllPermitted,
+			entityAuditPermitted(pending.permitted, denials),
 			pending.entitlements,
 			fulfillableObligationValueFQNs,
 			obligationDecision,
@@ -351,6 +352,14 @@ func (p *JustInTimePDP) GetDecision(
 	}
 
 	return decision, nil
+}
+
+// entityAuditPermitted preserves the policy and obligation result for this
+// entity representation while reflecting any restriction applied to the
+// consolidated request. It deliberately does not use the consolidated policy
+// result, which may include a denial belonging to a different representation.
+func entityAuditPermitted(baselinePermitted bool, denials map[string]string) bool {
+	return baselinePermitted && len(denials) == 0
 }
 
 // GetEntitlements retrieves the entitlements for the provided entity identifier.
@@ -558,6 +567,6 @@ func (p *JustInTimePDP) auditDecision(
 		FulfillableObligationValueFQNs: fulfillableObligationValueFQNs,
 		ObligationsSatisfied:           obligationDecision.AllObligationsSatisfied,
 		ResourceDecisions:              auditResourceDecisions,
-		Jev:                            jev.Observations(ctx),
+		Jev:                            jev.TakeObservations(ctx),
 	})
 }

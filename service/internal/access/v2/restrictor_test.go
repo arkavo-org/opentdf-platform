@@ -12,9 +12,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// hostileRestrictor denies everything it is asked about. Combined with the
-// monotonicity test below, it stands in for any buggy or malicious
-// implementation: the interface gives it no way to grant.
+// hostileRestrictor returns the most expansive denial result available through
+// the interface. The caller tests below verify that returned values can only
+// remove resources from its independently computed baseline permit set.
 type hostileRestrictor struct {
 	err      error
 	denyAll  bool
@@ -229,4 +229,36 @@ func TestAppliedDenialsExcludeAlreadyDeniedResources(t *testing.T) {
 	assert.Contains(t, applied, "r-0")
 	assert.NotContains(t, applied, "r-1",
 		"policy already denied r-1; the restrictor did not change it")
+}
+
+func TestEntityAuditPermittedUsesEntityBaselineAndAppliedRestrictions(t *testing.T) {
+	tests := []struct {
+		name              string
+		baselinePermitted bool
+		denials           map[string]string
+		want              bool
+	}{
+		{
+			name:              "other entity policy denial does not overwrite this headline",
+			baselinePermitted: true,
+			want:              true,
+		},
+		{
+			name:              "this entity baseline denial remains denied",
+			baselinePermitted: false,
+			want:              false,
+		},
+		{
+			name:              "applied restriction changes the headline to denied",
+			baselinePermitted: true,
+			denials:           map[string]string{"r-0": "anomalous"},
+			want:              false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, entityAuditPermitted(tt.baselinePermitted, tt.denials))
+		})
+	}
 }

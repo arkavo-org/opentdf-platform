@@ -239,7 +239,17 @@ func TestNewRejectsEmptyRules(t *testing.T) {
 func TestAllRulesAreObservedEvenAfterOneFires(t *testing.T) {
 	// Observability must not depend on rule order: a later rule's answer is
 	// recorded even when an earlier rule already decided to deny.
-	r := newRestrictor(t, jev.ModeEnforce, nil, func(c *Config) {
+	r := newRestrictor(t, jev.ModeEnforce, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{
+  "id":"gen-dec-two-rules",
+  "model":"typesafe/jev-1.13-20260917",
+  "answers":{
+    "is_exfiltration":{"type":"noul","noul":0.98},
+    "also_asked":{"type":"noul","noul":0.97}
+  },
+  "usage":{"cost":0.000004}
+}`))
+	}, func(c *Config) {
 		c.Questions["also_asked"] = jev.NewNoulQuestion("Other?", "yes", "no")
 		c.Rules = []Rule{
 			{Question: "is_exfiltration", Reason: "first"},

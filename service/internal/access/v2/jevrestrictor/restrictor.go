@@ -7,9 +7,9 @@
 // normally works. The model sees the shape of the whole request and may deny
 // it.
 //
-// It may only deny. The access.DecisionRestrictor interface returns resources
-// to deny and has no way to express "permit", so nothing here can grant access
-// policy withheld, widen an entitlement, or resurrect a denied resource.
+// Its returned value may only deny. The access.DecisionRestrictor interface
+// returns resource IDs rather than a replacement decision, and the caller
+// independently intersects those denials with policy's permit set.
 package jevrestrictor
 
 import (
@@ -78,6 +78,11 @@ func New(cfg Config, log *logger.Logger) (*Restrictor, error) {
 	}
 	if len(cfg.Rules) == 0 {
 		return nil, ErrNoRules
+	}
+	for name, question := range cfg.Questions {
+		if err := question.Validate(); err != nil {
+			return nil, fmt.Errorf("jevrestrictor: invalid question %q: %w", name, err)
+		}
 	}
 	for _, rule := range cfg.Rules {
 		if _, ok := cfg.Questions[rule.Question]; !ok {
