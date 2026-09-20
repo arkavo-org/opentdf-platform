@@ -44,6 +44,8 @@ type JustInTimePDP struct {
 	// optional local subject mapping matcher; when set, getMatchedSubjectMappings
 	// avoids an SDK round-trip and serves from the in-memory store.
 	matcher SubjectMappingMatcher
+	// optional post-decision restrictor; may only narrow a decision.
+	restrictor DecisionRestrictor
 }
 
 // JITPDPOption configures a JustInTimePDP.
@@ -51,6 +53,7 @@ type JITPDPOption func(*jitPDPOptions)
 
 type jitPDPOptions struct {
 	obligationOptions []obligations.Option
+	restrictor        DecisionRestrictor
 }
 
 // WithObligationDynamicTrigger installs a dynamic obligation trigger, which may
@@ -60,6 +63,14 @@ type jitPDPOptions struct {
 func WithObligationDynamicTrigger(t obligations.DynamicTrigger) JITPDPOption {
 	return func(o *jitPDPOptions) {
 		o.obligationOptions = append(o.obligationOptions, obligations.WithDynamicTrigger(t))
+	}
+}
+
+// WithDecisionRestrictor installs a restrictor consulted after policy has
+// decided. It may only narrow: see DecisionRestrictor.
+func WithDecisionRestrictor(r DecisionRestrictor) JITPDPOption {
+	return func(o *jitPDPOptions) {
+		o.restrictor = r
 	}
 }
 
@@ -92,8 +103,9 @@ func NewJustInTimePDP(
 	}
 
 	p := &JustInTimePDP{
-		sdk:    sdk,
-		logger: log,
+		sdk:        sdk,
+		logger:     log,
+		restrictor: options.restrictor,
 	}
 
 	// If no store is provided, have EntitlementPolicyRetriever fetch from policy services
@@ -142,6 +154,15 @@ func NewJustInTimePDP(
 	p.obligationsPDP = obligationsPDP
 
 	return p, nil
+}
+
+// pendingEntityAudit holds one entity representation's audit inputs until the
+// consolidated decision is final.
+type pendingEntityAudit struct {
+	entityID          string
+	entitlements      map[string][]*policy.Action
+	resourceDecisions []ResourceDecision
+	permitted         bool
 }
 
 // GetDecision retrieves the decision for the provided entity identifier, action, and resources.
@@ -227,11 +248,18 @@ func (p *JustInTimePDP) GetDecision(
 		decision.AllPermitted = entitledWithAnyObligationsSatisfied
 		decision.Results = resourceDecisions
 
+		// Narrow before auditing, so the audit records the decision returned.
+		denials, err := p.applyRestrictions(ctx, regResValueFQN, action.GetName(), decision)
+		if err != nil {
+			return nil, fmt.Errorf("failed to apply decision restrictions: %w", err)
+		}
+		markRestrictedAuditDecisions(auditResourceDecisions, denials)
+
 		p.auditDecision(
 			ctx,
 			regResValueFQN,
 			action,
-			entitledWithAnyObligationsSatisfied,
+			decision.AllPermitted,
 			entitlements,
 			fulfillableObligationValueFQNs,
 			obligationDecision,
@@ -249,6 +277,13 @@ func (p *JustInTimePDP) GetDecision(
 	// Get a decision on each entity representation and consolidate into an overall decision
 	var resourceDecisionsAcrossAllEntityReps []ResourceDecision
 	allPermitted := true
+
+	// Per-entity audit records are buffered rather than emitted in the loop.
+	// The restrictor runs against the consolidated decision, so auditing here
+	// would record a permit the caller never receives, and would read the
+	// observation collector before the restrictor had published to it.
+	pendingAudits := make([]pendingEntityAudit, 0, len(entityRepresentations))
+	entityIDs := make([]string, 0, len(entityRepresentations))
 
 	for _, entityRep := range entityRepresentations {
 		entityRepresentationDecision, entitlements, err := p.pdp.GetDecision(ctx, entityRep, action, resources)
@@ -276,25 +311,55 @@ func (p *JustInTimePDP) GetDecision(
 			return nil, fmt.Errorf("failed to apply obligations and consolidate for entity representation [%s]: %w", entityRep.GetOriginalId(), err)
 		}
 
-		// Audit decision for this entity representation
+		// Buffer the audit for this entity representation.
 		entityAllPermitted := entityRepresentationDecision.AllPermitted && allObligationsSatisfied
-		p.auditDecision(
-			ctx,
-			entityRep.GetOriginalId(),
-			action,
-			entityAllPermitted,
-			entitlements,
-			fulfillableObligationValueFQNs,
-			obligationDecision,
-			auditResourceDecisions,
-		)
+		pendingAudits = append(pendingAudits, pendingEntityAudit{
+			entityID:          entityRep.GetOriginalId(),
+			permitted:         entityAllPermitted,
+			entitlements:      entitlements,
+			resourceDecisions: auditResourceDecisions,
+		})
+		entityIDs = append(entityIDs, entityRep.GetOriginalId())
 	}
 
 	allEntitledWithAllObligationsSatisfied := allPermitted && allObligationsSatisfied
-	return &Decision{
+	decision := &Decision{
 		AllPermitted: allEntitledWithAllObligationsSatisfied,
 		Results:      resourceDecisionsAcrossAllEntityReps,
-	}, nil
+	}
+
+	denials, err := p.applyRestrictions(ctx, strings.Join(entityIDs, ","), action.GetName(), decision)
+	if err != nil {
+		return nil, fmt.Errorf("failed to apply decision restrictions: %w", err)
+	}
+
+	// Emit the buffered audits now that the decision is final. Each audit keeps
+	// that entity representation's own headline result; applied restrictor
+	// denials are mirrored into its resource results. The request-scoped Jev
+	// observations are drained into the first event rather than duplicated.
+	for _, pending := range pendingAudits {
+		markRestrictedAuditDecisions(pending.resourceDecisions, denials)
+		p.auditDecision(
+			ctx,
+			pending.entityID,
+			action,
+			entityAuditPermitted(pending.permitted, denials),
+			pending.entitlements,
+			fulfillableObligationValueFQNs,
+			obligationDecision,
+			pending.resourceDecisions,
+		)
+	}
+
+	return decision, nil
+}
+
+// entityAuditPermitted preserves the policy and obligation result for this
+// entity representation while reflecting any restriction applied to the
+// consolidated request. It deliberately does not use the consolidated policy
+// result, which may include a denial belonging to a different representation.
+func entityAuditPermitted(baselinePermitted bool, denials map[string]string) bool {
+	return baselinePermitted && len(denials) == 0
 }
 
 // GetEntitlements retrieves the entitlements for the provided entity identifier.
