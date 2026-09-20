@@ -22,6 +22,30 @@ type fakeTrigger struct {
 	requests []TriggerRequest
 }
 
+type fakeBatchTrigger struct {
+	singleCalls int
+	batchCalls  int
+	requests    []TriggerRequest
+}
+
+func (f *fakeBatchTrigger) AdditionalObligations(context.Context, TriggerRequest) ([]string, error) {
+	f.singleCalls++
+	return nil, nil
+}
+
+func (f *fakeBatchTrigger) AdditionalObligationsBatch(
+	_ context.Context,
+	requests []TriggerRequest,
+) ([][]string, error) {
+	f.batchCalls++
+	f.requests = append(f.requests, requests...)
+	result := make([][]string, len(requests))
+	for i := range result {
+		result[i] = []string{dynamicObligationFQN}
+	}
+	return result, nil
+}
+
 func (f *fakeTrigger) AdditionalObligations(_ context.Context, req TriggerRequest) ([]string, error) {
 	f.requests = append(f.requests, req)
 	if f.err != nil {
@@ -145,6 +169,23 @@ func TestDynamicTriggerErrorFailsTheDecision(t *testing.T) {
 
 	require.Error(t, err, "a trigger that reports an error has chosen to fail closed")
 	assert.Contains(t, err.Error(), "dynamic obligation trigger failed")
+}
+
+func TestBatchDynamicTriggerIsCalledOnceForMultipleResources(t *testing.T) {
+	trigger := &fakeBatchTrigger{}
+	pdp := newPDPWithTrigger(t, trigger, nil)
+	resources := append(attrResource(), attrResource()...)
+
+	perResource, all, err := pdp.getTriggeredObligations(
+		t.Context(), actionRead, resources, emptyDecisionRequestContext)
+	require.NoError(t, err)
+
+	assert.Equal(t, 1, trigger.batchCalls)
+	assert.Zero(t, trigger.singleCalls)
+	assert.Len(t, trigger.requests, 2)
+	assert.Equal(t, []string{dynamicObligationFQN}, perResource[0])
+	assert.Equal(t, []string{dynamicObligationFQN}, perResource[1])
+	assert.Equal(t, []string{dynamicObligationFQN}, all)
 }
 
 func TestNoTriggerLeavesBehaviourUnchanged(t *testing.T) {

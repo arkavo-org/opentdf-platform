@@ -110,14 +110,25 @@ func (c *Config) Validate() error {
 
 	c.applyDefaults()
 
-	if _, err := time.ParseDuration(c.Timeout); err != nil {
+	timeout, err := time.ParseDuration(c.Timeout)
+	if err != nil {
 		return fmt.Errorf("jev: invalid timeout %q: %w", c.Timeout, err)
 	}
-	if _, err := time.ParseDuration(c.CacheTTL); err != nil {
+	if timeout <= 0 {
+		return errors.New("jev: timeout must be greater than zero")
+	}
+	cacheTTL, err := time.ParseDuration(c.CacheTTL)
+	if err != nil {
 		return fmt.Errorf("jev: invalid cache_ttl %q: %w", c.CacheTTL, err)
 	}
-	if c.ConfidenceThreshold < minThreshold || c.ConfidenceThreshold > maxThreshold {
-		return fmt.Errorf("jev: confidence_threshold %v outside [0,1]", c.ConfidenceThreshold)
+	if cacheTTL < 0 {
+		return errors.New("jev: cache_ttl must not be negative")
+	}
+	if c.CacheMaxEntries <= 0 {
+		return errors.New("jev: cache_max_entries must be greater than zero")
+	}
+	if c.ConfidenceThreshold <= minThreshold || c.ConfidenceThreshold > maxThreshold {
+		return fmt.Errorf("jev: confidence_threshold %v outside (0,1]", c.ConfidenceThreshold)
 	}
 	if c.FailMode != FailOpen && c.FailMode != FailClosed {
 		return fmt.Errorf("jev: fail_mode %q must be %q or %q", c.FailMode, FailOpen, FailClosed)

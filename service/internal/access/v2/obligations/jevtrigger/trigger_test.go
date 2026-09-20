@@ -1,6 +1,7 @@
 package jevtrigger
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -111,6 +112,56 @@ func TestShadowModeObservesButRequiresNothing(t *testing.T) {
 	assert.False(t, obs[0].Applied)
 	assert.InDelta(t, 0.97, obs[0].Certainty, 1e-9,
 		"shadow mode still records what the model would have done")
+}
+
+func TestBatchEvaluatesMultipleResourcesInOneModelCall(t *testing.T) {
+	calls := 0
+	questionCount := 0
+	var decodeErr, encodeErr error
+	trigger := newTrigger(t, jev.ModeEnforce, func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		var body struct {
+			Questions map[string]jev.Question `json:"questions"`
+		}
+		decodeErr = json.NewDecoder(r.Body).Decode(&body)
+		questionCount = len(body.Questions)
+
+		answers := make(map[string]any, len(body.Questions))
+		for name, question := range body.Questions {
+			switch question.Type {
+			case jev.QuestionTypeNoul:
+				answers[name] = map[string]any{"type": "noul", "noul": 0.97}
+			case jev.QuestionTypeChoice:
+				answers[name] = map[string]any{
+					"type": "choice", "choice": "elevated", "confidence": 0.91,
+					"probabilities": map[string]any{"elevated": 0.91, "routine": 0.09},
+				}
+			case jev.QuestionTypeScore:
+				answers[name] = map[string]any{
+					"type": "score", "score": 1.0, "confidence": 0.91,
+					"probabilities": map[string]any{"0": 0.09, "1": 0.91},
+				}
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		encodeErr = json.NewEncoder(w).Encode(map[string]any{
+			"id": "gen-dec-batch", "model": "typesafe/jev-1.13-20260917",
+			"answers": answers, "usage": map[string]any{"cost": 0.000005},
+		})
+	}, nil)
+
+	second := request()
+	second.ResourceIndex = 1
+	second.AttributeValueFQNs = []string{"https://example.org/attr/classification/value/top-secret"}
+	got, err := trigger.AdditionalObligationsBatch(
+		jev.Collect(t.Context()), []obligations.TriggerRequest{request(), second})
+	require.NoError(t, err)
+	require.NoError(t, decodeErr)
+	require.NoError(t, encodeErr)
+
+	assert.Equal(t, 1, calls)
+	assert.Equal(t, 2, questionCount, "the configured questions should be asked once for the whole decision")
+	assert.Equal(t, [][]string{{stepUpObligation}, {stepUpObligation}}, got)
 }
 
 func TestOnlyAllowlistedStateLeavesThePlatform(t *testing.T) {

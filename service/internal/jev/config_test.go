@@ -46,6 +46,21 @@ func TestValidateRejectsBadValues(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsNonPositiveOperationalBounds(t *testing.T) {
+	for name, cfg := range map[string]*Config{
+		"zero timeout":       {Enabled: true, StateAllowlist: []string{"a"}, Timeout: "0s"},
+		"negative timeout":   {Enabled: true, StateAllowlist: []string{"a"}, Timeout: "-1s"},
+		"negative cache ttl": {Enabled: true, StateAllowlist: []string{"a"}, CacheTTL: "-1s"},
+		"negative cache size": {
+			Enabled: true, StateAllowlist: []string{"a"}, CacheMaxEntries: -1,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			require.Error(t, cfg.Validate())
+		})
+	}
+}
+
 func TestSeamDefaultsToShadowAndNotEnforcing(t *testing.T) {
 	assert.False(t, SeamConfig{Enabled: true, Mode: ModeShadow}.Enforcing())
 	assert.False(t, SeamConfig{Enabled: false, Mode: ModeEnforce}.Enforcing(),

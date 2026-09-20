@@ -74,6 +74,19 @@ type DynamicTrigger interface {
 	AdditionalObligations(ctx context.Context, req TriggerRequest) ([]string, error)
 }
 
+// BatchDynamicTrigger evaluates multiple resources in one external call. A
+// dynamic trigger may implement this in addition to DynamicTrigger; the PDP
+// prefers it so request latency and availability exposure do not multiply by
+// the resource count.
+type BatchDynamicTrigger interface {
+	AdditionalObligationsBatch(ctx context.Context, requests []TriggerRequest) ([][]string, error)
+}
+
+type indexedTriggerRequest struct {
+	index   int
+	request TriggerRequest
+}
+
 // Option configures an ObligationsPolicyDecisionPoint.
 type Option func(*ObligationsPolicyDecisionPoint)
 
@@ -281,6 +294,7 @@ func (p *ObligationsPolicyDecisionPoint) getTriggeredObligations(
 	// Set of required obligations across all resources
 	var allRequiredOblValueFQNs []string
 	allOblValFQNsSeen := make(map[string]struct{})
+	dynamicRequests := make([]indexedTriggerRequest, 0, len(resources))
 
 	pepClientID := decisionRequestContext.GetPep().GetClientId()
 	actionName := strings.ToLower(action.GetName())
@@ -383,34 +397,46 @@ func (p *ObligationsPolicyDecisionPoint) getTriggeredObligations(
 			}
 		}
 		if p.dynamicTrigger != nil {
-			additional, err := p.dynamicTrigger.AdditionalObligations(ctx, TriggerRequest{
-				ActionName:         actionName,
-				ResourceIndex:      i,
-				AttributeValueFQNs: attrValueFQNs,
-				PEPClientID:        pepClientID,
-				PolicyTriggered:    slices.Clone(resourceRequiredOblValueFQNsSet),
+			dynamicRequests = append(dynamicRequests, indexedTriggerRequest{
+				index: i,
+				request: TriggerRequest{
+					ActionName:         actionName,
+					ResourceIndex:      i,
+					AttributeValueFQNs: attrValueFQNs,
+					PEPClientID:        pepClientID,
+					PolicyTriggered:    slices.Clone(resourceRequiredOblValueFQNsSet),
+				},
 			})
-			if err != nil {
-				return nil, nil, fmt.Errorf("dynamic obligation trigger failed: %w", err)
-			}
-
-			// Additions only: nothing the policy graph required is removed here.
-			for _, oblValFQN := range additional {
-				oblValFQN = strings.ToLower(oblValFQN)
-				if _, seen := seenThisResource[oblValFQN]; seen {
-					continue
-				}
-				seenThisResource[oblValFQN] = struct{}{}
-				resourceRequiredOblValueFQNsSet = append(resourceRequiredOblValueFQNsSet, oblValFQN)
-
-				if _, seen := allOblValFQNsSeen[oblValFQN]; !seen {
-					allOblValFQNsSeen[oblValFQN] = struct{}{}
-					allRequiredOblValueFQNs = append(allRequiredOblValueFQNs, oblValFQN)
-				}
-			}
 		}
 
 		requiredOblValueFQNsPerResource[i] = resourceRequiredOblValueFQNsSet
+	}
+
+	if len(dynamicRequests) > 0 {
+		additionalByRequest, err := p.evaluateDynamicTriggers(ctx, dynamicRequests)
+		if err != nil {
+			return nil, nil, err
+		}
+		for i, indexed := range dynamicRequests {
+			resourceIndex := indexed.index
+			seenThisResource := make(map[string]struct{}, len(requiredOblValueFQNsPerResource[resourceIndex]))
+			for _, obligation := range requiredOblValueFQNsPerResource[resourceIndex] {
+				seenThisResource[obligation] = struct{}{}
+			}
+			// Additions only: nothing the policy graph required is removed here.
+			for _, obligation := range additionalByRequest[i] {
+				obligation = strings.ToLower(obligation)
+				if _, seen := seenThisResource[obligation]; seen {
+					continue
+				}
+				seenThisResource[obligation] = struct{}{}
+				requiredOblValueFQNsPerResource[resourceIndex] = append(requiredOblValueFQNsPerResource[resourceIndex], obligation)
+				if _, seen := allOblValFQNsSeen[obligation]; !seen {
+					allOblValFQNsSeen[obligation] = struct{}{}
+					allRequiredOblValueFQNs = append(allRequiredOblValueFQNs, obligation)
+				}
+			}
+		}
 	}
 
 	log.DebugContext(
@@ -425,6 +451,37 @@ func (p *ObligationsPolicyDecisionPoint) getTriggeredObligations(
 	)
 
 	return requiredOblValueFQNsPerResource, allRequiredOblValueFQNs, nil
+}
+
+func (p *ObligationsPolicyDecisionPoint) evaluateDynamicTriggers(
+	ctx context.Context,
+	indexed []indexedTriggerRequest,
+) ([][]string, error) {
+	requests := make([]TriggerRequest, len(indexed))
+	for i := range indexed {
+		requests[i] = indexed[i].request
+	}
+
+	if batch, ok := p.dynamicTrigger.(BatchDynamicTrigger); ok {
+		additional, err := batch.AdditionalObligationsBatch(ctx, requests)
+		if err != nil {
+			return nil, fmt.Errorf("dynamic obligation trigger failed: %w", err)
+		}
+		if len(additional) != len(requests) {
+			return nil, fmt.Errorf("dynamic obligation trigger returned %d resource results for %d requests", len(additional), len(requests))
+		}
+		return additional, nil
+	}
+
+	additional := make([][]string, len(requests))
+	for i, request := range requests {
+		var err error
+		additional[i], err = p.dynamicTrigger.AdditionalObligations(ctx, request)
+		if err != nil {
+			return nil, fmt.Errorf("dynamic obligation trigger failed: %w", err)
+		}
+	}
+	return additional, nil
 }
 
 func loggerWithAttributes(log *logger.Logger, actionName, pepClientID string) *logger.Logger {

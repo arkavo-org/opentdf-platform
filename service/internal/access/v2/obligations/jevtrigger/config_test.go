@@ -19,7 +19,9 @@ func TestConfigDecodesDocumentedYAML(t *testing.T) {
 		"timeout":              "500ms",
 		"fail_mode":            "open",
 		"confidence_threshold": 0.85,
-		"state_allowlist":      []string{StateKeyAction, StateKeyAttributeValueFQNs},
+		"state_allowlist": []string{
+			StateKeyAction, StateKeyAttributeValueFQNs, StateKeyResourceCount,
+		},
 		"seams": map[string]any{
 			"obligations": map[string]any{"enabled": true, "mode": "shadow"},
 		},
@@ -62,4 +64,5 @@ func TestDocumentedStateKeysAreStable(t *testing.T) {
 	assert.Equal(t, "attribute_value_fqns", StateKeyAttributeValueFQNs)
 	assert.Equal(t, "pep_client_id", StateKeyPEPClientID)
 	assert.Equal(t, "policy_triggered_obligations", StateKeyPolicyTriggered)
+	assert.Equal(t, "resource_count", StateKeyResourceCount)
 }

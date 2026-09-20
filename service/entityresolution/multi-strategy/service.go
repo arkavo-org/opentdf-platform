@@ -208,8 +208,37 @@ func (s *Service) executeStrategy(ctx context.Context, entityID string, jwtClaim
 		)
 	}
 
-	// Extract parameters from JWT claims using input mapping
-	mapper := &BaseMapper{}
+	// Use the provider's mapper for both sides of the exchange. Provider-specific
+	// fields (for example Jev's source_answer) are not understood by the generic
+	// mappers, and bypassing this interface silently disconnects those providers
+	// from the production strategy path.
+	mapper := provider.GetMapper()
+	if err := mapper.ValidateInputMapping(strategy.InputMapping); err != nil {
+		return nil, types.WrapMultiStrategyError(
+			types.ErrorTypeMapping,
+			"invalid input mapping",
+			err,
+			map[string]interface{}{
+				"strategy":  strategy.Name,
+				"provider":  strategy.Provider,
+				"entity_id": entityID,
+			},
+		)
+	}
+	if err := mapper.ValidateOutputMapping(strategy.OutputMapping); err != nil {
+		return nil, types.WrapMultiStrategyError(
+			types.ErrorTypeMapping,
+			"invalid output mapping",
+			err,
+			map[string]interface{}{
+				"strategy":  strategy.Name,
+				"provider":  strategy.Provider,
+				"entity_id": entityID,
+			},
+		)
+	}
+
+	// Extract parameters from JWT claims using the provider-specific mapping.
 	params, err := mapper.ExtractParameters(jwtClaims, strategy.InputMapping)
 	if err != nil {
 		return nil, types.WrapMultiStrategyError(
@@ -240,10 +269,15 @@ func (s *Service) executeStrategy(ctx context.Context, entityID string, jwtClaim
 			},
 		)
 	}
+	if rawResult == nil {
+		return nil, types.NewMappingError("provider returned a nil raw result", map[string]interface{}{
+			"strategy":  strategy.Name,
+			"provider":  strategy.Provider,
+			"entity_id": entityID,
+		})
+	}
 
-	// Map raw result to entity result using output mapping
-	outputMapper := &OutputMapper{}
-	entityResult, err := outputMapper.MapResult(rawResult, strategy.OutputMapping, entityID)
+	claims, err := mapper.TransformResults(rawResult.Data, strategy.OutputMapping)
 	if err != nil {
 		return nil, types.WrapMultiStrategyError(
 			types.ErrorTypeMapping,
@@ -257,6 +291,17 @@ func (s *Service) executeStrategy(ctx context.Context, entityID string, jwtClaim
 			},
 		)
 	}
+
+	entityResult := &types.EntityResult{
+		OriginalID: entityID,
+		Claims:     claims,
+		Metadata:   make(map[string]interface{}),
+	}
+	for key, value := range rawResult.Metadata {
+		entityResult.Metadata[key] = value
+	}
+	entityResult.Metadata["output_mappings_applied"] = len(strategy.OutputMapping)
+	entityResult.Metadata["claims_mapped"] = len(claims)
 
 	return entityResult, nil
 }

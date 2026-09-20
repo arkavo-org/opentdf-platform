@@ -107,3 +107,54 @@ func TestNilResponseIsSafe(t *testing.T) {
 	_, ok := r.Noul("anything", 0)
 	assert.False(t, ok)
 }
+
+func TestValidateAgainstRejectsValuesOutsideQuestionDomain(t *testing.T) {
+	choiceQuestion := NewChoiceQuestion("Risk?", map[string]any{
+		"routine":  "ordinary",
+		"elevated": "unusual",
+	})
+
+	tests := map[string]Answer{
+		"unknown choice": {
+			Type: QuestionTypeChoice, Choice: "administrator", Confidence: 0.99,
+		},
+		"invalid choice confidence": {
+			Type: QuestionTypeChoice, Choice: "routine", Confidence: 1.1,
+		},
+		"invalid choice probability": {
+			Type: QuestionTypeChoice, Choice: "routine", Confidence: 0.9,
+			Probabilities: map[string]float64{"routine": -0.1},
+		},
+	}
+	for name, answer := range tests {
+		t.Run(name, func(t *testing.T) {
+			response := &Response{Answers: map[string]Answer{"risk": answer}}
+			require.Error(t, response.ValidateAgainst(map[string]Question{"risk": choiceQuestion}))
+		})
+	}
+
+	t.Run("noul outside probability range", func(t *testing.T) {
+		response := &Response{Answers: map[string]Answer{
+			"risk": {Type: QuestionTypeNoul, Noul: -0.2},
+		}}
+		require.Error(t, response.ValidateAgainst(map[string]Question{
+			"risk": NewNoulQuestion("Risk?", "yes", "no"),
+		}))
+	})
+
+	t.Run("score outside configured scale", func(t *testing.T) {
+		response := &Response{Answers: map[string]Answer{
+			"risk": {Type: QuestionTypeScore, Score: 3, Confidence: 0.9},
+		}}
+		require.Error(t, response.ValidateAgainst(map[string]Question{
+			"risk": NewScoreQuestion("Risk?", []any{"low", "high"}),
+		}))
+	})
+
+	t.Run("type mismatch", func(t *testing.T) {
+		response := &Response{Answers: map[string]Answer{
+			"risk": {Type: QuestionTypeNoul, Noul: 0.9},
+		}}
+		require.Error(t, response.ValidateAgainst(map[string]Question{"risk": choiceQuestion}))
+	})
+}

@@ -105,6 +105,11 @@ func (c *HTTPClient) Decide(ctx context.Context, state any, questions map[string
 	if len(questions) == 0 {
 		return nil, ErrNoQuestions
 	}
+	for name, question := range questions {
+		if err := question.Validate(); err != nil {
+			return nil, fmt.Errorf("jev: invalid question %q: %w", name, err)
+		}
+	}
 
 	body := request{Model: c.model, State: state, Questions: questions}
 	payload, err := json.Marshal(body)
@@ -118,6 +123,9 @@ func (c *HTTPClient) Decide(ctx context.Context, state any, questions map[string
 
 	resp, err := c.post(ctx, payload)
 	if err != nil {
+		return nil, err
+	}
+	if err := resp.ValidateAgainst(questions); err != nil {
 		return nil, err
 	}
 
