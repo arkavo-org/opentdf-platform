@@ -1469,6 +1469,59 @@ func (s *PDPTestSuite) Test_GetDecision_MultipleResources() {
 	})
 }
 
+// A representation with no claims and no direct entitlements (the arkavo
+// resolver's answer for a refused agent) is denied, never an error, even
+// with direct entitlements allowed and subject mappings loaded: the KAS
+// then answers each KAO with "forbidden" inside a normal response.
+func (s *PDPTestSuite) Test_GetDecision_BareEntityRepresentationDenies() {
+	f := s.fixtures
+	pdp, err := NewPolicyDecisionPoint(
+		s.T().Context(),
+		s.logger,
+		[]*policy.Attribute{f.classificationAttr, f.departmentAttr},
+		[]*policy.SubjectMapping{f.secretMapping, f.topSecretMapping, f.confidentialMapping, f.publicMapping, f.rndMapping, f.engineeringMapping, f.financeMapping},
+		nil,
+		true,
+		false,
+	)
+	s.Require().NoError(err)
+
+	bare := &entityresolutionV2.EntityRepresentation{OriginalId: "arkavo-subject"}
+	decision, _, err := pdp.GetDecision(s.T().Context(), bare, testActionRead, createResourcePerFqn(testClassSecretFQN, testDeptEngineeringFQN))
+	s.Require().NoError(err)
+	s.Require().NotNil(decision)
+	s.False(decision.AllPermitted)
+	s.Len(decision.Results, 2)
+	for _, result := range decision.Results {
+		s.False(result.Entitled)
+	}
+}
+
+// Why policy.arkavo.yaml must keep subject_mappings: [] (pinned in
+// service/policy/filestore). A NOT_IN condition is true when its selector
+// resolves to no value, so it grants to any representation whose claims
+// simply lack that selector: every person and every admitted agent. A bare
+// representation (a withheld agent) has no claims to evaluate, so no
+// mapping of any kind is evaluated for it.
+func (s *PDPTestSuite) Test_GetDecision_NotInMappingGrantsWhenTheSelectorIsMissing() {
+	f := s.fixtures
+	notIn := createSimpleSubjectMapping(testClassSecretFQN, "secret", []*policy.Action{testActionRead}, ".arkavo_workload_state", []string{"quarantined"}, nil)
+	notIn.GetSubjectConditionSet().GetSubjectSets()[0].GetConditionGroups()[0].GetConditions()[0].Operator = policy.SubjectMappingOperatorEnum_SUBJECT_MAPPING_OPERATOR_ENUM_NOT_IN
+	pdp, err := NewPolicyDecisionPoint(s.T().Context(), s.logger, []*policy.Attribute{f.classificationAttr}, []*policy.SubjectMapping{notIn}, nil, true, false)
+	s.Require().NoError(err)
+	resources := createResourcePerFqn(testClassSecretFQN)
+
+	withClaims := s.createEntityWithProps("admitted-subject", map[string]interface{}{"sub": "did:key:z6Mkagent"})
+	decision, _, err := pdp.GetDecision(s.T().Context(), withClaims, testActionRead, resources)
+	s.Require().NoError(err)
+	s.True(decision.AllPermitted, "NOT_IN on a missing selector grants")
+
+	bare := &entityresolutionV2.EntityRepresentation{OriginalId: "withheld-agent"}
+	decision, _, err = pdp.GetDecision(s.T().Context(), bare, testActionRead, resources)
+	s.Require().NoError(err)
+	s.False(decision.AllPermitted, "a representation without claims evaluates no mapping")
+}
+
 func (s *PDPTestSuite) Test_GetDecision_ReturnsDecisionRelatedEntitlements() {
 	f := s.fixtures
 
