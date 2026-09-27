@@ -3,6 +3,7 @@ package access
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"strconv"
 
 	authzV2 "github.com/opentdf/platform/protocol/go/authorization/v2"
@@ -29,12 +30,24 @@ type PDPAccessResult struct {
 	RequiredObligations []string
 }
 
-func (p *Provider) canAccess(ctx context.Context, token *entity.Token, policies []*Policy, fulfillableObligationFQNs []string) ([]PDPAccessResult, error) {
+// canAccess runs the ABAC decision for each policy. agentSub is the DID of an
+// agent bearer ("" for every other caller): for an agent, a policy with a
+// non-empty dissem list is released only when the list names the DID, which
+// is SwarmKit's per-role binding. Other callers keep the prior behaviour.
+func (p *Provider) canAccess(ctx context.Context, token *entity.Token, policies []*Policy, fulfillableObligationFQNs []string, agentSub string) ([]PDPAccessResult, error) {
 	var res []PDPAccessResult
 	var resources []*authzV2.Resource
 	idPolicyMap := make(map[string]*Policy)
 	for i, policy := range policies {
-		if len(policy.Body.Dissem) > 0 {
+		if agentSub != "" && !dissemAllows(policy.Body.Dissem, agentSub) {
+			p.Logger.WarnContext(ctx, "agent is not in the policy dissemination list",
+				slog.String("agent", agentSub),
+				slog.String("policy_uuid", policy.UUID.String()),
+			)
+			res = append(res, PDPAccessResult{Access: false, Policy: policy})
+			continue
+		}
+		if agentSub == "" && len(policy.Body.Dissem) > 0 {
 			// TODO: Move dissems check to the getdecisions endpoint
 			p.Logger.Error("dissems check is not enabled in v2 platform kas")
 		}

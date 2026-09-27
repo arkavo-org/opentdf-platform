@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"slices"
 	"time"
 
 	"github.com/lestrrat-go/jwx/v2/jwt"
@@ -96,6 +97,10 @@ func hasAgentRole(roles any) bool {
 func (p *Provider) agentReleaseDenied(ctx context.Context, agent *agentstatus.Subject) bool {
 	var err error
 	switch {
+	// canAccess reads an empty agentSub as "not an agent", so an agent without
+	// a DID must never get past the gate, whatever the checker says.
+	case agent.DID == "":
+		err = &agentstatus.DenialError{Reason: agentstatus.ReasonMissingSubject, Workload: agent.Workload}
 	case ctxAuth.GetJWKFromContext(ctx, p.Logger) == nil:
 		err = &agentstatus.DenialError{Reason: reasonNoProofOfPossession, Workload: agent.Workload}
 	case p.AgentStatus == nil:
@@ -174,4 +179,15 @@ func (p *Provider) denyAgentRewrap(ctx context.Context, requests []*kaspb.Unsign
 		}
 	}
 	return results
+}
+
+// dissemAllows reports whether a policy's dissemination list admits an agent.
+// An empty list defers entirely to ABAC; a non-empty one must name the DID
+// exactly (DIDs are case-sensitive, so no folding or trimming). An empty DID
+// is never admitted, even by an empty entry.
+func dissemAllows(dissem []string, agentSub string) bool {
+	if len(dissem) == 0 {
+		return true
+	}
+	return agentSub != "" && slices.Contains(dissem, agentSub)
 }

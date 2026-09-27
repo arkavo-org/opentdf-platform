@@ -21,10 +21,15 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
+	"github.com/google/uuid"
 	"github.com/lestrrat-go/jwx/v2/jwk"
 	"github.com/lestrrat-go/jwx/v2/jwt"
 	"github.com/opentdf/platform/lib/ocrypto"
+	authzV2 "github.com/opentdf/platform/protocol/go/authorization/v2"
+	"github.com/opentdf/platform/protocol/go/entity"
 	kaspb "github.com/opentdf/platform/protocol/go/kas"
+	otdf "github.com/opentdf/platform/sdk"
+	"github.com/opentdf/platform/sdk/sdkconnect"
 	"github.com/opentdf/platform/service/internal/agentstatus"
 	"github.com/opentdf/platform/service/internal/security"
 	"github.com/opentdf/platform/service/logger"
@@ -33,6 +38,7 @@ import (
 	"github.com/opentdf/platform/service/trust"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/trace/noop"
 )
 
 const (
@@ -497,7 +503,13 @@ func releasingProvider(t *testing.T, checker agentstatus.Checker) (*Provider, *c
 // policy binding.
 func releasableRequest(t *testing.T, policyID string, kaoIDs ...string) *kaspb.UnsignedRewrapRequest_WithPolicyRequest {
 	t.Helper()
-	policyBody := emptyPolicyBytes()
+	return requestWithBody(t, emptyPolicyBytes(), policyID, kaoIDs...)
+}
+
+// requestWithBody is releasableRequest for a given base64 policy body; the
+// binding is computed over that body so only ABAC and dissem decide release.
+func requestWithBody(t *testing.T, policyBody []byte, policyID string, kaoIDs ...string) *kaspb.UnsignedRewrapRequest_WithPolicyRequest {
+	t.Helper()
 	asym, err := ocrypto.FromPublicPEM(rsaPublic)
 	require.NoError(t, err)
 	binding, err := generateHMACDigest(t.Context(), policyBody, []byte(plainKey), *logger.CreateTestLogger())
@@ -661,5 +673,248 @@ func TestTDF3Rewrap_AgentGate(t *testing.T) {
 		partial := tokenWith(t, map[string]any{jwt.SubjectKey: agentOwner, "arkavo_workload": agentWorkload})
 		assertAllForbidden(t, rewrapAudited(t, p, agentDPoPKey(t), partial, twoPolicyRequests(t)))
 		assert.Equal(t, int32(0), km.decrypts.Load())
+	})
+}
+
+const otherDID = "did:key:z6MkOtherAgent"
+
+func noAttrPolicy() *Policy { return &Policy{UUID: uuid.New()} }
+
+func attrPolicy() *Policy {
+	pol := fauxPolicy()
+	pol.UUID = uuid.New()
+	return pol
+}
+
+func dissemPolicy(attrs bool, dissem ...string) *Policy {
+	pol := noAttrPolicy()
+	if attrs {
+		pol = attrPolicy()
+	}
+	pol.Body.Dissem = dissem
+	return pol
+}
+
+// permittingAuthz is an authorization service that permits every resource
+// and records which ones it was asked about.
+type permittingAuthz struct {
+	sdkconnect.AuthorizationServiceClientV2
+	mu    sync.Mutex
+	asked []*authzV2.Resource
+}
+
+func (a *permittingAuthz) GetDecision(_ context.Context, req *authzV2.GetDecisionRequest) (*authzV2.GetDecisionResponse, error) {
+	return &authzV2.GetDecisionResponse{Decision: a.permit(req.GetResource())}, nil
+}
+
+func (a *permittingAuthz) GetDecisionMultiResource(_ context.Context, req *authzV2.GetDecisionMultiResourceRequest) (*authzV2.GetDecisionMultiResourceResponse, error) {
+	out := &authzV2.GetDecisionMultiResourceResponse{}
+	for _, r := range req.GetResources() {
+		out.ResourceDecisions = append(out.ResourceDecisions, a.permit(r))
+	}
+	return out, nil
+}
+
+func (a *permittingAuthz) permit(r *authzV2.Resource) *authzV2.ResourceDecision {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.asked = append(a.asked, r)
+	return &authzV2.ResourceDecision{EphemeralResourceId: r.GetEphemeralId(), Decision: authzV2.Decision_DECISION_PERMIT}
+}
+
+func (a *permittingAuthz) askedFQNs() [][]string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	var out [][]string
+	for _, r := range a.asked {
+		out = append(out, r.GetAttributeValues().GetFqns())
+	}
+	return out
+}
+
+// abacProvider can reach an (always permitting) authorization service, so a
+// policy with data attributes is released unless something else denies it.
+func abacProvider() (*Provider, *permittingAuthz, *bytes.Buffer) {
+	log, buf := newAuditBufferLogger()
+	authz := &permittingAuthz{}
+	return &Provider{Logger: log, SDK: &otdf.SDK{AuthorizationV2: authz}, Tracer: noop.NewTracerProvider().Tracer("")}, authz, buf
+}
+
+func accessByPolicy(t *testing.T, res []PDPAccessResult) map[*Policy]bool {
+	t.Helper()
+	out := make(map[*Policy]bool)
+	for _, r := range res {
+		_, dup := out[r.Policy]
+		require.False(t, dup, "one result per policy")
+		out[r.Policy] = r.Access
+	}
+	return out
+}
+
+func TestDissemAllows(t *testing.T) {
+	tests := []struct {
+		name     string
+		dissem   []string
+		agentSub string
+		want     bool
+	}{
+		{"listed", []string{otherDID, agentDID}, agentDID, true},
+		{"empty list defers to ABAC", nil, agentDID, true},
+		{"empty (non-nil) list defers to ABAC", []string{}, agentDID, true},
+		{"not listed", []string{otherDID}, agentDID, false},
+		{"case differs", []string{strings.ToLower(agentDID)}, agentDID, false},
+		{"listed entry is a prefix of the DID", []string{agentDID[:len(agentDID)-1]}, agentDID, false},
+		{"DID is a prefix of the listed entry", []string{agentDID + "x"}, agentDID, false},
+		{"listed entry has surrounding space", []string{" " + agentDID + " "}, agentDID, false},
+		{"empty subject never matches an empty entry", []string{""}, "", false},
+		{"empty subject never matches a listed DID", []string{agentDID}, "", false},
+		{"empty entry does not admit a real DID", []string{""}, agentDID, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, dissemAllows(tt.dissem, tt.agentSub))
+		})
+	}
+}
+
+func TestCanAccess_AgentDissemination(t *testing.T) {
+	tok := &entity.Token{EphemeralId: "rewrap-token", Jwt: "raw"}
+
+	tests := []struct {
+		name     string
+		policy   *Policy
+		agentSub string
+		want     bool
+	}{
+		{"agent named in dissem is released", dissemPolicy(false, otherDID, agentDID), agentDID, true},
+		{"agent outside dissem is denied", dissemPolicy(false, otherDID), agentDID, false},
+		{"match is exact (DIDs are case-sensitive)", dissemPolicy(false, "did:key:z6mkagentexample"), agentDID, false},
+		{"an empty dissem entry does not admit an agent", dissemPolicy(false, ""), agentDID, false},
+		{"empty dissem defers to ABAC", dissemPolicy(false), agentDID, true},
+		{"agent named in dissem still needs ABAC for data attributes", dissemPolicy(true, agentDID), agentDID, true},
+		{"denied by dissem never reaches the authorization service", dissemPolicy(true, otherDID), agentDID, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p, authz, _ := abacProvider()
+			res, err := p.canAccess(t.Context(), tok, []*Policy{tt.policy}, nil, tt.agentSub)
+			require.NoError(t, err)
+			require.Len(t, res, 1)
+			assert.Same(t, tt.policy, res[0].Policy)
+			assert.Equal(t, tt.want, res[0].Access)
+			if len(tt.policy.Body.DataAttributes) > 0 && !tt.want {
+				assert.Empty(t, authz.askedFQNs(), "a dissem denial must not be sent for an ABAC decision")
+			}
+		})
+	}
+}
+
+// Non-agent callers keep the upstream behaviour: dissem is logged as not
+// enforced and ABAC alone decides, whatever the list holds.
+func TestCanAccess_NonAgentDissemUnchanged(t *testing.T) {
+	tok := &entity.Token{EphemeralId: "rewrap-token", Jwt: "raw"}
+	for _, pol := range []*Policy{dissemPolicy(false, otherDID), dissemPolicy(false, ""), dissemPolicy(true, otherDID)} {
+		p, authz, buf := abacProvider()
+		res, err := p.canAccess(t.Context(), tok, []*Policy{pol}, nil, "")
+		require.NoError(t, err)
+		require.Len(t, res, 1)
+		assert.True(t, res[0].Access, pol.Body)
+		assert.Contains(t, buf.String(), "dissems check is not enabled in v2 platform kas")
+		if len(pol.Body.DataAttributes) > 0 {
+			assert.Len(t, authz.askedFQNs(), 1, "ABAC still decides a non-agent's attributes")
+		}
+	}
+}
+
+// Each policy is judged on its own: a dissem denial of one policy neither
+// releases it through another policy's ABAC permit nor blocks the other.
+func TestCanAccess_DissemJudgedPerPolicy(t *testing.T) {
+	tok := &entity.Token{EphemeralId: "rewrap-token", Jwt: "raw"}
+	listed := dissemPolicy(true, agentDID)
+	listed.Body.DataAttributes = []Attribute{{URI: "https://example.com/attr/Listed/value/A"}}
+	unlisted := dissemPolicy(true, otherDID)
+	unlisted.Body.DataAttributes = []Attribute{{URI: "https://example.com/attr/Unlisted/value/B"}}
+	unlistedNoAttrs := dissemPolicy(false, otherDID)
+	open := dissemPolicy(false)
+
+	for _, order := range [][]*Policy{
+		{listed, unlisted, unlistedNoAttrs, open},
+		{unlisted, unlistedNoAttrs, open, listed},
+	} {
+		p, authz, _ := abacProvider()
+		res, err := p.canAccess(t.Context(), tok, order, nil, agentDID)
+		require.NoError(t, err)
+		require.Len(t, res, len(order))
+		got := accessByPolicy(t, res)
+		assert.True(t, got[listed])
+		assert.False(t, got[unlisted])
+		assert.False(t, got[unlistedNoAttrs])
+		assert.True(t, got[open])
+		assert.Equal(t, [][]string{{"https://example.com/attr/Listed/value/A"}}, authz.askedFQNs(),
+			"only the listed policy's attributes reach the authorization service")
+	}
+}
+
+func policyBytes(t *testing.T, pol *Policy) []byte {
+	t.Helper()
+	data, err := json.Marshal(pol)
+	require.NoError(t, err)
+	return []byte(base64.StdEncoding.EncodeToString(data))
+}
+
+// mixedDissemRequests: policy-a lists agentDID, policy-b lists only another
+// agent; neither has data attributes, so dissem alone separates them.
+func mixedDissemRequests(t *testing.T) []*kaspb.UnsignedRewrapRequest_WithPolicyRequest {
+	t.Helper()
+	return []*kaspb.UnsignedRewrapRequest_WithPolicyRequest{
+		requestWithBody(t, policyBytes(t, dissemPolicy(false, otherDID, agentDID)), "policy-a", "kao-a1", "kao-a2"),
+		requestWithBody(t, policyBytes(t, dissemPolicy(false, otherDID)), "policy-b", "kao-b1", "kao-b2"),
+	}
+}
+
+func TestTDF3Rewrap_AgentDissemination(t *testing.T) {
+	t.Run("eligible agent: only the policy that lists it is released", func(t *testing.T) {
+		checker := &fakeChecker{}
+		p, _, buf := releasingProvider(t, checker)
+		results := rewrapAudited(t, p, agentDPoPKey(t), agentToken(t), mixedDissemRequests(t))
+
+		require.Len(t, results["policy-a"], 2)
+		for id, r := range results["policy-a"] {
+			require.NoError(t, r.Error, id)
+			assert.NotEmpty(t, r.Encapped, id)
+		}
+		require.Len(t, results["policy-b"], 2)
+		for id, r := range results["policy-b"] {
+			require.Error(t, r.Error, id)
+			assert.Equal(t, connect.CodePermissionDenied, connect.CodeOf(r.Error), id)
+			assert.Contains(t, r.Error.Error(), "forbidden", id)
+			assert.Empty(t, r.Encapped, id)
+		}
+		assert.ElementsMatch(t, []any{
+			audit.ActionResultSuccess.String(), audit.ActionResultSuccess.String(),
+			audit.ActionResultError.String(), audit.ActionResultError.String(),
+		}, rewrapAuditResults(t, buf))
+		assert.Equal(t, 1, checker.callCount())
+	})
+
+	t.Run("non-agent bearer: dissem not enforced, both policies released", func(t *testing.T) {
+		p, _, _ := releasingProvider(t, nil)
+		human := tokenWith(t, map[string]any{jwt.SubjectKey: agentOwner, "arkavo_roles": []any{"user"}})
+		assertAllReleased(t, rewrapAudited(t, p, nil, human, mixedDissemRequests(t)))
+	})
+
+	t.Run("agent token without sub is refused even by a permissive checker", func(t *testing.T) {
+		checker := &fakeChecker{}
+		p, km, buf := releasingProvider(t, checker)
+		claims := agentClaims()
+		delete(claims, jwt.SubjectKey)
+		reqs := []*kaspb.UnsignedRewrapRequest_WithPolicyRequest{
+			requestWithBody(t, policyBytes(t, dissemPolicy(false, "")), "policy-a", "kao-a1", "kao-a2"),
+			requestWithBody(t, policyBytes(t, dissemPolicy(false, otherDID)), "policy-b", "kao-b1", "kao-b2"),
+		}
+		assertAllForbidden(t, rewrapAudited(t, p, agentDPoPKey(t), tokenWith(t, claims), reqs))
+		assert.Equal(t, int32(0), km.decrypts.Load())
+		assert.Equal(t, 0, checker.callCount())
+		assert.Equal(t, agentstatus.ReasonMissingSubject, deniedRecord(t, buf)["reason"])
 	})
 }
