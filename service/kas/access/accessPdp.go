@@ -3,6 +3,8 @@ package access
 import (
 	"context"
 	"errors"
+	"log/slog"
+	"slices"
 	"strconv"
 
 	authzV2 "github.com/opentdf/platform/protocol/go/authorization/v2"
@@ -29,14 +31,30 @@ type PDPAccessResult struct {
 	RequiredObligations []string
 }
 
-func (p *Provider) canAccess(ctx context.Context, token *entity.Token, policies []*Policy, fulfillableObligationFQNs []string) ([]PDPAccessResult, error) {
+// canAccess runs the ABAC decision for each policy. requester is the
+// requesting entity's identifier (the verified token's sub). With
+// enforce_dissem on, a policy with a non-empty dissem list is released only
+// when the list names requester exactly (spec/concepts/access_control.md:
+// the PEP checks the requesting entity's identifier against dissem); the
+// ABAC decision is still required. With it off, dissem is logged as not
+// enforced, as upstream does.
+func (p *Provider) canAccess(ctx context.Context, token *entity.Token, policies []*Policy, fulfillableObligationFQNs []string, requester string) ([]PDPAccessResult, error) {
 	var res []PDPAccessResult
 	var resources []*authzV2.Resource
 	idPolicyMap := make(map[string]*Policy)
 	for i, policy := range policies {
 		if len(policy.Body.Dissem) > 0 {
-			// TODO: Move dissems check to the getdecisions endpoint
-			p.Logger.Error("dissems check is not enabled in v2 platform kas")
+			if !p.EnforceDissem {
+				// TODO: Move dissems check to the getdecisions endpoint
+				p.Logger.Error("dissems check is not enabled in v2 platform kas")
+			} else if !dissemAllows(policy.Body.Dissem, requester) {
+				p.Logger.WarnContext(ctx, "requester is not in the policy dissemination list",
+					slog.String("requester", requester),
+					slog.String("policy_uuid", policy.UUID.String()),
+				)
+				res = append(res, PDPAccessResult{Access: false, Policy: policy})
+				continue
+			}
 		}
 		if len(policy.Body.DataAttributes) > 0 {
 			id := "rewrap-" + strconv.Itoa(i)
@@ -123,4 +141,16 @@ func (p *Provider) checkAttributes(ctx context.Context, resources []*authzV2.Res
 		return nil, errors.Join(ErrDecisionUnexpected, err)
 	}
 	return dr.GetResourceDecisions(), nil
+}
+
+// dissemAllows reports whether a policy's dissemination list admits the
+// requester. An empty list defers entirely to ABAC; a non-empty one must name
+// the requester exactly (identifiers such as DIDs are case-sensitive, so no
+// folding or trimming). An empty requester is never admitted, even by an
+// empty entry.
+func dissemAllows(dissem []string, requester string) bool {
+	if len(dissem) == 0 {
+		return true
+	}
+	return requester != "" && slices.Contains(dissem, requester)
 }

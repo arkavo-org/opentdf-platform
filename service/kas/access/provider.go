@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"time"
 
+	"github.com/go-viper/mapstructure/v2"
 	kaspb "github.com/opentdf/platform/protocol/go/kas"
 	otdf "github.com/opentdf/platform/sdk"
 	"github.com/opentdf/platform/service/internal/security"
@@ -54,6 +55,27 @@ type KASConfig struct {
 	ECTDFEnabled     bool    `mapstructure:"ec_tdf_enabled" json:"ec_tdf_enabled"`
 	Preview          Preview `mapstructure:"preview" json:"preview"`
 	RegisteredKASURI string  `mapstructure:"registered_kas_uri" json:"registered_kas_uri"`
+
+	// EnforceDissem releases a policy with a non-empty dissem list only to a
+	// requester whose token sub the list names exactly, for every caller.
+	// Off (the default) keeps upstream's behaviour: dissem is logged as not
+	// enforced and only the ABAC decision counts.
+	EnforceDissem bool `mapstructure:"enforce_dissem" json:"enforce_dissem"`
+}
+
+// DecodeKASConfig reads services.kas. A string "true"/"false" (what an
+// environment override supplies) decodes into a bool; any other string for a
+// bool field is an error, so a bad value stops the server at startup.
+func DecodeKASConfig(in config.ServiceConfig) (KASConfig, error) {
+	var cfg KASConfig
+	dec, err := mapstructure.NewDecoder(&mapstructure.DecoderConfig{
+		DecodeHook: mapstructure.StringToBoolHookFunc(),
+		Result:     &cfg,
+	})
+	if err != nil {
+		return cfg, err
+	}
+	return cfg, dec.Decode(in)
 }
 
 type Preview struct {

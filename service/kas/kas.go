@@ -8,7 +8,6 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/go-viper/mapstructure/v2"
 	kaspb "github.com/opentdf/platform/protocol/go/kas"
 	"github.com/opentdf/platform/protocol/go/kas/kasconnect"
 	"github.com/opentdf/platform/service/internal/security"
@@ -22,8 +21,8 @@ import (
 
 func OnConfigUpdate(p *access.Provider) serviceregistry.OnConfigUpdateHook {
 	return func(ctx context.Context, cfg config.ServiceConfig) error {
-		var kasCfg access.KASConfig
-		if err := mapstructure.Decode(cfg, &kasCfg); err != nil {
+		kasCfg, err := access.DecodeKASConfig(cfg)
+		if err != nil {
 			return fmt.Errorf("invalid kas cfg [%v] %w", cfg, err)
 		}
 
@@ -44,8 +43,8 @@ func NewRegistration() *serviceregistry.Service[kasconnect.AccessServiceHandler]
 			ConnectRPCFunc: kasconnect.NewAccessServiceHandler,
 			OnConfigUpdate: onConfigUpdate,
 			RegisterFunc: func(srp serviceregistry.RegistrationParams) (kasconnect.AccessServiceHandler, serviceregistry.HandlerServer) {
-				var kasCfg access.KASConfig
-				if err := mapstructure.Decode(srp.Config, &kasCfg); err != nil {
+				kasCfg, err := access.DecodeKASConfig(srp.Config)
+				if err != nil {
 					panic(fmt.Errorf("invalid kas cfg [%v] %w", srp.Config, err))
 				}
 
