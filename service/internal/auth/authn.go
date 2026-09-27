@@ -65,6 +65,7 @@ var (
 		jwa.ES256: true,
 		jwa.ES384: true,
 		jwa.ES512: true,
+		jwa.EdDSA: true,
 		jwa.PS256: true,
 		jwa.PS384: true,
 		jwa.PS512: true,
@@ -108,6 +109,9 @@ type Authentication struct {
 	ipcReauthRoutes []string
 	// Custom Logger
 	logger *logger.Logger
+	// dpopReplay remembers proof ids on COSE_Key-bound tokens (agents) so a
+	// captured proof cannot be replayed while it is still acceptable.
+	dpopReplay *dpopReplayCache
 
 	// Used for testing
 	_testCheckTokenFunc func(ctx context.Context, authHeader []string, dpopInfo receiverInfo, dpopHeader []string, actorHeader []string) (jwt.Token, context.Context, error)
@@ -118,6 +122,7 @@ func NewAuthenticator(ctx context.Context, cfg Config, logger *logger.Logger, we
 	a := &Authentication{
 		enforceDPoP: cfg.EnforceDPoP,
 		logger:      logger,
+		dpopReplay:  newDPoPReplayCache(time.Now),
 	}
 
 	tokenVerifier, oidcConfig, resolvedCfg, err := newTokenVerifier(ctx, cfg.AuthNConfig, a.logger)
@@ -599,14 +604,9 @@ func (a Authentication) validateDPoP(accessToken jwt.Token, acessTokenRaw string
 		return nil, errors.New("got `cnf` in an invalid format")
 	}
 
-	jktI, ok := cnfDict["jkt"]
-	if !ok {
-		return nil, errors.New("missing `jkt` field in `cnf` claim. only thumbprint JWK confirmation is supported")
-	}
-
-	jkt, ok := jktI.(string)
-	if !ok {
-		return nil, fmt.Errorf("invalid `jkt` field in `cnf` claim: %v. the value must be a JWK thumbprint", jkt)
+	jkt, coseBound, err := dpopBinding(cnfDict)
+	if err != nil {
+		return nil, err
 	}
 
 	dpop, err := jws.Parse([]byte(dpopHeader))
@@ -649,10 +649,22 @@ func (a Authentication) validateDPoP(accessToken jwt.Token, acessTokenRaw string
 	if thumbprintStr != jkt {
 		return nil, fmt.Errorf("the `jkt` from the DPoP JWT didn't match the thumbprint from the access token; cnf.jkt=[%v], computed=[%v]", jkt, thumbprintStr)
 	}
+	if coseBound {
+		if err := proofAlgorithmMatchesKey(protectedHeaders.Algorithm(), dpopKey); err != nil {
+			return nil, err
+		}
+	}
 
 	// at this point we have the right key because its thumbprint matches the `jkt` claim
 	// in the validated access token
-	dpopToken, err := jwt.Parse([]byte(dpopHeader), jwt.WithKey(protectedHeaders.Algorithm(), dpopKey))
+	parseOpts := []jwt.ParseOption{jwt.WithKey(protectedHeaders.Algorithm(), dpopKey)}
+	if coseBound {
+		// Agents run on devices whose clocks can run ahead (a Raspberry Pi
+		// without an RTC). Accept an iat up to server.auth.skew in the
+		// future; the jkt path keeps jwx's zero-skew default.
+		parseOpts = append(parseOpts, jwt.WithAcceptableSkew(a.oidcConfiguration.TokenSkew))
+	}
+	dpopToken, err := jwt.Parse([]byte(dpopHeader), parseOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to verify signature on DPoP JWT: %w", err)
 	}
@@ -701,6 +713,11 @@ func (a Authentication) validateDPoP(accessToken jwt.Token, acessTokenRaw string
 	h.Write([]byte(acessTokenRaw))
 	if ath != base64.URLEncoding.WithPadding(base64.NoPadding).EncodeToString(h.Sum(nil)) {
 		return nil, errors.New("incorrect `ath` claim in DPoP JWT")
+	}
+	if coseBound {
+		if err := a.claimProofID(dpopToken, thumbprintStr); err != nil {
+			return nil, err
+		}
 	}
 	return dpopKey, nil
 }
