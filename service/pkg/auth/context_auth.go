@@ -50,6 +50,24 @@ func ContextWithActorSubject(ctx context.Context, actor string) context.Context 
 	return context.WithValue(ctx, actorSubjectKey, actor)
 }
 
+type dpopKeyBoundContextKey struct{}
+
+var dpopKeyBoundKey = dpopKeyBoundContextKey{}
+
+// ContextWithDPoPKeyBound records that the request's DPoP proof was checked
+// under the key-bound rules (the token's cnf carries the key itself, so the
+// proof's algorithm must match that key and its jti is single-use), not only
+// against a cnf.jkt thumbprint.
+func ContextWithDPoPKeyBound(ctx context.Context) context.Context {
+	return context.WithValue(ctx, dpopKeyBoundKey, true)
+}
+
+// IsDPoPKeyBound reports whether ContextWithDPoPKeyBound marked ctx.
+func IsDPoPKeyBound(ctx context.Context) bool {
+	v, ok := ctx.Value(dpopKeyBoundKey).(bool)
+	return ok && v
+}
+
 // GetActorSubjectFromContext returns the verified actor subject stored by
 // ContextWithActorSubject, or "" if no actor token was presented/verified.
 func GetActorSubjectFromContext(ctx context.Context) string {

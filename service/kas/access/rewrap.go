@@ -890,6 +890,9 @@ func (p *Provider) tdf3Rewrap(ctx context.Context, requests []*kaspb.UnsignedRew
 	}
 
 	results := make(policyKAOResults)
+	// From here on only requests with a unique policy Id are handled, so the
+	// error paths below (failAllKaos) cannot overwrite those refusals.
+	requests = p.refuseDuplicatePolicyIDs(ctx, requests, results)
 	var policies []*Policy
 	policyReqs := make(map[*Policy]*kaspb.UnsignedRewrapRequest_WithPolicyRequest)
 	for _, req := range requests {

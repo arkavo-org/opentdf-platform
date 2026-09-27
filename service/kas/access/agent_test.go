@@ -259,7 +259,17 @@ func TestGetEntityInfo_RecognisesAgent(t *testing.T) {
 
 func agentCtx(t *testing.T, key jwk.Key) context.Context {
 	t.Helper()
-	return ctxAuth.ContextWithAuthNInfo(t.Context(), key, agentToken(t), agentRawCWT)
+	return authnCtx(t.Context(), key, agentToken(t))
+}
+
+// authnCtx is what checkToken leaves for a verified bearer: a DPoP key, when
+// there is one, is from a key-bound (cnf.jwk) proof, as agent tokens carry.
+func authnCtx(parent context.Context, key jwk.Key, bearer jwt.Token) context.Context {
+	ctx := ctxAuth.ContextWithAuthNInfo(parent, key, bearer, agentRawCWT)
+	if key != nil {
+		ctx = ctxAuth.ContextWithDPoPKeyBound(ctx)
+	}
+	return ctx
 }
 
 func TestAgentReleaseDenied(t *testing.T) {
@@ -293,6 +303,32 @@ func TestAgentReleaseDenied(t *testing.T) {
 		assert.True(t, p.agentReleaseDenied(agentCtx(t, nil), &s))
 		assert.Equal(t, 0, checker.callCount())
 		assert.Equal(t, reasonNoProofOfPossession, deniedRecord(t, buf)["reason"])
+	})
+
+	t.Run("DPoP key from a cnf.jkt proof: denied without asking status", func(t *testing.T) {
+		log, buf := newAuditBufferLogger()
+		checker := &fakeChecker{}
+		p := &Provider{Logger: log, AgentStatus: checker}
+		s := wantSubject()
+		// A key in context but no key-bound mark: the proof only matched a
+		// thumbprint, so no algorithm-to-key match and no jti replay check ran.
+		ctx := ctxAuth.ContextWithAuthNInfo(t.Context(), agentDPoPKey(t), agentToken(t), agentRawCWT)
+		assert.True(t, p.agentReleaseDenied(ctx, &s))
+		assert.Equal(t, 0, checker.callCount())
+		rec := deniedRecord(t, buf)
+		assert.Equal(t, reasonProofNotKeyBound, rec["reason"])
+		assert.Equal(t, "WARN", rec["level"])
+	})
+
+	t.Run("status client credentials rejected: logged as an error", func(t *testing.T) {
+		log, buf := newAuditBufferLogger()
+		checker := &fakeChecker{err: &agentstatus.DenialError{Reason: agentstatus.ReasonStatusCredentialsRejected, Workload: agentWorkload}}
+		p := &Provider{Logger: log, AgentStatus: checker}
+		s := wantSubject()
+		assert.True(t, p.agentReleaseDenied(agentCtx(t, agentDPoPKey(t)), &s))
+		rec := deniedRecord(t, buf)
+		assert.Equal(t, "ERROR", rec["level"])
+		assert.Equal(t, agentstatus.ReasonStatusCredentialsRejected, rec["reason"])
 	})
 
 	t.Run("nil checker: denied as unconfigured, logged as an error", func(t *testing.T) {
@@ -334,18 +370,23 @@ func TestAgentReleaseDenied(t *testing.T) {
 		assert.NotContains(t, buf.String(), agentDeniedMsg)
 	})
 
-	t.Run("Check runs under a deadline no later than agentStatusDeadline", func(t *testing.T) {
-		var deadline time.Time
-		var had bool
+	// The status client bounds its own calls (2 x its timeout); the gate
+	// passes the caller's context through, so a cancelled or expiring rewrap
+	// stops the check too.
+	t.Run("Check gets the caller's context and no deadline of the gate's own", func(t *testing.T) {
+		type probe struct{}
+		var gotValue any
+		hasDeadline := true
 		p := &Provider{Logger: newTestLogger(), AgentStatus: checkerFunc(func(ctx context.Context, _ agentstatus.Subject) error {
-			deadline, had = ctx.Deadline()
+			gotValue = ctx.Value(probe{})
+			_, hasDeadline = ctx.Deadline()
 			return nil
 		})}
 		s := wantSubject()
-		start := time.Now()
-		assert.False(t, p.agentReleaseDenied(agentCtx(t, agentDPoPKey(t)), &s))
-		require.True(t, had)
-		assert.WithinDuration(t, start.Add(agentStatusDeadline), deadline, time.Second)
+		ctx := context.WithValue(agentCtx(t, agentDPoPKey(t)), probe{}, "caller")
+		assert.False(t, p.agentReleaseDenied(ctx, &s))
+		assert.Equal(t, "caller", gotValue)
+		assert.False(t, hasDeadline)
 	})
 }
 
@@ -449,18 +490,28 @@ func TestAgentReleaseDenied_RealStatusClient(t *testing.T) {
 		}
 	})
 
-	t.Run("a hanging status endpoint is denied within agentStatusDeadline", func(t *testing.T) {
+	t.Run("a hanging status endpoint is denied within the client's timeout", func(t *testing.T) {
 		f := &fakeIdentity{status: eligibleStatus(), hang: true}
 		log, buf := newAuditBufferLogger()
-		// A per-call timeout far beyond the gate's bound, so only the gate's
-		// own deadline can end the wait.
-		p := &Provider{Logger: log, AgentStatus: realChecker(t, f, time.Minute)}
+		p := &Provider{Logger: log, AgentStatus: realChecker(t, f, 50*time.Millisecond)}
 		s := wantSubject()
 		start := time.Now()
 		assert.True(t, p.agentReleaseDenied(agentCtx(t, agentDPoPKey(t)), &s))
-		elapsed := time.Since(start)
-		assert.GreaterOrEqual(t, elapsed, agentStatusDeadline-100*time.Millisecond)
-		assert.Less(t, elapsed, agentStatusDeadline+time.Second)
+		assert.Less(t, time.Since(start), time.Second)
+		assert.Equal(t, agentstatus.ReasonUnreachable, deniedRecord(t, buf)["reason"])
+	})
+
+	// Mutant M16 (Task 8 review): the gate must not detach the check from the
+	// caller, e.g. by deriving its context from context.Background().
+	t.Run("a cancelled caller with a cold cache is denied without calling identity", func(t *testing.T) {
+		f := &fakeIdentity{status: eligibleStatus()}
+		log, buf := newAuditBufferLogger()
+		p := &Provider{Logger: log, AgentStatus: realChecker(t, f, time.Second)}
+		s := wantSubject()
+		ctx, cancel := context.WithCancel(agentCtx(t, agentDPoPKey(t)))
+		cancel()
+		assert.True(t, p.agentReleaseDenied(ctx, &s))
+		assert.Equal(t, int32(0), f.calls.Load())
 		assert.Equal(t, agentstatus.ReasonUnreachable, deniedRecord(t, buf)["reason"])
 	})
 }
@@ -546,7 +597,7 @@ func twoPolicyRequests(t *testing.T) []*kaspb.UnsignedRewrapRequest_WithPolicyRe
 // events it records are flushed to the provider's log.
 func rewrapAudited(t *testing.T, p *Provider, key jwk.Key, bearer jwt.Token, reqs []*kaspb.UnsignedRewrapRequest_WithPolicyRequest) policyKAOResults {
 	t.Helper()
-	ctx := ctxAuth.ContextWithAuthNInfo(t.Context(), key, bearer, agentRawCWT)
+	ctx := authnCtx(t.Context(), key, bearer)
 	info, err := getEntityInfo(ctx, p.Logger)
 	require.NoError(t, err)
 	var results policyKAOResults

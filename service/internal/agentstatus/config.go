@@ -26,7 +26,9 @@ type Config struct {
 	// ClientID and ClientSecret mint the service CWT (client_credentials).
 	ClientID     string `mapstructure:"client_id" json:"client_id"`
 	ClientSecret Secret `mapstructure:"client_secret" json:"client_secret"`
-	// Timeout bounds each call to identity; zero means 3 s.
+	// Timeout bounds each call to identity; zero means 3 s. A whole check is
+	// bounded at twice this. At most 5 s (the status lease), so a live answer
+	// is never older than a cached one could be.
 	Timeout time.Duration `mapstructure:"timeout" json:"timeout"`
 }
 
@@ -71,6 +73,9 @@ func (c Config) validate() error {
 	}
 	if c.ClientID == "" || c.ClientSecret == "" {
 		return errors.New("agent_status.client_id and agent_status.client_secret are required")
+	}
+	if c.Timeout > maxStatusTTL {
+		return fmt.Errorf("agent_status.timeout must be at most %s (the status lease)", maxStatusTTL)
 	}
 	return nil
 }

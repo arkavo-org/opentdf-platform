@@ -509,8 +509,8 @@ func TestCheck_ServiceToken(t *testing.T) {
 		assert.Equal(t, 2, f.tokens())
 		assert.Equal(t, 2, f.calls())
 	})
-	// The token endpoint's own 404 or 403 says nothing about the workload.
-	for _, code := range []int{http.StatusNotFound, http.StatusForbidden, http.StatusUnauthorized, http.StatusInternalServerError} {
+	// The token endpoint's own 404 says nothing about the workload.
+	for _, code := range []int{http.StatusNotFound, http.StatusInternalServerError} {
 		t.Run(fmt.Sprintf("token endpoint %d denies as unreachable", code), func(t *testing.T) {
 			f := &fakeIdentity{tokenCode: code}
 			c, _, _ := newTestClient(t, f)
@@ -519,13 +519,25 @@ func TestCheck_ServiceToken(t *testing.T) {
 			assert.Equal(t, 0, f.calls())
 		})
 	}
-	t.Run("wrong client secret denies", func(t *testing.T) {
+	// A 401 or 403 from the token endpoint is identity refusing this
+	// platform's credentials: an operator must fix them, so it gets its own
+	// reason rather than reading as a transient outage.
+	for _, code := range []int{http.StatusUnauthorized, http.StatusForbidden} {
+		t.Run(fmt.Sprintf("token endpoint %d denies as rejected credentials", code), func(t *testing.T) {
+			f := &fakeIdentity{tokenCode: code}
+			c, _, _ := newTestClient(t, f)
+			assert.Equal(t, ReasonStatusCredentialsRejected, denialReason(t, c.Check(t.Context(), subject())))
+			assert.Equal(t, 1, f.tokens(), "a token failure is not retried")
+			assert.Equal(t, 0, f.calls())
+		})
+	}
+	t.Run("wrong client secret denies as rejected credentials", func(t *testing.T) {
 		f := &fakeIdentity{}
 		srv := httptest.NewServer(f)
 		t.Cleanup(srv.Close)
 		c, err := New(Config{URL: srv.URL, ClientID: fakeClientID, ClientSecret: "wrong"})
 		require.NoError(t, err)
-		assert.Equal(t, ReasonUnreachable, denialReason(t, c.Check(t.Context(), subject())))
+		assert.Equal(t, ReasonStatusCredentialsRejected, denialReason(t, c.Check(t.Context(), subject())))
 		assert.Equal(t, 0, f.calls())
 	})
 	for name, body := range map[string]map[string]any{
@@ -711,4 +723,49 @@ func TestSecretsNeverRendered(t *testing.T) {
 		assert.NotContains(t, r, fakeClientSecret)
 		assert.NotContains(t, r, fakeTokenPrefix)
 	}
+}
+
+// hangingIdentity mints service tokens and never answers a status request
+// until the caller gives up.
+func hangingIdentity() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/oauth/token" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"access_token": fakeTokenPrefix + "1", "expires_in": 3600})
+			return
+		}
+		<-r.Context().Done()
+	})
+}
+
+// Check bounds itself at 2 x timeout whatever the caller's context allows,
+// so a KAS rewrap is never held longer than that by identity.
+func TestCheck_OverallDeadline(t *testing.T) {
+	srv := httptest.NewServer(hangingIdentity())
+	t.Cleanup(srv.Close)
+	const timeout = 50 * time.Millisecond
+	c, err := New(Config{URL: srv.URL, ClientID: fakeClientID, ClientSecret: fakeClientSecret, Timeout: timeout})
+	require.NoError(t, err)
+	// Defeat the per-call bound so only Check's own deadline can end the wait.
+	c.http.Timeout = time.Minute
+
+	start := time.Now()
+	assert.Equal(t, ReasonUnreachable, denialReason(t, c.Check(t.Context(), subject())))
+	elapsed := time.Since(start)
+	assert.GreaterOrEqual(t, elapsed, 2*timeout-10*time.Millisecond)
+	assert.Less(t, elapsed, time.Second)
+}
+
+// The overall deadline is derived from the caller's context: a caller that
+// gives up sooner stops the check sooner.
+func TestCheck_CallerDeadlineWins(t *testing.T) {
+	srv := httptest.NewServer(hangingIdentity())
+	t.Cleanup(srv.Close)
+	c, err := New(Config{URL: srv.URL, ClientID: fakeClientID, ClientSecret: fakeClientSecret, Timeout: 5 * time.Second})
+	require.NoError(t, err)
+	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	assert.Equal(t, ReasonUnreachable, denialReason(t, c.Check(ctx, subject())))
+	assert.Less(t, time.Since(start), time.Second)
 }

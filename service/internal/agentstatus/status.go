@@ -14,22 +14,26 @@ const (
 // Denial reasons. They go to the server log only; the KAS answers every
 // denial with its generic "forbidden".
 const (
-	ReasonUnconfigured        = "agent status not configured"
-	ReasonUnreachable         = "status service unreachable"
-	ReasonUnknownWorkload     = "workload unknown to identity (404)"
-	ReasonStatusForbidden     = "misconfiguration: this platform's status client is not in authnz-rs AGENT_STATUS_CLIENT_IDS (403)"
-	ReasonMissingSubject      = "agent token has no sub"
-	ReasonMissingWorkload     = "agent token has no arkavo_workload (pre-workload token)"
-	ReasonMissingSwarm        = "agent token has no arkavo_swarm"
-	ReasonMalformedWorkload   = "arkavo_workload is not wl- followed by 32 lowercase hex"
-	ReasonWorkloadMismatch    = "status is for a different workload"
-	ReasonNotEligible         = "workload is not eligible"
-	ReasonGenerationRegressed = "status generation went backwards"
-	ReasonMissingGeneration   = "status has no generation (contract v1 starts at 1)"
-	ReasonDIDMismatch         = "sub is not the workload's current_did"
-	ReasonSwarmMismatch       = "arkavo_swarm does not match the workload's swarm"
-	ReasonMissingOwner        = "agent token has no arkavo_account_id"
-	ReasonOwnerMismatch       = "arkavo_account_id is not the workload's owner"
+	ReasonUnconfigured    = "agent status not configured"
+	ReasonUnreachable     = "status service unreachable"
+	ReasonUnknownWorkload = "workload unknown to identity (404)"
+	ReasonStatusForbidden = "misconfiguration: this platform's status client is not in authnz-rs AGENT_STATUS_CLIENT_IDS (403)"
+	// ReasonStatusCredentialsRejected is the token endpoint refusing this
+	// platform's client_id/client_secret (401 or 403): a wrong secret, not a
+	// transient fault.
+	ReasonStatusCredentialsRejected = "misconfiguration: identity rejected agent_status.client_id/client_secret at /oauth/token"
+	ReasonMissingSubject            = "agent token has no sub"
+	ReasonMissingWorkload           = "agent token has no arkavo_workload (pre-workload token)"
+	ReasonMissingSwarm              = "agent token has no arkavo_swarm"
+	ReasonMalformedWorkload         = "arkavo_workload is not wl- followed by 32 lowercase hex"
+	ReasonWorkloadMismatch          = "status is for a different workload"
+	ReasonNotEligible               = "workload is not eligible"
+	ReasonGenerationRegressed       = "status generation went backwards"
+	ReasonMissingGeneration         = "status has no generation (contract v1 starts at 1)"
+	ReasonDIDMismatch               = "sub is not the workload's current_did"
+	ReasonSwarmMismatch             = "arkavo_swarm does not match the workload's swarm"
+	ReasonMissingOwner              = "agent token has no arkavo_account_id"
+	ReasonOwnerMismatch             = "arkavo_account_id is not the workload's owner"
 )
 
 // Status is the body of GET /agents/workloads/{workload}/status (contract v1).

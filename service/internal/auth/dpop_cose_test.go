@@ -128,6 +128,28 @@ func TestCOSEBoundDPoP(t *testing.T) {
 		assert.Equal(t, []byte(edPub), okp.X())
 	})
 
+	t.Run("a cnf key proof marks the context key-bound", func(t *testing.T) {
+		proof := agentProof(t, edPriv, jwa.EdDSA, edToken, rewrapProcedure, "jti-ed-mark")
+		_, ctx, err := a.checkToken(t.Context(), []string{"DPoP " + edToken}, rewrapReceiver(), []string{proof}, nil)
+		require.NoError(t, err)
+		assert.True(t, ctxAuth.IsDPoPKeyBound(ctx))
+	})
+
+	t.Run("a cnf.jkt proof leaves the context unmarked", func(t *testing.T) {
+		ecPriv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		require.NoError(t, err)
+		ecJWK, err := jwk.FromRaw(&ecPriv.PublicKey)
+		require.NoError(t, err)
+		thumb, err := ecJWK.Thumbprint(crypto.SHA256)
+		require.NoError(t, err)
+		jktToken := mint(map[any]any{"jkt": base64.RawURLEncoding.EncodeToString(thumb)})
+		proof := agentProof(t, ecPriv, jwa.ES256, jktToken, rewrapProcedure, "jti-jkt")
+		_, ctx, err := a.checkToken(t.Context(), []string{"DPoP " + jktToken}, rewrapReceiver(), []string{proof}, nil)
+		require.NoError(t, err)
+		require.NotNil(t, ctxAuth.GetJWKFromContext(ctx, a.logger), "the jkt proof's key still reaches the context")
+		assert.False(t, ctxAuth.IsDPoPKeyBound(ctx))
+	})
+
 	t.Run("P-256 proof from the cnf key is accepted", func(t *testing.T) {
 		ecPriv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 		require.NoError(t, err)
@@ -368,7 +390,7 @@ func proofWithID(t *testing.T, jti string, iat time.Time) jwt.Token {
 
 func TestClaimProofID_FailsClosedWithoutCache(t *testing.T) {
 	proof := proofWithID(t, "j", time.Now())
-	require.ErrorContains(t, Authentication{}.claimProofID(proof, "thumb", time.Now()), "not configured")
+	require.ErrorContains(t, Authentication{}.claimProofID(proof, time.Time{}, "thumb", time.Now()), "not configured")
 }
 
 // validateDPoP decides a proof is still live on its own clock reading; the
@@ -384,8 +406,8 @@ func TestClaimProofID_ReplayWhenCacheClockRunsAhead(t *testing.T) {
 	// the cache's clock.
 	proof := proofWithID(t, "j", validatorNow.Add(-time.Hour+time.Second))
 
-	require.NoError(t, a.claimProofID(proof, "thumb", validatorNow))
-	require.ErrorContains(t, a.claimProofID(proof, "thumb", validatorNow), "already been used")
+	require.NoError(t, a.claimProofID(proof, time.Time{}, "thumb", validatorNow))
+	require.ErrorContains(t, a.claimProofID(proof, time.Time{}, "thumb", validatorNow), "already been used")
 }
 
 func TestClaimProofID_BoundsJTILength(t *testing.T) {
@@ -394,6 +416,32 @@ func TestClaimProofID_BoundsJTILength(t *testing.T) {
 		oidcConfiguration: AuthNConfig{DPoPSkew: time.Hour},
 		dpopReplay:        newDPoPReplayCache(func() time.Time { return now }),
 	}
-	require.NoError(t, a.claimProofID(proofWithID(t, strings.Repeat("a", 256), now), "thumb", now))
-	require.ErrorContains(t, a.claimProofID(proofWithID(t, strings.Repeat("b", 257), now), "thumb", now), "`jti` is longer than 256 bytes")
+	require.NoError(t, a.claimProofID(proofWithID(t, strings.Repeat("a", 256), now), time.Time{}, "thumb", now))
+	require.ErrorContains(t, a.claimProofID(proofWithID(t, strings.Repeat("b", 257), now), time.Time{}, "thumb", now), "`jti` is longer than 256 bytes")
+}
+
+// A replay entry never outlives the access token the proof is bound to (by
+// ath): after the token's exp + skew the token itself is refused, so
+// keeping its proof ids for the rest of iat + dpopskew only costs memory.
+func TestClaimProofID_EntryExpiry(t *testing.T) {
+	now := time.Unix(1_790_000_000, 0)
+	for name, tt := range map[string]struct {
+		tokenExp time.Time
+		want     time.Time
+	}{
+		"token expires before the proof would": {now.Add(15 * time.Minute), now.Add(16 * time.Minute)},
+		"proof expires before the token":       {now.Add(2 * time.Hour), now.Add(time.Hour)},
+		"token without exp":                    {time.Time{}, now.Add(time.Hour)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			a := Authentication{
+				oidcConfiguration: AuthNConfig{DPoPSkew: time.Hour, TokenSkew: time.Minute},
+				dpopReplay:        newDPoPReplayCache(func() time.Time { return now }),
+			}
+			require.NoError(t, a.claimProofID(proofWithID(t, "j", now), tt.tokenExp, "thumb", now))
+			got, ok := a.dpopReplay.seen[sha256.Sum256([]byte("thumb.j"))]
+			require.True(t, ok)
+			assert.WithinDuration(t, tt.want, got, 0)
+		})
+	}
 }

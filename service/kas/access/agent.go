@@ -5,7 +5,6 @@ import (
 	"errors"
 	"log/slog"
 	"slices"
-	"time"
 
 	"github.com/lestrrat-go/jwx/v2/jwt"
 	kaspb "github.com/opentdf/platform/protocol/go/kas"
@@ -27,12 +26,10 @@ const (
 
 	agentDeniedMsg            = "agent rewrap denied"
 	reasonNoProofOfPossession = "agent token presented without a DPoP proof"
-
-	// agentStatusDeadline bounds one gate decision, however many calls to
-	// identity it makes (up to four: token, status, and a retry of both
-	// after a 401). It is contract v1's status lease: identity being slow
-	// cannot hold a rewrap longer than a quarantine takes to reach this KAS.
-	agentStatusDeadline = 5 * time.Second
+	// reasonProofNotKeyBound: the proof matched only a cnf.jkt thumbprint, so
+	// its algorithm was not held to the key and its jti was not spent.
+	// authnz-rs binds every agent token to a cnf key.
+	reasonProofNotKeyBound = "agent token DPoP binding is not key-bound (cnf.jkt instead of a cnf key)"
 )
 
 // agentFromToken returns the agent a verified bearer describes, or nil when
@@ -90,10 +87,12 @@ func hasAgentRole(roles any) bool {
 }
 
 // agentReleaseDenied reports whether an agent must be refused now. It holds
-// that the agent proved possession of its cnf key (the interceptor put the
-// DPoP key in context) and that authnz-rs says its workload is eligible for
-// this DID, swarm and owner. The reason is logged, never returned to the
-// caller.
+// that the agent proved possession of its cnf key under the key-bound rules
+// (the interceptor put the DPoP key in context and marked it key-bound) and
+// that authnz-rs says its workload is eligible for this DID, swarm and
+// owner. The status client bounds its own calls; ctx is the caller's, so a
+// cancelled rewrap stops the check. The reason is logged, never returned to
+// the caller.
 func (p *Provider) agentReleaseDenied(ctx context.Context, agent *agentstatus.Subject) bool {
 	var err error
 	switch {
@@ -103,12 +102,12 @@ func (p *Provider) agentReleaseDenied(ctx context.Context, agent *agentstatus.Su
 		err = &agentstatus.DenialError{Reason: agentstatus.ReasonMissingSubject, Workload: agent.Workload}
 	case ctxAuth.GetJWKFromContext(ctx, p.Logger) == nil:
 		err = &agentstatus.DenialError{Reason: reasonNoProofOfPossession, Workload: agent.Workload}
+	case !ctxAuth.IsDPoPKeyBound(ctx):
+		err = &agentstatus.DenialError{Reason: reasonProofNotKeyBound, Workload: agent.Workload}
 	case p.AgentStatus == nil:
 		err = &agentstatus.DenialError{Reason: agentstatus.ReasonUnconfigured, Workload: agent.Workload}
 	default:
-		checkCtx, cancel := context.WithTimeout(ctx, agentStatusDeadline)
-		err = p.AgentStatus.Check(checkCtx, *agent)
-		cancel()
+		err = p.AgentStatus.Check(ctx, *agent)
 	}
 	if err == nil {
 		return false
@@ -137,9 +136,10 @@ func (p *Provider) logAgentDenial(ctx context.Context, agent *agentstatus.Subjec
 		if d.Cause != nil {
 			attrs = append(attrs, slog.String("cause", d.Cause.Error()))
 		}
-		// These two refuse every agent until an operator fixes config, so they
+		// These refuse every agent until an operator fixes config, so they
 		// are errors rather than per-agent warnings.
-		if d.Reason == agentstatus.ReasonStatusForbidden || d.Reason == agentstatus.ReasonUnconfigured {
+		switch d.Reason {
+		case agentstatus.ReasonStatusForbidden, agentstatus.ReasonStatusCredentialsRejected, agentstatus.ReasonUnconfigured:
 			level = slog.LevelError
 		}
 	} else {
@@ -151,34 +151,70 @@ func (p *Provider) logAgentDenial(ctx context.Context, agent *agentstatus.Subjec
 // denyAgentRewrap refuses every KAO of every request with the "forbidden" an
 // ABAC denial produces, and audits each as a failure. It runs before any KAO
 // is unwrapped, so a refused agent learns nothing about its KAOs: a tampered
-// binding and a valid one get the same answer. The policy is decoded only to
-// name it in the audit record.
+// binding and a valid one get the same answer.
 func (p *Provider) denyAgentRewrap(ctx context.Context, requests []*kaspb.UnsignedRewrapRequest_WithPolicyRequest) policyKAOResults {
 	results := make(policyKAOResults)
 	for _, req := range requests {
-		policyID := req.GetPolicy().GetId()
-		if policyID == "" {
+		if req.GetPolicy().GetId() == "" {
 			continue
 		}
-		kaoResults := make(map[string]kaoResult)
-		results[policyID] = kaoResults
-		policy, err := decodePolicy(req.GetPolicy().GetBody())
-		if err != nil {
-			policy = &Policy{}
-		}
-		kasPolicy := ConvertToAuditKasPolicy(*policy)
-		for _, kao := range req.GetKeyAccessObjects() {
-			p.Logger.Audit.RewrapFailure(ctx, audit.RewrapAuditEventParams{
-				Policy:        kasPolicy,
-				TDFFormat:     "tdf3",
-				Algorithm:     req.GetAlgorithm(),
-				PolicyBinding: kao.GetKeyAccessObject().GetPolicyBinding().GetHash(),
-				KeyID:         kao.GetKeyAccessObject().GetKid(),
-			})
-			failedKAORewrap(kaoResults, kao, err403("forbidden"))
-		}
+		p.refuseRequest(ctx, results, req, err403("forbidden"))
 	}
 	return results
+}
+
+// refuseRequest fails every KAO of req with err and audits each as a
+// failure, without unwrapping anything. Requests sharing a policy Id share
+// one result map, so none of their KAOs drops out of the response. The
+// policy is decoded only to name it in the audit record.
+func (p *Provider) refuseRequest(ctx context.Context, results policyKAOResults, req *kaspb.UnsignedRewrapRequest_WithPolicyRequest, err error) {
+	policyID := req.GetPolicy().GetId()
+	kaoResults, ok := results[policyID]
+	if !ok {
+		kaoResults = make(map[string]kaoResult)
+		results[policyID] = kaoResults
+	}
+	policy, decodeErr := decodePolicy(req.GetPolicy().GetBody())
+	if decodeErr != nil {
+		policy = &Policy{}
+	}
+	kasPolicy := ConvertToAuditKasPolicy(*policy)
+	for _, kao := range req.GetKeyAccessObjects() {
+		p.Logger.Audit.RewrapFailure(ctx, audit.RewrapAuditEventParams{
+			Policy:        kasPolicy,
+			TDFFormat:     "tdf3",
+			Algorithm:     req.GetAlgorithm(),
+			PolicyBinding: kao.GetKeyAccessObject().GetPolicyBinding().GetHash(),
+			KeyID:         kao.GetKeyAccessObject().GetKid(),
+		})
+		failedKAORewrap(kaoResults, kao, err)
+	}
+}
+
+// refuseDuplicatePolicyIDs fails every request whose policy Id another
+// request also carries, and returns the rest. Results are keyed by policy
+// Id, so two such requests cannot both be answered: without this the later
+// one's results replace the earlier's, its KAOs are then looked up in the
+// wrong map, and an unmatched KAO reaches Encapsulate with no key. Requests
+// without a policy Id pass through untouched, as before.
+func (p *Provider) refuseDuplicatePolicyIDs(ctx context.Context, requests []*kaspb.UnsignedRewrapRequest_WithPolicyRequest, results policyKAOResults) []*kaspb.UnsignedRewrapRequest_WithPolicyRequest {
+	seen := make(map[string]int, len(requests))
+	for _, req := range requests {
+		if id := req.GetPolicy().GetId(); id != "" {
+			seen[id]++
+		}
+	}
+	unique := make([]*kaspb.UnsignedRewrapRequest_WithPolicyRequest, 0, len(requests))
+	for _, req := range requests {
+		id := req.GetPolicy().GetId()
+		if id == "" || seen[id] == 1 {
+			unique = append(unique, req)
+			continue
+		}
+		p.Logger.WarnContext(ctx, "rewrap: policy id shared by more than one request", slog.String("policy_id", id))
+		p.refuseRequest(ctx, results, req, err400("bad request"))
+	}
+	return unique
 }
 
 // dissemAllows reports whether a policy's dissemination list admits an agent.

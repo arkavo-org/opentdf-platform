@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -15,6 +16,8 @@ func TestConfigValidate(t *testing.T) {
 	ok := Config{URL: "https://identity.arkavo.net", ClientID: "opentdf", ClientSecret: "s"}
 	require.NoError(t, ok.validate())
 	require.NoError(t, Config{URL: "http://127.0.0.1:8081", ClientID: "c", ClientSecret: "s"}.validate())
+	require.NoError(t, Config{URL: "https://identity.arkavo.net", ClientID: "c", ClientSecret: "s", Timeout: maxStatusTTL}.validate(),
+		"a timeout equal to the status lease is allowed")
 
 	for name, cfg := range map[string]Config{
 		"plain http off loopback":         {URL: "http://identity.arkavo.net", ClientID: "c", ClientSecret: "s"},
@@ -25,6 +28,9 @@ func TestConfigValidate(t *testing.T) {
 		"no host":                         {URL: "https://", ClientID: "c", ClientSecret: "s"},
 		"no client id":                    {URL: "https://identity.arkavo.net", ClientSecret: "s"},
 		"no client secret":                {URL: "https://identity.arkavo.net", ClientID: "c"},
+		// A live answer could otherwise be older than the 5 s lease a
+		// quarantine is promised to land within.
+		"timeout longer than the status lease": {URL: "https://identity.arkavo.net", ClientID: "c", ClientSecret: "s", Timeout: maxStatusTTL + time.Millisecond},
 	} {
 		t.Run(name, func(t *testing.T) { require.Error(t, cfg.validate()) })
 	}

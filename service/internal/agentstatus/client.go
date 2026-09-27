@@ -27,18 +27,27 @@ const (
 	// authnz-rs issues them for an hour.
 	maxTokenLifetime = time.Hour
 	maxBodyBytes     = 64 << 10
+	// checkTimeouts is how many per-call timeouts one Check may take: a
+	// token call and a status call.
+	checkTimeouts = 2
 )
 
-var errMalformedWorkload = errors.New("workload id is not contract v1 shaped")
+var (
+	errMalformedWorkload = errors.New("workload id is not contract v1 shaped")
+	// errCredentialsRejected is the token endpoint answering 401 or 403:
+	// identity refuses this platform's client_id/client_secret.
+	errCredentialsRejected = errors.New("service token: identity rejected the client credentials")
+)
 
 // Client checks agent workloads against authnz-rs. A status that allows the
 // agent is cached for min(valid_until-now, 5 s); a denying one never is. The
 // highest generation seen per workload is kept for the process lifetime, so
 // a rolled-back or replayed status is refused.
 type Client struct {
-	cfg  Config
-	http *http.Client
-	now  func() time.Time
+	cfg     Config
+	http    *http.Client
+	now     func() time.Time
+	timeout time.Duration
 
 	mu        sync.Mutex
 	token     Secret
@@ -66,6 +75,7 @@ func New(cfg Config) (*Client, error) {
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 		},
 		now:       time.Now,
+		timeout:   timeout,
 		cache:     make(map[string]cachedStatus),
 		highWater: make(map[string]uint64),
 	}, nil
@@ -83,13 +93,18 @@ func (c *Client) LogValue() slog.Value {
 	return slog.GroupValue(slog.String("url", c.cfg.URL), slog.String("client_id", c.cfg.ClientID))
 }
 
-// Check implements Checker. Denials are returned through explicit nil
-// checks: returning a nil *DenialError as error would be a non-nil interface
-// and read as a denial of every eligible agent.
+// Check implements Checker. It bounds itself at twice the per-call timeout
+// (derived from ctx, so a caller that gives up sooner wins): a token call
+// and a status call fit, and a retry after a 401 is cut short rather than
+// holding the rewrap for four timeouts. Denials are returned through
+// explicit nil checks: returning a nil *DenialError as error would be a
+// non-nil interface and read as a denial of every eligible agent.
 func (c *Client) Check(ctx context.Context, s Subject) error {
 	if d := checkSubject(s); d != nil {
 		return d
 	}
+	ctx, cancel := context.WithTimeout(ctx, checkTimeouts*c.timeout)
+	defer cancel()
 	if d := c.decide(ctx, s); d != nil {
 		return d
 	}
@@ -111,12 +126,16 @@ type httpStatusError struct{ code int }
 
 func (e *httpStatusError) Error() string { return fmt.Sprintf("identity returned HTTP %d", e.code) }
 
-// fetchFailureReason: every failure denies. A 404 (unknown workload) and a
-// 403 (this platform's client is not in AGENT_STATUS_CLIENT_IDS, i.e.
-// misconfiguration) get their own reasons. Everything else, including a
-// timeout, a token-endpoint failure or a 401 that survived the retry, is
-// "unreachable".
+// fetchFailureReason: every failure denies. A 404 (unknown workload), a 403
+// (this platform's client is not in AGENT_STATUS_CLIENT_IDS) and a 401 or
+// 403 from the token endpoint (wrong client_id/client_secret) get their own
+// reasons; the last two are misconfiguration. Everything else, including a
+// timeout, another token-endpoint failure or a 401 that survived the retry,
+// is "unreachable".
 func fetchFailureReason(err error) string {
+	if errors.Is(err, errCredentialsRejected) {
+		return ReasonStatusCredentialsRejected
+	}
 	var hse *httpStatusError
 	if errors.As(err, &hse) {
 		switch hse.code {
@@ -240,7 +259,11 @@ func (c *Client) serviceToken(ctx context.Context, fresh bool) (Secret, error) {
 		var hse *httpStatusError
 		if errors.As(err, &hse) {
 			// Dropped as a type: the token endpoint's 404 or 403 says nothing
-			// about the workload, and its 401 must not look like a stale CWT.
+			// about the workload, and its 401 must not look like a stale CWT
+			// (fetch would retry it).
+			if hse.code == http.StatusUnauthorized || hse.code == http.StatusForbidden {
+				return "", fmt.Errorf("%w (HTTP %d)", errCredentialsRejected, hse.code)
+			}
 			return "", fmt.Errorf("service token: identity returned HTTP %d", hse.code)
 		}
 		return "", fmt.Errorf("service token: %w", err)
