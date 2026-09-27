@@ -6,6 +6,7 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"encoding/base64"
+	"math"
 	"testing"
 	"time"
 
@@ -118,6 +119,16 @@ func TestCnfClaim_RefusesUnsupportedKeys(t *testing.T) {
 		{"alg disagrees with key type", map[any]any{1: 1, 3: -7, -1: 6, -2: []byte(pub)}, "does not match its key type"},
 		{"compressed P-256 point", map[any]any{1: 2, -1: 1, -2: x, -3: true}, "compressed points"},
 		{"point off the curve", map[any]any{1: 2, -1: 1, -2: x, -3: offCurveY}, "not a valid point"},
+		{"OKP kty with the P-256 crv", map[any]any{1: 1, -1: 1, -2: x, -3: y}, "neither OKP/Ed25519 nor EC2/P-256"},
+		{"EC2 kty with the Ed25519 crv", map[any]any{1: 2, -1: 6, -2: []byte(pub)}, "neither OKP/Ed25519 nor EC2/P-256"},
+		{"P-256 key declaring EdDSA", map[any]any{1: 2, 3: -8, -1: 1, -2: x, -3: y}, "does not match its key type"},
+		{"Ed25519 key without x", map[any]any{1: 1, -1: 6}, "x is 0 bytes"},
+		// COSE integers are CBOR integers: a float that happens to equal one,
+		// or an unsigned value that only wraps to one, is not that label.
+		{"kty as a float", map[any]any{1: 1.0, -1: 6, -2: []byte(pub)}, "neither OKP/Ed25519 nor EC2/P-256"},
+		{"crv as a float", map[any]any{1: 1, -1: 6.0, -2: []byte(pub)}, "neither OKP/Ed25519 nor EC2/P-256"},
+		{"alg as a float", map[any]any{1: 1, 3: -8.0, -1: 6, -2: []byte(pub)}, "does not match its key type"},
+		{"alg that wraps to EdDSA as int64", map[any]any{1: 1, 3: uint64(math.MaxUint64 - 7), -1: 6, -2: []byte(pub)}, "does not match its key type"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

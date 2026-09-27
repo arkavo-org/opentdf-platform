@@ -445,3 +445,33 @@ func TestClaimProofID_EntryExpiry(t *testing.T) {
 		})
 	}
 }
+
+// An unsupported COSE_Key does not fail token verification: the verifier
+// keeps a marker in cnf so the token still demands a proof, and
+// validateDPoP refuses it there. Dropping cnf instead would let the token
+// skip proof of possession.
+func TestVerifyAccessToken_UnsupportedCOSEKeyIsRefusedAtDPoP(t *testing.T) {
+	a, mint := newAgentAuth(t)
+	ecPriv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	p384ish := p256CNF(&ecPriv.PublicKey)
+	coseKey, ok := p384ish[1].(map[any]any)
+	require.True(t, ok)
+	coseKey[-1] = 2
+	raw := mint(p384ish)
+
+	tok, err := a.tokenVerifier.VerifyAccessToken(t.Context(), raw)
+	require.NoError(t, err)
+	cnf, ok := tok.Get("cnf")
+	require.True(t, ok, "cnf must survive verification")
+	members, ok := cnf.(map[string]any)
+	require.True(t, ok)
+	assert.Contains(t, members, cnfUnsupportedMember)
+	assert.NotContains(t, members, "jwk")
+
+	_, edPriv, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	proof := agentProof(t, edPriv, jwa.EdDSA, raw, rewrapProcedure, "jti-unsupported-e2e")
+	_, _, err = a.validateDPoP(tok, raw, rewrapReceiver(), []string{proof})
+	require.ErrorContains(t, err, "unsupported COSE_Key in `cnf` claim")
+}

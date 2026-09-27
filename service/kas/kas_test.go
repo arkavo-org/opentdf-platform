@@ -1,11 +1,16 @@
 package kas
 
 import (
+	"bytes"
+	"context"
+	"log/slog"
 	"testing"
 
+	"github.com/opentdf/platform/service/internal/agentstatus"
 	"github.com/opentdf/platform/service/kas/access"
 	"github.com/opentdf/platform/service/logger"
 	"github.com/opentdf/platform/service/pkg/serviceregistry"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/types/known/structpb"
 )
@@ -58,4 +63,22 @@ func TestRegisterKASWellKnown_NoRegistrarIsNoOp(t *testing.T) {
 		WellKnownConfig: nil,
 	}
 	require.NoError(t, registerKASWellKnown(srp, access.KASConfig{RegisteredKASURI: "https://x"}))
+}
+
+type allowAll struct{}
+
+func (allowAll) Check(context.Context, agentstatus.Subject) error { return nil }
+
+// The KAS is what refuses agents without a checker, so it is what warns.
+func TestWarnIfAgentStatusUnconfigured(t *testing.T) {
+	var buf bytes.Buffer
+	l := &logger.Logger{Logger: slog.New(slog.NewJSONHandler(&buf, nil))}
+
+	warnIfAgentStatusUnconfigured(l, nil)
+	assert.Contains(t, buf.String(), `"level":"WARN"`)
+	assert.Contains(t, buf.String(), "server.auth.agent_status is not configured")
+
+	buf.Reset()
+	warnIfAgentStatusUnconfigured(l, allowAll{})
+	assert.Empty(t, buf.String())
 }

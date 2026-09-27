@@ -3,6 +3,7 @@ package access
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"slices"
 
@@ -30,6 +31,7 @@ const (
 	// its algorithm was not held to the key and its jti was not spent.
 	// authnz-rs binds every agent token to a cnf key.
 	reasonProofNotKeyBound = "agent token DPoP binding is not key-bound (cnf.jkt instead of a cnf key)"
+	reasonCheckerPanicked  = "agent status checker panicked"
 )
 
 // agentFromToken returns the agent a verified bearer describes, or nil when
@@ -72,6 +74,8 @@ func isDeviceNPE(npe any) bool {
 	return ok && t == npeTypeDevice
 }
 
+// hasAgentRole reads arkavo_roles as a string or []any; the verifiers
+// decode every array claim to []any, so no other slice type can arrive.
 func hasAgentRole(roles any) bool {
 	switch r := roles.(type) {
 	case string:
@@ -107,13 +111,24 @@ func (p *Provider) agentReleaseDenied(ctx context.Context, agent *agentstatus.Su
 	case p.AgentStatus == nil:
 		err = &agentstatus.DenialError{Reason: agentstatus.ReasonUnconfigured, Workload: agent.Workload}
 	default:
-		err = p.AgentStatus.Check(ctx, *agent)
+		err = p.checkStatus(ctx, *agent)
 	}
 	if err == nil {
 		return false
 	}
 	p.logAgentDenial(ctx, agent, err)
 	return true
+}
+
+// checkStatus runs the checker, turning a panic into a denial so a faulty
+// checker refuses the agent instead of escaping into the transport.
+func (p *Provider) checkStatus(ctx context.Context, agent agentstatus.Subject) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = &agentstatus.DenialError{Reason: reasonCheckerPanicked, Workload: agent.Workload, Cause: fmt.Errorf("%v", r)}
+		}
+	}()
+	return p.AgentStatus.Check(ctx, agent)
 }
 
 // logAgentDenial records who was refused and why. The bearer, the DPoP proof
@@ -136,10 +151,10 @@ func (p *Provider) logAgentDenial(ctx context.Context, agent *agentstatus.Subjec
 		if d.Cause != nil {
 			attrs = append(attrs, slog.String("cause", d.Cause.Error()))
 		}
-		// These refuse every agent until an operator fixes config, so they
-		// are errors rather than per-agent warnings.
+		// These refuse every agent until an operator fixes config (or, for a
+		// panic, the code), so they are errors rather than per-agent warnings.
 		switch d.Reason {
-		case agentstatus.ReasonStatusForbidden, agentstatus.ReasonStatusCredentialsRejected, agentstatus.ReasonUnconfigured:
+		case agentstatus.ReasonStatusForbidden, agentstatus.ReasonStatusCredentialsRejected, agentstatus.ReasonUnconfigured, reasonCheckerPanicked:
 			level = slog.LevelError
 		}
 	} else {
@@ -164,9 +179,11 @@ func (p *Provider) denyAgentRewrap(ctx context.Context, requests []*kaspb.Unsign
 }
 
 // refuseRequest fails every KAO of req with err and audits each as a
-// failure, without unwrapping anything. Requests sharing a policy Id share
-// one result map, so none of their KAOs drops out of the response. The
-// policy is decoded only to name it in the audit record.
+// failure, without unwrapping anything. A KAO with no key access object gets
+// the 400 the normal path gives it and, as there, no audit record. Requests
+// sharing a policy Id share one result map, so none of their KAOs drops out
+// of the response. The policy is decoded only to name it in the audit
+// record.
 func (p *Provider) refuseRequest(ctx context.Context, results policyKAOResults, req *kaspb.UnsignedRewrapRequest_WithPolicyRequest, err error) {
 	policyID := req.GetPolicy().GetId()
 	kaoResults, ok := results[policyID]
@@ -180,6 +197,10 @@ func (p *Provider) refuseRequest(ctx context.Context, results policyKAOResults, 
 	}
 	kasPolicy := ConvertToAuditKasPolicy(*policy)
 	for _, kao := range req.GetKeyAccessObjects() {
+		if kao.GetKeyAccessObject() == nil {
+			failedKAORewrap(kaoResults, kao, err400("key access object is nil"))
+			continue
+		}
 		p.Logger.Audit.RewrapFailure(ctx, audit.RewrapAuditEventParams{
 			Policy:        kasPolicy,
 			TDFFormat:     "tdf3",

@@ -136,12 +136,12 @@ func NewAuthenticator(ctx context.Context, cfg Config, logger *logger.Logger, we
 	}
 	a.tokenVerifier = tokenVerifier
 
+	// Unconfigured is not an error here: only the KAS refuses agents without
+	// a checker, and it warns about that itself.
 	if cfg.AgentStatus.Enabled() {
 		if a.agentStatus, err = agentstatus.New(cfg.AgentStatus); err != nil {
 			return nil, fmt.Errorf("server.auth.agent_status: %w", err)
 		}
-	} else {
-		logger.Warn("server.auth.agent_status is not configured: the KAS refuses every agent-token rewrap")
 	}
 
 	roleProvider, err := resolveRoleProvider(ctx, cfg, logger)

@@ -5,6 +5,8 @@ import (
 	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
+	"encoding/base64"
+	"encoding/json"
 	"net/http"
 	"testing"
 
@@ -19,18 +21,33 @@ import (
 	"google.golang.org/protobuf/encoding/protojson"
 )
 
-func signedSRT(t *testing.T, alg jwa.SignatureAlgorithm, signer any) string {
+func srtBody(t *testing.T) string {
 	t.Helper()
 	body, err := protojson.Marshal(&kaspb.UnsignedRewrapRequest{
 		Requests:        makeRewrapRequests(t, fauxPolicyBytes(t), false),
 		ClientPublicKey: rsaPublicAlt,
 	})
 	require.NoError(t, err)
+	return string(body)
+}
+
+func signedSRT(t *testing.T, alg jwa.SignatureAlgorithm, signer any) string {
+	t.Helper()
 	tok := jwt.New()
-	require.NoError(t, tok.Set("requestBody", string(body)))
+	require.NoError(t, tok.Set("requestBody", srtBody(t)))
 	raw, err := jwt.Sign(tok, jwt.WithKey(alg, signer))
 	require.NoError(t, err)
 	return string(raw)
+}
+
+// unsecuredSRT is an RFC 7519 unsecured JWT (alg "none", empty signature),
+// which jwx will not produce, so it is assembled by hand.
+func unsecuredSRT(t *testing.T) string {
+	t.Helper()
+	claims, err := json.Marshal(map[string]string{"requestBody": srtBody(t)})
+	require.NoError(t, err)
+	enc := base64.RawURLEncoding
+	return enc.EncodeToString([]byte(`{"alg":"none","typ":"JWT"}`)) + "." + enc.EncodeToString(claims) + "."
 }
 
 func publicJWK(t *testing.T, raw any) jwk.Key {
@@ -63,7 +80,13 @@ func TestExtractSRTBody_CallerKeyAlgorithms(t *testing.T) {
 		{"RS256 SRT against an Ed25519 DPoP key is refused", signedSRT(t, jwa.RS256, entityPrivateKey(t)), publicJWK(t, edPub), false},
 		{"ES256 SRT against an Ed25519 DPoP key is refused", signedSRT(t, jwa.ES256, ecPriv), publicJWK(t, edPub), false},
 		{"EdDSA SRT against a P-256 DPoP key is refused", signedSRT(t, jwa.EdDSA, edPriv), publicJWK(t, &ecPriv.PublicKey), false},
+		// The only row that would catch the verifier taking its algorithm
+		// from the SRT header: this SRT is validly signed with ES384 by the
+		// DPoP key itself, so only mapping the key (P-384 maps to nothing)
+		// refuses it. jws.Verify never reads the header alg; every other
+		// refusal here comes from the forced algorithm failing to verify.
 		{"unmapped P-384 DPoP key is refused", signedSRT(t, jwa.ES384, ec384Priv), publicJWK(t, &ec384Priv.PublicKey), false},
+		{"unsecured (alg none) SRT is refused", unsecuredSRT(t), publicJWK(t, edPub), false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

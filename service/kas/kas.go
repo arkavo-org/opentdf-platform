@@ -11,6 +11,7 @@ import (
 	"github.com/go-viper/mapstructure/v2"
 	kaspb "github.com/opentdf/platform/protocol/go/kas"
 	"github.com/opentdf/platform/protocol/go/kas/kasconnect"
+	"github.com/opentdf/platform/service/internal/agentstatus"
 	"github.com/opentdf/platform/service/internal/security"
 	"github.com/opentdf/platform/service/kas/access"
 	"github.com/opentdf/platform/service/logger"
@@ -110,6 +111,7 @@ func NewRegistration() *serviceregistry.Service[kasconnect.AccessServiceHandler]
 
 				p.SDK = srp.SDK
 				p.AgentStatus = srp.AgentStatus
+				warnIfAgentStatusUnconfigured(srp.Logger, p.AgentStatus)
 				p.Logger = srp.Logger
 				p.ApplyConfig(kasCfg, srp.Security)
 				p.Tracer = srp.Tracer
@@ -252,4 +254,12 @@ func initSecurityProviderAdapter(cryptoProvider *security.StandardCrypto, kasCfg
 	}
 
 	return security.NewSecurityProviderAdapter(cryptoProvider, defaults, legacies)
+}
+
+// warnIfAgentStatusUnconfigured flags a KAS that will refuse every
+// agent-token rewrap because server.auth.agent_status is unset.
+func warnIfAgentStatusUnconfigured(l *logger.Logger, checker agentstatus.Checker) {
+	if checker == nil {
+		l.Warn("server.auth.agent_status is not configured: the KAS refuses every agent-token rewrap")
+	}
 }

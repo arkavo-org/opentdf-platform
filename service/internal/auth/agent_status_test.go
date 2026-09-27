@@ -40,6 +40,22 @@ func TestAuthentication_AgentStatus(t *testing.T) {
 		assert.NotNil(t, a.AgentStatus())
 	})
 
+	t.Run("partial config (credentials without url) fails startup", func(t *testing.T) {
+		_, err := build(agentstatus.Config{ClientID: "opentdf", ClientSecret: "s"})
+		require.ErrorContains(t, err, "agent_status")
+	})
+
+	// Only the KAS refuses agents, so only the KAS warns when it has no
+	// checker (kas.NewRegistration); the authenticator stays quiet.
+	t.Run("unconfigured does not warn from the authenticator", func(t *testing.T) {
+		var buf bytes.Buffer
+		_, err := NewAuthenticator(t.Context(), Config{
+			AuthNConfig: AuthNConfig{Issuer: srv.URL, Audience: "test", DPoPSkew: time.Hour},
+		}, &logger.Logger{Logger: slog.New(slog.NewJSONHandler(&buf, nil))}, func(string, any) error { return nil })
+		require.NoError(t, err)
+		assert.NotContains(t, buf.String(), "agent_status")
+	})
+
 	t.Run("invalid config fails startup", func(t *testing.T) {
 		_, err := build(agentstatus.Config{URL: "ftp://identity.test", ClientID: "opentdf", ClientSecret: "s"})
 		require.ErrorContains(t, err, "agent_status")

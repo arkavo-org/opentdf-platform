@@ -513,16 +513,14 @@ func TestAgentCWT_EmitsOnlyDelegatedEntitlements(t *testing.T) {
 		}
 	}
 	got := entitlementsOf(t, svc, ents)
-	want := map[string]bool{
-		"https://arkavo.ai/attr/tdf/value/decrypt": true,
-		"https://arkavo.ai/attr/action/value/read": true,
+	// Each delegated FQN carries exactly the configured direct-entitlement
+	// actions (default "read"): the key set alone would not catch an agent
+	// being granted more on an entitlement it does hold.
+	want := map[string][]string{
+		"https://arkavo.ai/attr/tdf/value/decrypt": {"read"},
+		"https://arkavo.ai/attr/action/value/read": {"read"},
 	}
-	if len(got) != len(want) {
+	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("agent entitlements = %v, want exactly %v", got, want)
-	}
-	for fqn := range got {
-		if !want[fqn] {
-			t.Errorf("agent received %s, which is not in arkavo_entitlements", fqn)
-		}
 	}
 }

@@ -22,6 +22,7 @@ import (
 
 	"connectrpc.com/connect"
 	"github.com/google/uuid"
+	"github.com/lestrrat-go/jwx/v2/jwa"
 	"github.com/lestrrat-go/jwx/v2/jwk"
 	"github.com/lestrrat-go/jwx/v2/jwt"
 	"github.com/opentdf/platform/lib/ocrypto"
@@ -350,6 +351,21 @@ func TestAgentReleaseDenied(t *testing.T) {
 		rec := deniedRecord(t, buf)
 		assert.Equal(t, "ERROR", rec["level"])
 		assert.Equal(t, agentstatus.ReasonStatusForbidden, rec["reason"])
+	})
+
+	t.Run("a panicking checker denies, logged as an error, and does not escape", func(t *testing.T) {
+		log, buf := newAuditBufferLogger()
+		p := &Provider{Logger: log, AgentStatus: checkerFunc(func(context.Context, agentstatus.Subject) error {
+			panic("checker bug")
+		})}
+		s := wantSubject()
+		var denied bool
+		require.NotPanics(t, func() { denied = p.agentReleaseDenied(agentCtx(t, agentDPoPKey(t)), &s) })
+		assert.True(t, denied)
+		rec := deniedRecord(t, buf)
+		assert.Equal(t, "ERROR", rec["level"])
+		assert.Equal(t, reasonCheckerPanicked, rec["reason"])
+		assert.Contains(t, rec["cause"], "checker bug")
 	})
 
 	t.Run("an error that is not a DenialError still denies", func(t *testing.T) {
@@ -692,6 +708,24 @@ func TestTDF3Rewrap_AgentGate(t *testing.T) {
 		assert.Equal(t, int32(0), km.decrypts.Load())
 	})
 
+	t.Run("denied agent: a nil KAO gets the normal path's 400 and no audit record", func(t *testing.T) {
+		p, km, buf := releasingProvider(t, &fakeChecker{err: &agentstatus.DenialError{Reason: agentstatus.ReasonNotEligible}})
+		reqs := twoPolicyRequests(t)
+		reqs[0].KeyAccessObjects[1].KeyAccessObject = nil
+		results := rewrapAudited(t, p, agentDPoPKey(t), agentToken(t), reqs)
+		for _, r := range allKAOs(t, results) {
+			require.Error(t, r.Error, r.ID)
+			if r.ID == "kao-a2" {
+				assert.Equal(t, connect.CodeInvalidArgument, connect.CodeOf(r.Error))
+				assert.Contains(t, r.Error.Error(), "key access object is nil")
+				continue
+			}
+			assert.Equal(t, connect.CodePermissionDenied, connect.CodeOf(r.Error), r.ID)
+		}
+		assert.Len(t, rewrapAuditResults(t, buf), 3, "only KAOs that exist are audited")
+		assert.Equal(t, int32(0), km.decrypts.Load())
+	})
+
 	t.Run("eligible agent: keys released after one status check", func(t *testing.T) {
 		checker := &fakeChecker{}
 		p, km, _ := releasingProvider(t, checker)
@@ -853,8 +887,12 @@ func TestCanAccess_AgentDissemination(t *testing.T) {
 			require.Len(t, res, 1)
 			assert.Same(t, tt.policy, res[0].Policy)
 			assert.Equal(t, tt.want, res[0].Access)
-			if len(tt.policy.Body.DataAttributes) > 0 && !tt.want {
-				assert.Empty(t, authz.askedFQNs(), "a dissem denial must not be sent for an ABAC decision")
+			if len(tt.policy.Body.DataAttributes) > 0 {
+				if tt.want {
+					assert.Len(t, authz.askedFQNs(), 1, "a listed agent still needs ABAC for data attributes")
+				} else {
+					assert.Empty(t, authz.askedFQNs(), "a dissem denial must not be sent for an ABAC decision")
+				}
 			}
 		})
 	}
@@ -946,6 +984,15 @@ func TestTDF3Rewrap_AgentDissemination(t *testing.T) {
 			audit.ActionResultError.String(), audit.ActionResultError.String(),
 		}, rewrapAuditResults(t, buf))
 		assert.Equal(t, 1, checker.callCount())
+		var dissemDenials []map[string]any
+		for _, rec := range logRecords(t, buf) {
+			if rec["msg"] == "agent is not in the policy dissemination list" {
+				dissemDenials = append(dissemDenials, rec)
+			}
+		}
+		require.Len(t, dissemDenials, 1, "one policy excluded the agent")
+		assert.Equal(t, "WARN", dissemDenials[0]["level"])
+		assert.Equal(t, agentDID, dissemDenials[0]["agent"])
 	})
 
 	t.Run("non-agent bearer: dissem not enforced, both policies released", func(t *testing.T) {
@@ -968,4 +1015,51 @@ func TestTDF3Rewrap_AgentDissemination(t *testing.T) {
 		assert.Equal(t, 0, checker.callCount())
 		assert.Equal(t, agentstatus.ReasonMissingSubject, deniedRecord(t, buf)["reason"])
 	})
+}
+
+// v1SRT is a legacy (v1) rewrap body, one KAO and no requests list, signed
+// by the agent's caller key as opentdf-rs does.
+func v1SRT(t *testing.T, signer ed25519.PrivateKey) string {
+	t.Helper()
+	asym, err := ocrypto.FromPublicPEM(rsaPublic)
+	require.NoError(t, err)
+	wrapped, err := asym.Encrypt([]byte(plainKey))
+	require.NoError(t, err)
+	body, err := json.Marshal(RequestBody{
+		KeyAccess:       KeyAccess{Type: "wrapped", KID: kasTestKID, URL: "https://kas.test", WrappedKey: wrapped},
+		Policy:          string(emptyPolicyBytes()),
+		ClientPublicKey: rsaPublic,
+	})
+	require.NoError(t, err)
+	tok := jwt.New()
+	require.NoError(t, tok.Set("requestBody", string(body)))
+	key, err := jwk.FromRaw(signer)
+	require.NoError(t, err)
+	raw, err := jwt.Sign(tok, jwt.WithKey(jwa.EdDSA, key))
+	require.NoError(t, err)
+	return string(raw)
+}
+
+// A v1 SRT is answered with its single KAO's error at the top level, so a
+// denied agent gets the same 403 there.
+func TestRewrap_V1SRTDeniedAgentGets403(t *testing.T) {
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	callerKey, err := jwk.FromRaw(pub)
+	require.NoError(t, err)
+	checker := &fakeChecker{err: &agentstatus.DenialError{Reason: agentstatus.ReasonNotEligible}}
+	p, km, _ := releasingProvider(t, checker)
+
+	ctx := authnCtx(t.Context(), callerKey, agentToken(t))
+	req := connect.NewRequest(&kaspb.RewrapRequest{SignedRequestToken: v1SRT(t, priv)})
+	next := func(ctx context.Context, _ connect.AnyRequest) (connect.AnyResponse, error) {
+		return p.Rewrap(ctx, req)
+	}
+	_, rewrapErr := audit.ContextServerInterceptor(p.Logger.Logger)(next)(ctx, connect.NewRequest(&kaspb.RewrapRequest{}))
+
+	require.Error(t, rewrapErr)
+	assert.Equal(t, connect.CodePermissionDenied, connect.CodeOf(rewrapErr))
+	assert.Contains(t, rewrapErr.Error(), "forbidden")
+	assert.Equal(t, 1, checker.callCount())
+	assert.Equal(t, int32(0), km.decrypts.Load())
 }

@@ -188,6 +188,12 @@ func (c *Client) record(st Status, s Subject) *DenialError {
 	// another workload says nothing about this one's generation.
 	if st.Workload == s.Workload && st.Generation > hw {
 		c.highWater[s.Workload] = st.Generation
+		// A cached status below the new mark can only deny now, and would
+		// log a regression instead of what identity says (a quarantine and
+		// its incident); drop it so the next request asks.
+		if e, ok := c.cache[s.Workload]; ok && e.status.Generation < st.Generation {
+			delete(c.cache, s.Workload)
+		}
 	}
 	if d != nil {
 		return d
@@ -271,8 +277,10 @@ func (c *Client) serviceToken(ctx context.Context, fresh bool) (Secret, error) {
 	if body.AccessToken == "" {
 		return "", errors.New("service token: empty access_token")
 	}
+	// Only a positive expires_in below the cap is used: a negative one would
+	// overflow to a lifetime of centuries once multiplied out.
 	lifetime := maxTokenLifetime
-	if body.ExpiresIn < int64(maxTokenLifetime/time.Second) {
+	if body.ExpiresIn > 0 && body.ExpiresIn < int64(maxTokenLifetime/time.Second) {
 		lifetime = time.Duration(body.ExpiresIn) * time.Second
 	}
 	c.mu.Lock()

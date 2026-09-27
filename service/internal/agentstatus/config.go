@@ -18,8 +18,9 @@ const (
 	redacted       = "[REDACTED]"
 )
 
-// Config is server.auth.agent_status. An empty URL leaves the checker
-// unconfigured, and the KAS then refuses every agent-token rewrap.
+// Config is server.auth.agent_status. Leaving url, client_id and
+// client_secret all unset leaves the checker unconfigured, and the KAS then
+// refuses every agent-token rewrap.
 type Config struct {
 	// URL is the authnz-rs base URL, e.g. https://identity.arkavo.net.
 	URL string `mapstructure:"url" json:"url"`
@@ -39,8 +40,11 @@ type Secret string
 func (Secret) String() string       { return redacted }
 func (Secret) LogValue() slog.Value { return slog.StringValue(redacted) }
 
-// Format covers the verbs String does not: %#v and %d print the underlying
-// string, also for a Config embedded in a larger struct.
+// Format covers the verbs String does not, such as %#v and %d, also for a
+// Config embedded in a larger struct. It cannot cover %p: fmt handles that
+// verb before consulting any Formatter, and on a non-pointer (a Secret, or a
+// Config holding one) prints a bad-verb marker followed by the raw value.
+// go vet flags %p on a non-pointer; never silence it for these types.
 func (Secret) Format(f fmt.State, _ rune) { _, _ = io.WriteString(f, redacted) }
 
 // MarshalJSON renders an unset secret as "": pkg/config seeds its defaults
@@ -53,8 +57,10 @@ func (s Secret) MarshalJSON() ([]byte, error) {
 	return []byte(`"` + redacted + `"`), nil
 }
 
-// Enabled reports whether a status endpoint is configured.
-func (c Config) Enabled() bool { return c.URL != "" }
+// Enabled reports whether any of url, client_id or client_secret is set.
+// A partial block is enabled too, so validate() fails it at startup rather
+// than it silently leaving every agent refused.
+func (c Config) Enabled() bool { return c.URL != "" || c.ClientID != "" || c.ClientSecret != "" }
 
 func (c Config) validate() error {
 	// Neither error names the URL: it may carry credentials.
@@ -67,6 +73,10 @@ func (c Config) validate() error {
 	}
 	if u.Host == "" {
 		return errors.New("agent_status.url has no host")
+	}
+	// The client appends its own paths to the base URL.
+	if u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
+		return errors.New("agent_status.url must not carry a query or fragment")
 	}
 	if u.Scheme != "https" && (u.Scheme != "http" || !isLoopback(u.Hostname())) {
 		return errors.New("agent_status.url must be https (plain http only on loopback)")

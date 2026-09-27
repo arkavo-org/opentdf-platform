@@ -22,8 +22,8 @@ const (
 	p256CoordinateLen   = 32
 	sec1Uncompressed    = 0x04
 
-	// cnfUnsupportedMember carries why a COSE_Key could not be rendered, so
-	// validateDPoP refuses the token with a reason.
+	// cnfUnsupportedMember is the member cnfClaim writes, in place of a key,
+	// to carry why a COSE_Key could not be rendered.
 	cnfUnsupportedMember = "unsupported_cose_key"
 )
 
@@ -51,7 +51,7 @@ func cnfClaim(v any) any {
 		return normalizeCBOR(v)
 	}
 	for k, member := range members {
-		if label, isInt := coseLabel(k); !isInt || label != cnfLabelCOSEKey {
+		if label, isInt := coseInt(k); !isInt || label != cnfLabelCOSEKey {
 			continue
 		}
 		key, isMap := member.(map[any]any)
@@ -67,8 +67,11 @@ func cnfClaim(v any) any {
 	return normalizeCBOR(v)
 }
 
-// coseLabel reads a decoded CBOR map key as a COSE integer label.
-func coseLabel(k any) (int64, bool) {
+// coseInt reads a decoded CBOR integer strictly, for COSE labels and the
+// kty/crv/alg values: a float is not an integer even when it equals one,
+// and an unsigned value above math.MaxInt64 is refused rather than wrapped
+// (2^64-8 would otherwise read as -8, EdDSA).
+func coseInt(k any) (int64, bool) {
 	switch x := k.(type) {
 	case int64:
 		return x, true
@@ -87,15 +90,15 @@ func coseLabel(k any) (int64, bool) {
 func coseKeyToJWK(key map[any]any) (map[string]any, error) {
 	params := make(map[int64]any, len(key))
 	for k, v := range key {
-		if label, ok := coseLabel(k); ok {
+		if label, ok := coseInt(k); ok {
 			params[label] = v
 		}
 	}
 	if _, private := params[coseKeyLabelD]; private {
 		return nil, errors.New("cnf COSE_Key carries private key material")
 	}
-	kty, _ := claimInt64(params[coseKeyLabelKty])
-	crv, _ := claimInt64(params[coseKeyLabelCrv])
+	kty, _ := coseInt(params[coseKeyLabelKty])
+	crv, _ := coseInt(params[coseKeyLabelCrv])
 	x, _ := params[coseKeyLabelX].([]byte)
 	switch {
 	case kty == coseKtyOKP && crv == coseCrvEd25519:
@@ -137,7 +140,7 @@ func checkCOSEAlg(params map[int64]any, want int64) error {
 	if !present {
 		return nil
 	}
-	if alg, ok := claimInt64(raw); ok && alg == want {
+	if alg, ok := coseInt(raw); ok && alg == want {
 		return nil
 	}
 	return fmt.Errorf("cnf COSE_Key alg %v does not match its key type (want %d)", raw, want)

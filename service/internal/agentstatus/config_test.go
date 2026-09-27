@@ -31,11 +31,31 @@ func TestConfigValidate(t *testing.T) {
 		// A live answer could otherwise be older than the 5 s lease a
 		// quarantine is promised to land within.
 		"timeout longer than the status lease": {URL: "https://identity.arkavo.net", ClientID: "c", ClientSecret: "s", Timeout: maxStatusTTL + time.Millisecond},
+		// The client appends its own paths to the base URL.
+		"query":       {URL: "https://identity.arkavo.net?tenant=a", ClientID: "c", ClientSecret: "s"},
+		"empty query": {URL: "https://identity.arkavo.net?", ClientID: "c", ClientSecret: "s"},
+		"fragment":    {URL: "https://identity.arkavo.net#status", ClientID: "c", ClientSecret: "s"},
 	} {
 		t.Run(name, func(t *testing.T) { require.Error(t, cfg.validate()) })
 	}
 	assert.False(t, Config{}.Enabled())
 	assert.True(t, ok.Enabled())
+}
+
+// Any credential or endpoint field enables the block, so a partial config
+// fails validation at startup instead of silently refusing every agent.
+func TestConfigEnabledByAnyField(t *testing.T) {
+	for name, cfg := range map[string]Config{
+		"url only":           {URL: "https://identity.arkavo.net"},
+		"client_id only":     {ClientID: "c"},
+		"client_secret only": {ClientSecret: "s"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			assert.True(t, cfg.Enabled())
+			require.Error(t, cfg.validate())
+		})
+	}
+	assert.False(t, Config{Timeout: time.Second}.Enabled(), "a timeout alone configures nothing")
 }
 
 // A URL that carries credentials must not have them echoed into the startup

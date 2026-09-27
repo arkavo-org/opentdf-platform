@@ -397,6 +397,26 @@ func TestCheck_GenerationHighWater(t *testing.T) {
 		f.set(wireStatus(clk.get().Add(5*time.Second), withGeneration(3)))
 		require.NoError(t, c.Check(t.Context(), subject()))
 	})
+	// A concurrent fetch that saw the quarantine raises the mark past the
+	// cached generation; the entry is dropped, so the next request asks
+	// identity and logs the quarantine and its incident rather than a
+	// generation regression.
+	t.Run("a mark raised past the cached generation drops the entry", func(t *testing.T) {
+		f := &fakeIdentity{}
+		c, clk, _ := newTestClient(t, f)
+		f.set(wireStatus(clk.get().Add(5*time.Second), withGeneration(5)))
+		require.NoError(t, c.Check(t.Context(), subject()))
+
+		f.set(wireStatus(clk.get().Add(5*time.Second), quarantined(6)))
+		st, err := c.fetch(t.Context(), testWorkload)
+		require.NoError(t, err)
+		require.NotNil(t, c.record(st, subject()))
+
+		d := denial(t, c.Check(t.Context(), subject()))
+		assert.Equal(t, ReasonNotEligible, d.Reason)
+		assert.Equal(t, testIncident, d.Incident)
+		assert.Equal(t, uint64(6), d.Generation)
+	})
 	t.Run("a cache hit is judged against the current mark", func(t *testing.T) {
 		f := &fakeIdentity{}
 		c, clk, _ := newTestClient(t, f)
@@ -552,9 +572,12 @@ func TestCheck_ServiceToken(t *testing.T) {
 		})
 	}
 	for name, expiresIn := range map[string]any{
-		"expires_in absent": nil,
-		"expires_in a week": 7 * 24 * 3600,
-		"expires_in huge":   int64(1) << 62,
+		"expires_in absent":   nil,
+		"expires_in a week":   7 * 24 * 3600,
+		"expires_in huge":     int64(1) << 62,
+		"expires_in negative": -1,
+		// Times a second, this wraps past math.MinInt64 to about +292 years.
+		"expires_in negative, overflowing": int64(-9_223_372_037),
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := &fakeIdentity{tokenBody: map[string]any{"expires_in": expiresIn}}
@@ -768,4 +791,15 @@ func TestCheck_CallerDeadlineWins(t *testing.T) {
 	start := time.Now()
 	assert.Equal(t, ReasonUnreachable, denialReason(t, c.Check(ctx, subject())))
 	assert.Less(t, time.Since(start), time.Second)
+}
+
+// slog resolves a LogValuer before any handler formats it, so a logged
+// Client renders as its endpoint and client id only.
+func TestClientLogValue(t *testing.T) {
+	c, _, srv := newTestClient(t, &fakeIdentity{})
+	var buf bytes.Buffer
+	slog.New(slog.NewJSONHandler(&buf, nil)).Info("m", slog.Any("client", c))
+	var rec map[string]any
+	require.NoError(t, json.Unmarshal(buf.Bytes(), &rec))
+	assert.Equal(t, map[string]any{"url": srv.URL, "client_id": fakeClientID}, rec["client"])
 }
