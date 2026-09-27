@@ -109,8 +109,9 @@ type Authentication struct {
 	ipcReauthRoutes []string
 	// Custom Logger
 	logger *logger.Logger
-	// dpopReplay remembers proof ids on COSE_Key-bound tokens (agents) so a
-	// captured proof cannot be replayed while it is still acceptable.
+	// dpopReplay remembers proof ids on key-bound tokens (cnf.jwk: authnz-rs
+	// agents, or an issuer's RFC 7800 key) so a captured proof cannot be
+	// replayed while it is still acceptable.
 	dpopReplay *dpopReplayCache
 
 	// Used for testing
@@ -601,7 +602,7 @@ func (a Authentication) validateDPoP(accessToken jwt.Token, acessTokenRaw string
 		return nil, errors.New("got `cnf` in an invalid format")
 	}
 
-	jkt, coseBound, err := dpopBinding(cnfDict)
+	jkt, keyBound, err := dpopBinding(cnfDict)
 	if err != nil {
 		return nil, err
 	}
@@ -646,7 +647,7 @@ func (a Authentication) validateDPoP(accessToken jwt.Token, acessTokenRaw string
 	if thumbprintStr != jkt {
 		return nil, fmt.Errorf("the `jkt` from the DPoP JWT didn't match the thumbprint from the access token; cnf.jkt=[%v], computed=[%v]", jkt, thumbprintStr)
 	}
-	if coseBound {
+	if keyBound {
 		if err := proofAlgorithmMatchesKey(protectedHeaders.Algorithm(), dpopKey); err != nil {
 			return nil, err
 		}
@@ -655,7 +656,7 @@ func (a Authentication) validateDPoP(accessToken jwt.Token, acessTokenRaw string
 	// at this point we have the right key because its thumbprint matches the `jkt` claim
 	// in the validated access token
 	parseOpts := []jwt.ParseOption{jwt.WithKey(protectedHeaders.Algorithm(), dpopKey)}
-	if coseBound {
+	if keyBound {
 		// Agents run on devices whose clocks can run ahead (a Raspberry Pi
 		// without an RTC). Accept an iat up to server.auth.skew in the
 		// future; the jkt path keeps jwx's zero-skew default.
@@ -671,7 +672,10 @@ func (a Authentication) validateDPoP(accessToken jwt.Token, acessTokenRaw string
 		return nil, errors.New("missing `iat` claim in the DPoP JWT")
 	}
 
-	if issuedAt.Add(a.oidcConfiguration.DPoPSkew).Before(time.Now()) {
+	// One reading decides both expiry and replay, so a proof cannot be live
+	// for one and expired for the other.
+	now := time.Now()
+	if issuedAt.Add(a.oidcConfiguration.DPoPSkew).Before(now) {
 		return nil, errors.New("the DPoP JWT has expired")
 	}
 
@@ -711,8 +715,8 @@ func (a Authentication) validateDPoP(accessToken jwt.Token, acessTokenRaw string
 	if ath != base64.URLEncoding.WithPadding(base64.NoPadding).EncodeToString(h.Sum(nil)) {
 		return nil, errors.New("incorrect `ath` claim in DPoP JWT")
 	}
-	if coseBound {
-		if err := a.claimProofID(dpopToken, thumbprintStr); err != nil {
+	if keyBound {
+		if err := a.claimProofID(dpopToken, thumbprintStr, now); err != nil {
 			return nil, err
 		}
 	}

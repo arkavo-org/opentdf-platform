@@ -6,17 +6,23 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/lestrrat-go/jwx/v2/jwa"
 	"github.com/lestrrat-go/jwx/v2/jwk"
 	"github.com/lestrrat-go/jwx/v2/jwt"
 )
 
+// maxDPoPJTILen bounds the id a key holder can make the server store and hash.
+const maxDPoPJTILen = 256
+
 // dpopBinding reads what a token's cnf binds it to and returns the RFC 7638
 // thumbprint the DPoP proof key must have. A `jkt` (RFC 9449) is used as
-// given. A `jwk`, rendered by the CWT verifier from an RFC 8747 COSE_Key, is
-// thumbprinted here, and coseBound reports that the agent-proof rules
-// (algorithm matches key, single-use jti) apply.
+// given. A `jwk` is thumbprinted here: either the CWT verifier rendered it
+// from an RFC 8747 COSE_Key (authnz-rs agents), or a trusted issuer put it in
+// a JSON JWT as an RFC 7800 cnf. For both, the second result (keyBound)
+// reports that the key-bound proof rules (algorithm matches key, single-use
+// jti) apply.
 func dpopBinding(cnf map[string]any) (string, bool, error) {
 	jktValue, hasJKT := cnf["jkt"]
 	jwkValue, hasJWK := cnf["jwk"]
@@ -80,7 +86,7 @@ func SignatureAlgorithmForKey(key jwk.Key) (jwa.SignatureAlgorithm, error) {
 	}
 }
 
-// proofAlgorithmMatchesKey holds a COSE-bound proof to the one algorithm its
+// proofAlgorithmMatchesKey holds a key-bound proof to the one algorithm its
 // key signs with.
 func proofAlgorithmMatchesKey(alg jwa.SignatureAlgorithm, key jwk.Key) error {
 	want, err := SignatureAlgorithmForKey(key)
@@ -93,19 +99,23 @@ func proofAlgorithmMatchesKey(alg jwa.SignatureAlgorithm, key jwk.Key) error {
 	return nil
 }
 
-// claimProofID spends a COSE-bound proof's jti. It runs after every other
+// claimProofID spends a key-bound proof's jti. It runs after every other
 // proof check so a rejected proof never consumes an id. The id is kept until
 // iat + dpopskew (when the proof would expire anyway), keyed by the proof
-// key's thumbprint.
-func (a Authentication) claimProofID(proof jwt.Token, thumbprint string) error {
+// key's thumbprint. now must be the reading validateDPoP judged the proof
+// live on.
+func (a Authentication) claimProofID(proof jwt.Token, thumbprint string, now time.Time) error {
 	jti := proof.JwtID()
 	if jti == "" {
 		return errors.New("missing `jti` claim in DPoP JWT")
 	}
+	if len(jti) > maxDPoPJTILen {
+		return fmt.Errorf("DPoP JWT `jti` is longer than %d bytes", maxDPoPJTILen)
+	}
 	if a.dpopReplay == nil {
 		return errors.New("DPoP replay cache is not configured")
 	}
-	if !a.dpopReplay.claim(thumbprint+"."+jti, proof.IssuedAt().Add(a.oidcConfiguration.DPoPSkew)) {
+	if !a.dpopReplay.claim(thumbprint+"."+jti, proof.IssuedAt().Add(a.oidcConfiguration.DPoPSkew), now) {
 		return errors.New("DPoP JWT `jti` has already been used")
 	}
 	return nil
