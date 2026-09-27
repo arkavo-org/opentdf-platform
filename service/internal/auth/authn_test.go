@@ -844,8 +844,9 @@ func TestActorToken(t *testing.T) {
 	})
 
 	t.Run("actor token with no subject is rejected even when bearer also has no subject", func(t *testing.T) {
-		// Regression case: accessToken.Subject() == "" and actorTok.Subject() == ""
-		// must NOT short-circuit the authorization check via "" != "" being false.
+		// Regression case: the empty-subject check on actorTok.Subject() == ""
+		// must fire before actorAuthorized is consulted, even when the
+		// bearer's own subject is also empty.
 		bearer := mint("", nil)   // bearer with no `sub`
 		actorTok := mint("", nil) // actor with no `sub`
 
@@ -861,8 +862,16 @@ func TestActorToken(t *testing.T) {
 		assert.Empty(t, ctxAuth.GetActorSubjectFromContext(ctx))
 	})
 
-	t.Run("actor whose sub equals the bearer's own sub passes without an act claim", func(t *testing.T) {
+	t.Run("actor whose sub equals the bearer's own sub is rejected without an act claim", func(t *testing.T) {
 		bearer := mint("user-1", nil) // no `act` claim
+		actorTok := mint("user-1", nil)
+
+		_, _, err := auth.checkToken(context.Background(), []string{"Bearer " + bearer}, receiverInfo{}, nil, []string{actorTok})
+		require.ErrorContains(t, err, "actor not authorized")
+	})
+
+	t.Run("actor whose sub equals the bearer's own sub passes when act lists it", func(t *testing.T) {
+		bearer := mint("user-1", map[string]any{"act": []any{map[string]any{"sub": "user-1"}}})
 		actorTok := mint("user-1", nil)
 
 		_, ctx, err := auth.checkToken(context.Background(), []string{"Bearer " + bearer}, receiverInfo{}, nil, []string{actorTok})
