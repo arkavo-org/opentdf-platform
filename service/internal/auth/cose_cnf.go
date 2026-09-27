@@ -38,8 +38,8 @@ func claimValue(name string, v any) any {
 // cnfClaim renders a CWT cnf (label 8). An RFC 8747 cnf holding a COSE_Key
 // (member 1) becomes {"jwk": <public JWK>}, its RFC 7800 JOSE equivalent,
 // which validateDPoP compares with the key embedded in the DPoP proof. Other
-// members are ignored: authnz-rs puts the key id (the agent DID bytes) in
-// member 2, which RFC 8747 reserves for an encrypted key, and the COSE_Key's
+// members are ignored: the issuer puts the key id (an opaque identifier's
+// bytes) in member 2, which RFC 8747 reserves for an encrypted key, and the COSE_Key's
 // own kid is not part of the JWK either. A COSE_Key that cannot be rendered
 // yields {cnfUnsupportedMember: reason}: dropping cnf instead would let the
 // token skip proof of possession, because checkToken only runs validateDPoP
@@ -133,8 +133,8 @@ func coseKeyToJWK(key map[any]any) (map[string]any, error) {
 	}
 }
 
-// checkCOSEAlg accepts an absent alg (authnz-rs omits it on agent keys) or
-// exactly the one algorithm the key type signs with.
+// checkCOSEAlg accepts an absent alg (some issuers omit it on COSE_Key-bound
+// keys) or exactly the one algorithm the key type signs with.
 func checkCOSEAlg(params map[int64]any, want int64) error {
 	raw, present := params[coseKeyLabelAlg]
 	if !present {

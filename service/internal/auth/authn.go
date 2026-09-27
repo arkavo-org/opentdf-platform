@@ -109,9 +109,9 @@ type Authentication struct {
 	ipcReauthRoutes []string
 	// Custom Logger
 	logger *logger.Logger
-	// dpopReplay remembers proof ids on key-bound tokens (cnf.jwk: authnz-rs
-	// agents, or an issuer's RFC 7800 key) so a captured proof cannot be
-	// replayed while it is still acceptable.
+	// dpopReplay remembers proof ids on key-bound tokens (cnf.jwk: a key
+	// rendered from a COSE_Key, or an issuer's RFC 7800 key) so a captured
+	// proof cannot be replayed while it is still acceptable.
 	dpopReplay *dpopReplayCache
 
 	// Used for testing
@@ -663,9 +663,10 @@ func (a Authentication) validateDPoP(accessToken jwt.Token, acessTokenRaw string
 	// in the validated access token
 	parseOpts := []jwt.ParseOption{jwt.WithKey(protectedHeaders.Algorithm(), dpopKey)}
 	if keyBound {
-		// Agents run on devices whose clocks can run ahead (a Raspberry Pi
-		// without an RTC). Accept an iat up to server.auth.skew in the
-		// future; the jkt path keeps jwx's zero-skew default.
+		// A key-bound token may originate from a device without a real-time
+		// clock, whose clock can run ahead. Accept an iat up to
+		// server.auth.skew in the future; the jkt path keeps jwx's
+		// zero-skew default.
 		parseOpts = append(parseOpts, jwt.WithAcceptableSkew(a.oidcConfiguration.TokenSkew))
 	}
 	dpopToken, err := jwt.Parse([]byte(dpopHeader), parseOpts...)

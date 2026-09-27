@@ -19,7 +19,7 @@ const maxDPoPJTILen = 256
 // dpopBinding reads what a token's cnf binds it to and returns the RFC 7638
 // thumbprint the DPoP proof key must have. A `jkt` (RFC 9449) is used as
 // given. A `jwk` is thumbprinted here: either the CWT verifier rendered it
-// from an RFC 8747 COSE_Key (authnz-rs agents), or a trusted issuer put it in
+// from an RFC 8747 COSE_Key, or a trusted issuer put it in
 // a JSON JWT as an RFC 7800 cnf. For both, the second result (keyBound)
 // reports that the key-bound proof rules (algorithm matches key, single-use
 // jti) apply.
@@ -103,8 +103,8 @@ func proofAlgorithmMatchesKey(alg jwa.SignatureAlgorithm, key jwk.Key) error {
 // proof check so a rejected proof never consumes an id. The id is kept,
 // keyed by the proof key's thumbprint, until the proof could no longer be
 // accepted: iat + dpopskew, or sooner the access token's exp + skew, since
-// the proof's ath binds it to that token (agent tokens live 15 min or less,
-// dpopskew defaults to 1 h). A zero tokenExp means the token has no exp. now
+// the proof's ath binds it to that token (a short-lived key-bound token may
+// live 15 min or less, dpopskew defaults to 1 h). A zero tokenExp means the token has no exp. now
 // must be the reading validateDPoP judged the proof live on.
 func (a Authentication) claimProofID(proof jwt.Token, tokenExp time.Time, thumbprint string, now time.Time) error {
 	jti := proof.JwtID()
