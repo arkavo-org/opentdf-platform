@@ -100,11 +100,13 @@ func proofAlgorithmMatchesKey(alg jwa.SignatureAlgorithm, key jwk.Key) error {
 }
 
 // claimProofID spends a key-bound proof's jti. It runs after every other
-// proof check so a rejected proof never consumes an id. The id is kept until
-// iat + dpopskew (when the proof would expire anyway), keyed by the proof
-// key's thumbprint. now must be the reading validateDPoP judged the proof
-// live on.
-func (a Authentication) claimProofID(proof jwt.Token, thumbprint string, now time.Time) error {
+// proof check so a rejected proof never consumes an id. The id is kept,
+// keyed by the proof key's thumbprint, until the proof could no longer be
+// accepted: iat + dpopskew, or sooner the access token's exp + skew, since
+// the proof's ath binds it to that token (agent tokens live 15 min or less,
+// dpopskew defaults to 1 h). A zero tokenExp means the token has no exp. now
+// must be the reading validateDPoP judged the proof live on.
+func (a Authentication) claimProofID(proof jwt.Token, tokenExp time.Time, thumbprint string, now time.Time) error {
 	jti := proof.JwtID()
 	if jti == "" {
 		return errors.New("missing `jti` claim in DPoP JWT")
@@ -115,8 +117,29 @@ func (a Authentication) claimProofID(proof jwt.Token, thumbprint string, now tim
 	if a.dpopReplay == nil {
 		return errors.New("DPoP replay cache is not configured")
 	}
-	if !a.dpopReplay.claim(thumbprint+"."+jti, proof.IssuedAt().Add(a.oidcConfiguration.DPoPSkew), now) {
+	expiry := proof.IssuedAt().Add(a.oidcConfiguration.DPoPSkew)
+	if !tokenExp.IsZero() {
+		expiry = minTime(expiry, tokenAcceptedUntil(tokenExp, a.oidcConfiguration.TokenSkew))
+	}
+	if !a.dpopReplay.claim(thumbprint+"."+jti, expiry, now) {
 		return errors.New("DPoP JWT `jti` has already been used")
 	}
 	return nil
+}
+
+func minTime(a, b time.Time) time.Time {
+	if b.Before(a) {
+		return b
+	}
+	return a
+}
+
+// tokenAcceptedUntil is the last instant a key-bound proof for a token with
+// this exp is accepted, and so how long its replay entry must live.
+func tokenAcceptedUntil(exp time.Time, skew time.Duration) time.Time { return exp.Add(skew) }
+
+// tokenExpired reports whether now is past tokenAcceptedUntil; a token
+// without exp never is.
+func tokenExpired(exp time.Time, skew time.Duration, now time.Time) bool {
+	return !exp.IsZero() && now.After(tokenAcceptedUntil(exp, skew))
 }

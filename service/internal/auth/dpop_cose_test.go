@@ -128,6 +128,20 @@ func TestCOSEBoundDPoP(t *testing.T) {
 		assert.Equal(t, []byte(edPub), okp.X())
 	})
 
+	t.Run("a cnf.jkt proof is accepted and its key reaches the context", func(t *testing.T) {
+		ecPriv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		require.NoError(t, err)
+		ecJWK, err := jwk.FromRaw(&ecPriv.PublicKey)
+		require.NoError(t, err)
+		thumb, err := ecJWK.Thumbprint(crypto.SHA256)
+		require.NoError(t, err)
+		jktToken := mint(map[any]any{"jkt": base64.RawURLEncoding.EncodeToString(thumb)})
+		proof := agentProof(t, ecPriv, jwa.ES256, jktToken, rewrapProcedure, "jti-jkt")
+		_, ctx, err := a.checkToken(t.Context(), []string{"DPoP " + jktToken}, rewrapReceiver(), []string{proof}, nil)
+		require.NoError(t, err)
+		require.NotNil(t, ctxAuth.GetJWKFromContext(ctx, a.logger), "the jkt proof's key still reaches the context")
+	})
+
 	t.Run("P-256 proof from the cnf key is accepted", func(t *testing.T) {
 		ecPriv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 		require.NoError(t, err)
@@ -368,7 +382,7 @@ func proofWithID(t *testing.T, jti string, iat time.Time) jwt.Token {
 
 func TestClaimProofID_FailsClosedWithoutCache(t *testing.T) {
 	proof := proofWithID(t, "j", time.Now())
-	require.ErrorContains(t, Authentication{}.claimProofID(proof, "thumb", time.Now()), "not configured")
+	require.ErrorContains(t, Authentication{}.claimProofID(proof, time.Time{}, "thumb", time.Now()), "not configured")
 }
 
 // validateDPoP decides a proof is still live on its own clock reading; the
@@ -384,8 +398,8 @@ func TestClaimProofID_ReplayWhenCacheClockRunsAhead(t *testing.T) {
 	// the cache's clock.
 	proof := proofWithID(t, "j", validatorNow.Add(-time.Hour+time.Second))
 
-	require.NoError(t, a.claimProofID(proof, "thumb", validatorNow))
-	require.ErrorContains(t, a.claimProofID(proof, "thumb", validatorNow), "already been used")
+	require.NoError(t, a.claimProofID(proof, time.Time{}, "thumb", validatorNow))
+	require.ErrorContains(t, a.claimProofID(proof, time.Time{}, "thumb", validatorNow), "already been used")
 }
 
 func TestClaimProofID_BoundsJTILength(t *testing.T) {
@@ -394,6 +408,98 @@ func TestClaimProofID_BoundsJTILength(t *testing.T) {
 		oidcConfiguration: AuthNConfig{DPoPSkew: time.Hour},
 		dpopReplay:        newDPoPReplayCache(func() time.Time { return now }),
 	}
-	require.NoError(t, a.claimProofID(proofWithID(t, strings.Repeat("a", 256), now), "thumb", now))
-	require.ErrorContains(t, a.claimProofID(proofWithID(t, strings.Repeat("b", 257), now), "thumb", now), "`jti` is longer than 256 bytes")
+	require.NoError(t, a.claimProofID(proofWithID(t, strings.Repeat("a", 256), now), time.Time{}, "thumb", now))
+	require.ErrorContains(t, a.claimProofID(proofWithID(t, strings.Repeat("b", 257), now), time.Time{}, "thumb", now), "`jti` is longer than 256 bytes")
+}
+
+// A replay entry never outlives the access token the proof is bound to (by
+// ath): after the token's exp + skew the token itself is refused, so
+// keeping its proof ids for the rest of iat + dpopskew only costs memory.
+func TestClaimProofID_EntryExpiry(t *testing.T) {
+	now := time.Unix(1_790_000_000, 0)
+	for name, tt := range map[string]struct {
+		tokenExp time.Time
+		want     time.Time
+	}{
+		"token expires before the proof would": {now.Add(15 * time.Minute), now.Add(16 * time.Minute)},
+		"proof expires before the token":       {now.Add(2 * time.Hour), now.Add(time.Hour)},
+		"token without exp":                    {time.Time{}, now.Add(time.Hour)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			a := Authentication{
+				oidcConfiguration: AuthNConfig{DPoPSkew: time.Hour, TokenSkew: time.Minute},
+				dpopReplay:        newDPoPReplayCache(func() time.Time { return now }),
+			}
+			require.NoError(t, a.claimProofID(proofWithID(t, "j", now), tt.tokenExp, "thumb", now))
+			got, ok := a.dpopReplay.seen[sha256.Sum256([]byte("thumb.j"))]
+			require.True(t, ok)
+			assert.WithinDuration(t, tt.want, got, 0)
+		})
+	}
+}
+
+// An unsupported COSE_Key does not fail token verification: the verifier
+// keeps a marker in cnf so the token still demands a proof, and
+// validateDPoP refuses it there. Dropping cnf instead would let the token
+// skip proof of possession.
+func TestVerifyAccessToken_UnsupportedCOSEKeyIsRefusedAtDPoP(t *testing.T) {
+	a, mint := newAgentAuth(t)
+	ecPriv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	p384ish := p256CNF(&ecPriv.PublicKey)
+	coseKey, ok := p384ish[1].(map[any]any)
+	require.True(t, ok)
+	coseKey[-1] = 2
+	raw := mint(p384ish)
+
+	tok, err := a.tokenVerifier.VerifyAccessToken(t.Context(), raw)
+	require.NoError(t, err)
+	cnf, ok := tok.Get("cnf")
+	require.True(t, ok, "cnf must survive verification")
+	members, ok := cnf.(map[string]any)
+	require.True(t, ok)
+	assert.Contains(t, members, cnfUnsupportedMember)
+	assert.NotContains(t, members, "jwk")
+
+	_, edPriv, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	proof := agentProof(t, edPriv, jwa.EdDSA, raw, rewrapProcedure, "jti-unsupported-e2e")
+	_, _, err = a.validateDPoP(tok, raw, rewrapReceiver(), []string{proof})
+	require.ErrorContains(t, err, "unsupported COSE_Key in `cnf` claim")
+}
+
+// validateDPoP decides a key-bound proof on one clock reading, and must not
+// accept a proof whose replay entry (which expires at token exp + skew at
+// the latest) would already be expired on that reading: the access token
+// verifier judged exp earlier, on its own clock and with no skew.
+func TestValidateDPoP_KeyBoundRefusedPastTokenExpiry(t *testing.T) {
+	edPub, edPriv, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	edJWK, err := jwk.FromRaw(edPub)
+	require.NoError(t, err)
+	const skew = time.Minute
+	a := Authentication{
+		oidcConfiguration: AuthNConfig{DPoPSkew: time.Hour, TokenSkew: skew},
+		dpopReplay:        newDPoPReplayCache(time.Now),
+	}
+	token := func(t *testing.T, exp time.Time) jwt.Token {
+		t.Helper()
+		tok := jwt.New()
+		require.NoError(t, tok.Set("cnf", map[string]any{"jwk": edJWK}))
+		require.NoError(t, tok.Set(jwt.ExpirationKey, exp))
+		return tok
+	}
+	const raw = "raw-access-token"
+
+	t.Run("exp + skew already passed: refused", func(t *testing.T) {
+		proof := agentProof(t, edPriv, jwa.EdDSA, raw, rewrapProcedure, "jti-past-exp")
+		_, _, err := a.validateDPoP(token(t, time.Now().Add(-skew-time.Second)), raw, rewrapReceiver(), []string{proof})
+		require.ErrorContains(t, err, "the access token has expired")
+	})
+	t.Run("exp passed but within skew: accepted", func(t *testing.T) {
+		proof := agentProof(t, edPriv, jwa.EdDSA, raw, rewrapProcedure, "jti-within-skew")
+		_, keyBound, err := a.validateDPoP(token(t, time.Now().Add(-skew/2)), raw, rewrapReceiver(), []string{proof})
+		require.NoError(t, err)
+		assert.True(t, keyBound)
+	})
 }

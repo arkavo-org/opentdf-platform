@@ -254,6 +254,9 @@ func (p *Provider) validateSRTClaims(ctx context.Context, token jwt.Token, requi
 // verifySRTSignature validates the SRT signature against the DPoP key with the
 // one algorithm that key type signs with: RS256 for RSA (unchanged), ES256 for
 // P-256 and EdDSA for Ed25519 (agents sign the SRT with their caller key).
+// The SRT's own header alg is never consulted: jws.Verify tries only the
+// algorithm forced here, so an SRT signed any other way (or alg "none")
+// fails verification.
 func (p *Provider) verifySRTSignature(ctx context.Context, srt string, dpopJWK jwk.Key) error {
 	alg, err := authn.SignatureAlgorithmForKey(dpopJWK)
 	if err == nil {
