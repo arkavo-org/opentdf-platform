@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -176,6 +177,23 @@ func TestCOSEBoundDPoP(t *testing.T) {
 		require.ErrorContains(t, check(edToken, []string{proof}), `"iat" not satisfied`)
 	})
 
+	t.Run("P-256 key signing with any algorithm but ES256 is rejected", func(t *testing.T) {
+		ecPriv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		require.NoError(t, err)
+		ecToken := mint(p256CNF(&ecPriv.PublicKey))
+		for _, alg := range []jwa.SignatureAlgorithm{jwa.ES384, jwa.ES512} {
+			proof := agentProof(t, ecPriv, alg, ecToken, rewrapProcedure, "jti-alg-"+alg.String())
+			require.ErrorContains(t, check(ecToken, []string{proof}), "does not match its key", alg)
+		}
+	})
+
+	t.Run("a refused proof does not spend its jti", func(t *testing.T) {
+		wrongHTU := agentProof(t, edPriv, jwa.EdDSA, edToken, "/kas.AccessService/PublicKey", "jti-spent-last")
+		require.ErrorContains(t, check(edToken, []string{wrongHTU}), "incorrect `htu`")
+		proof := agentProof(t, edPriv, jwa.EdDSA, edToken, rewrapProcedure, "jti-spent-last")
+		require.NoError(t, check(edToken, []string{proof}))
+	})
+
 	t.Run("Bearer scheme is also accepted for a COSE-bound token", func(t *testing.T) {
 		proof := agentProof(t, edPriv, jwa.EdDSA, edToken, rewrapProcedure, "jti-bearer")
 		_, _, err := a.checkToken(t.Context(), []string{"Bearer " + edToken}, rewrapReceiver(), []string{proof}, nil)
@@ -244,16 +262,16 @@ func TestDPoPBinding(t *testing.T) {
 	wantJKT := base64.RawURLEncoding.EncodeToString(thumb)
 	rendered := map[string]any{"kty": "OKP", "crv": "Ed25519", "x": base64.RawURLEncoding.EncodeToString(edPub)}
 
-	t.Run("jwk is thumbprinted and COSE-bound", func(t *testing.T) {
-		jkt, coseBound, err := dpopBinding(map[string]any{"jwk": rendered})
+	t.Run("cnf.jwk (COSE-rendered or issuer-supplied) is thumbprinted and key-bound", func(t *testing.T) {
+		jkt, keyBound, err := dpopBinding(map[string]any{"jwk": rendered})
 		require.NoError(t, err)
-		assert.True(t, coseBound)
+		assert.True(t, keyBound)
 		assert.Equal(t, wantJKT, jkt)
 	})
-	t.Run("jkt is used as given and is not COSE-bound", func(t *testing.T) {
-		jkt, coseBound, err := dpopBinding(map[string]any{"jkt": wantJKT})
+	t.Run("jkt is used as given and is not key-bound", func(t *testing.T) {
+		jkt, keyBound, err := dpopBinding(map[string]any{"jkt": wantJKT})
 		require.NoError(t, err)
-		assert.False(t, coseBound)
+		assert.False(t, keyBound)
 		assert.Equal(t, wantJKT, jkt)
 	})
 
@@ -294,12 +312,12 @@ func TestDPoPReplayCache(t *testing.T) {
 	now := time.Unix(1_790_000_000, 0)
 	c := newDPoPReplayCache(func() time.Time { return now })
 
-	assert.True(t, c.claim("thumb.jti", now.Add(time.Minute)))
-	assert.False(t, c.claim("thumb.jti", now.Add(time.Minute)), "second use inside the window")
-	assert.True(t, c.claim("other.jti", now.Add(time.Minute)), "keys are per thumbprint")
+	assert.True(t, c.claim("thumb.jti", now.Add(time.Minute), now))
+	assert.False(t, c.claim("thumb.jti", now.Add(time.Minute), now), "second use inside the window")
+	assert.True(t, c.claim("other.jti", now.Add(time.Minute), now), "keys are per thumbprint")
 
 	now = now.Add(2 * time.Minute)
-	assert.True(t, c.claim("thumb.jti", now.Add(time.Minute)), "an expired entry no longer blocks")
+	assert.True(t, c.claim("thumb.jti", now.Add(time.Minute), now), "an expired entry no longer blocks")
 }
 
 // validateDPoP still accepts a proof at exactly iat + dpopskew, so its id
@@ -309,13 +327,73 @@ func TestDPoPReplayCache_BlocksAtExpiry(t *testing.T) {
 	c := newDPoPReplayCache(func() time.Time { return now })
 	expiry := now.Add(time.Minute)
 
-	assert.True(t, c.claim("thumb.jti", expiry))
+	assert.True(t, c.claim("thumb.jti", expiry, now))
 	now = expiry
-	assert.False(t, c.claim("thumb.jti", expiry))
+	assert.False(t, c.claim("thumb.jti", expiry, now))
+}
+
+// The sweep runs on the cache's own clock, which can be ahead of the reading
+// the validator judged the proof live on; it must not drop an entry the
+// validator would still accept.
+func TestDPoPReplayCache_SweepKeepsEntriesTheValidatorStillAccepts(t *testing.T) {
+	validatorNow := time.Unix(1_790_000_000, 0)
+	cacheNow := validatorNow
+	c := newDPoPReplayCache(func() time.Time { return cacheNow })
+	expiry := validatorNow.Add(45 * time.Second)
+
+	require.True(t, c.claim("thumb.jti", expiry, validatorNow))
+	cacheNow = validatorNow.Add(90 * time.Second) // past the next sweep and past expiry
+	assert.False(t, c.claim("thumb.jti", expiry, validatorNow))
+}
+
+// Whoever holds an agent key chooses the jti, so entries are a fixed-size
+// digest rather than the id itself.
+func TestDPoPReplayCache_KeysAreDigests(t *testing.T) {
+	now := time.Unix(1_790_000_000, 0)
+	c := newDPoPReplayCache(func() time.Time { return now })
+
+	require.True(t, c.claim("thumb.jti", now.Add(time.Minute), now))
+	require.Len(t, c.seen, 1)
+	_, ok := c.seen[sha256.Sum256([]byte("thumb.jti"))]
+	assert.True(t, ok)
+}
+
+func proofWithID(t *testing.T, jti string, iat time.Time) jwt.Token {
+	t.Helper()
+	proof := jwt.New()
+	require.NoError(t, proof.Set(jwt.JwtIDKey, jti))
+	require.NoError(t, proof.Set(jwt.IssuedAtKey, iat))
+	return proof
 }
 
 func TestClaimProofID_FailsClosedWithoutCache(t *testing.T) {
-	proof := jwt.New()
-	require.NoError(t, proof.Set(jwt.JwtIDKey, "j"))
-	require.ErrorContains(t, Authentication{}.claimProofID(proof, "thumb"), "not configured")
+	proof := proofWithID(t, "j", time.Now())
+	require.ErrorContains(t, Authentication{}.claimProofID(proof, "thumb", time.Now()), "not configured")
+}
+
+// validateDPoP decides a proof is still live on its own clock reading; the
+// replay decision must use that same reading, or a proof whose expiry falls
+// between the validator's reading and a later one is accepted twice.
+func TestClaimProofID_ReplayWhenCacheClockRunsAhead(t *testing.T) {
+	validatorNow := time.Unix(1_790_000_000, 0)
+	a := Authentication{
+		oidcConfiguration: AuthNConfig{DPoPSkew: time.Hour},
+		dpopReplay:        newDPoPReplayCache(func() time.Time { return validatorNow.Add(3 * time.Second) }),
+	}
+	// iat + dpopskew = validatorNow + 1s: live for the validator, expired on
+	// the cache's clock.
+	proof := proofWithID(t, "j", validatorNow.Add(-time.Hour+time.Second))
+
+	require.NoError(t, a.claimProofID(proof, "thumb", validatorNow))
+	require.ErrorContains(t, a.claimProofID(proof, "thumb", validatorNow), "already been used")
+}
+
+func TestClaimProofID_BoundsJTILength(t *testing.T) {
+	now := time.Unix(1_790_000_000, 0)
+	a := Authentication{
+		oidcConfiguration: AuthNConfig{DPoPSkew: time.Hour},
+		dpopReplay:        newDPoPReplayCache(func() time.Time { return now }),
+	}
+	require.NoError(t, a.claimProofID(proofWithID(t, strings.Repeat("a", 256), now), "thumb", now))
+	require.ErrorContains(t, a.claimProofID(proofWithID(t, strings.Repeat("b", 257), now), "thumb", now), "`jti` is longer than 256 bytes")
 }
