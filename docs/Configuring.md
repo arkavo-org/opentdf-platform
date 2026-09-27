@@ -10,6 +10,7 @@ The platform leverages [viper](https://github.com/spf13/viper) to help load conf
   - [SDK Configuration](#sdk-configuration)
   - [Logger Configuration](#logger-configuration)
   - [Server Configuration](#server-configuration)
+    - [Agent tokens at KAS](#agent-tokens-at-kas)
     - [CORS Configuration](#cors-configuration)
       - [Additive Configuration](#additive-configuration)
       - [Programmatic Configuration](#programmatic-configuration)
@@ -126,6 +127,10 @@ Root level key `server`
 | `auth.skew`             | The amount of time drift allowed between a tokens `exp` claim and the server time.                            | `1m`    | OPENTDF_SERVER_AUTH_SKEW             |
 | `auth.public_client_id` | [DEPRECATED] The oidc client id. This is leveraged by otdfctl.                                                |         | OPENTDF_SERVER_AUTH_PUBLIC_CLIENT_ID |
 | `auth.enforceDPoP`      | If true, DPoP bindings on Access Tokens are enforced.                                                         | `false` | OPENTDF_SERVER_AUTH_ENFORCEDPOP      |
+| `auth.agent_status.url`           | authnz-rs base URL. The KAS calls `GET {url}/agents/workloads/{id}/status` before every agent-token rewrap. Must be `https` (plain `http` only on loopback), with no userinfo and a host. Unset ⇒ every agent rewrap is refused. |         |                                      |
+| `auth.agent_status.client_id`     | Confidential `client_credentials` client for the service CWT sent as `X-Auth-Token`. It must be listed in authnz-rs `AGENT_STATUS_CLIENT_IDS`; a 403 from identity denies every agent and is logged at ERROR. |         |                                      |
+| `auth.agent_status.client_secret` | Secret for `client_id`. Never logged or serialized.                                                                                                |         |                                      |
+| `auth.agent_status.timeout`       | Per-call timeout to identity.                                                                                                                      | `3s`    |                                      |
 | `cryptoProvider`        | A list of public/private keypairs and their use. Described [below](#crypto-provider)                          | empty   |                                      |
 | `enable_pprof`          | Enable golang performance profiling                                                                           | `false` | OPENTDF_SERVER_ENABLE_PPROF          |
 | `grpc.reflection`       | The configuration for the grpc server.                                                                        | `true`  | OPENTDF_SERVER_GRPC_REFLECTION       |
@@ -151,6 +156,10 @@ server:
     enabled: true
     audience: https://example.com
     issuer: https://example.com
+    agent_status:
+      url: https://identity.example.com
+      client_id: <status-client-id>
+      client_secret: <from your secret store>
   cryptoProvider:
     standard:
       keys:
@@ -163,6 +172,30 @@ server:
           private: kas-ec-private.pem
           cert: kas-ec-cert.pem
 ```
+
+### Agent tokens at KAS
+
+The KAS treats a verified bearer as an agent token when it carries any one of these markers, whichever ABAC would otherwise decide: `arkavo_workload` is present; `arkavo_swarm` is present; `arkavo_roles` contains `agent`; or `arkavo_npe` is present and is not exactly `{type: "device"}` (the only non-agent `arkavo_npe` authnz-rs mints). A token with a new, legitimate, non-agent `arkavo_npe` type is treated as an agent token, and refused, until that type is allowlisted in this check. Contract: authnz-rs `docs/agent-credentials-contract.md` v1.
+
+The check runs once per rewrap request, before any key access object (KAO) in it is unwrapped. If it denies, every KAO in the request is refused with the same `forbidden` an ABAC denial produces, and each one is audited as a rewrap failure; a refused agent learns nothing about which of its KAOs it lacked ABAC access to. Denials are logged as `agent rewrap denied` with the reason and, when identity supplied one, an incident id; two reasons that mean every agent is being refused because of server configuration (`agent_status` unconfigured, or this KAS's status client rejected by identity) are logged at `ERROR` rather than `WARN`.
+
+For a request from an agent token, all of the following must hold, in addition to the ABAC decision:
+
+- **Proof of possession.** A DPoP proof (RFC 9449) signed by the token's `cnf` key, using the algorithm that key requires — RS256 for RSA, ES256 for P-256, EdDSA for Ed25519; a `cnf` key of any other type is refused. The proof's `jwk` must equal the `cnf` key, and it needs a single-use `jti`, an `ath` over the access token, and (because agent proofs are key-bound) an `iat` no more than `auth.skew` in the future. For a Connect call, `htu` is the RPC procedure path, `/kas.AccessService/Rewrap`; for REST, `htu` is computed from the request's `Origin` header or its `Host` and TLS state, which a reverse proxy can get wrong, so agents should use the Connect rewrap rather than REST `/kas/v2/rewrap`. Send the proof as `Authorization: DPoP <token>` (`Bearer` is also accepted); the check applies whenever `cnf` is present, independent of `auth.enforceDPoP`.
+- **Workload status.** An agent token missing `sub`, `arkavo_workload`, `arkavo_swarm`, or `arkavo_account_id`, or whose `arkavo_workload` is not shaped `wl-` followed by 32 lowercase hex characters, is refused before identity is ever called. Otherwise, `auth.agent_status` must answer `state = eligible` for the token's `arkavo_workload`, with `current_did` equal to the token's `sub`, `swarm` equal to `arkavo_swarm`, and `owner` equal to `arkavo_account_id`. Generation 0 is always refused, and the answer's `generation` must not be lower than the highest generation this KAS process has already seen for that workload — that high-water mark never decreases, including when a later, denying status arrives for the same workload. An allowing answer is cached for at most `min(valid_until - now, 5s)`; a denying one is never cached. If `auth.agent_status` is unconfigured, every agent token is refused (a non-agent token is unaffected); if it is configured but fails validation, the server fails to start.
+  Status comes from `GET {auth.agent_status.url}/agents/workloads/{id}/status`, called with a service CWT (minted via `client_credentials` from `auth.agent_status.client_id`/`client_secret`) in the `X-Auth-Token` header; that client id must be listed in authnz-rs `AGENT_STATUS_CLIENT_IDS`. A 404 (unknown workload), a 403 (client not allowed), any other non-200 answer, a timeout, a redirect (redirects are not followed, since Go would forward `X-Auth-Token` to the redirect target), and a response body that fails to decode all deny. `auth.agent_status.timeout` bounds each individual call to identity (default `3s`); the status check as a whole — including a retry of the token and status calls after an expired service CWT — has its own fixed 5 s deadline.
+- **Dissemination.** A policy is judged on its own: if its `dissem` list is non-empty, it is released to an agent only when the list names the agent's DID exactly (case-sensitive, no trimming). For every other caller, `dissem` remains not enforced (log-only), as before.
+
+Two related rules changed for every caller, not only agents:
+
+- **`X-Actor-Token`.** A same-`sub` actor token is no longer a shortcut: the verified actor token's `sub` must appear in the bearer token's `act` claim (a list of `{"sub": "..."}` entries), or the request is rejected. An absent `X-Actor-Token` header is unaffected.
+- **Signed Request Token (SRT) verification.** An SRT is now verified with the DPoP key's own algorithm — RS256 for RSA, ES256 for P-256, EdDSA for Ed25519 — and a key type this maps to none of those is refused. In particular, a P-256 key on the `cnf.jkt` path now verifies its SRT with ES256 rather than a fixed algorithm.
+
+Known limitations, carried from the DPoP proof-of-possession review:
+
+- The DPoP `jti` replay cache is per-process, in memory. With more than one KAS replica, or across a restart, a captured proof can be replayed once per replica (or once more after a restart) within `auth.dpopskew` (`1h` by default).
+- The replay cache assumes the server's wall clock does not step backwards.
+- EdDSA is now also accepted on the `cnf.jkt` (bare thumbprint) path, alongside the RS/ES/PS families. Like the rest of that path, an EdDSA proof there gets no algorithm-to-key match check and no `jti` replay check — those only apply to the key-bound path (a `cnf.jwk`, whether rendered from an RFC 8747 COSE_Key by the CWT verifier or supplied directly by a trusted issuer as an RFC 7800 `cnf`), which is what agent tokens use.
 
 ### CORS Configuration
 
