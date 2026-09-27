@@ -23,6 +23,7 @@ import (
 	"github.com/lestrrat-go/jwx/v2/jws"
 	"github.com/lestrrat-go/jwx/v2/jwt"
 
+	"github.com/opentdf/platform/service/internal/agentstatus"
 	"github.com/opentdf/platform/service/logger"
 	"github.com/opentdf/platform/service/logger/audit"
 	"google.golang.org/grpc/metadata"
@@ -113,6 +114,9 @@ type Authentication struct {
 	// agents, or an issuer's RFC 7800 key) so a captured proof cannot be
 	// replayed while it is still acceptable.
 	dpopReplay *dpopReplayCache
+	// agentStatus answers the KAS's per-rewrap workload check; nil when
+	// server.auth.agent_status is unset.
+	agentStatus *agentstatus.Client
 
 	// Used for testing
 	_testCheckTokenFunc func(ctx context.Context, authHeader []string, dpopInfo receiverInfo, dpopHeader []string, actorHeader []string) (jwt.Token, context.Context, error)
@@ -131,6 +135,14 @@ func NewAuthenticator(ctx context.Context, cfg Config, logger *logger.Logger, we
 		return nil, err
 	}
 	a.tokenVerifier = tokenVerifier
+
+	if cfg.AgentStatus.Enabled() {
+		if a.agentStatus, err = agentstatus.New(cfg.AgentStatus); err != nil {
+			return nil, fmt.Errorf("server.auth.agent_status: %w", err)
+		}
+	} else {
+		logger.Warn("server.auth.agent_status is not configured: the KAS refuses every agent-token rewrap")
+	}
 
 	roleProvider, err := resolveRoleProvider(ctx, cfg, logger)
 	if err != nil {

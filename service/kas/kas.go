@@ -109,6 +109,7 @@ func NewRegistration() *serviceregistry.Service[kasconnect.AccessServiceHandler]
 				srp.Logger.Info("kas registered trust.KeyManagers", slog.Any("key_managers", kmgrs))
 
 				p.SDK = srp.SDK
+				p.AgentStatus = srp.AgentStatus
 				p.Logger = srp.Logger
 				p.ApplyConfig(kasCfg, srp.Security)
 				p.Tracer = srp.Tracer

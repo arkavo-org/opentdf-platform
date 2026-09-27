@@ -9,6 +9,7 @@ import (
 
 	kaspb "github.com/opentdf/platform/protocol/go/kas"
 	otdf "github.com/opentdf/platform/sdk"
+	"github.com/opentdf/platform/service/internal/agentstatus"
 	"github.com/opentdf/platform/service/internal/security"
 	"github.com/opentdf/platform/service/logger"
 	"github.com/opentdf/platform/service/pkg/config"
@@ -26,6 +27,9 @@ type Provider struct {
 	SDK          *otdf.SDK
 	AttributeSvc *url.URL
 	KeyDelegator *trust.DelegatingKeyService
+	// AgentStatus is consulted before releasing a key to an agent token; nil
+	// means unconfigured and every agent rewrap is refused.
+	AgentStatus agentstatus.Checker
 	// Deprecated: Use SecurityProvider instead
 	CryptoProvider *security.StandardCrypto // Kept for backward compatibility
 	Logger         *logger.Logger

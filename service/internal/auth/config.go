@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/casbin/casbin/v2/persist"
+	"github.com/opentdf/platform/service/internal/agentstatus"
 	"github.com/opentdf/platform/service/logger"
 	"github.com/opentdf/platform/service/pkg/authz"
 )
@@ -16,6 +17,10 @@ type Config struct {
 	// Used for re-authentication of IPC connections
 	IPCReauthRoutes []string `mapstructure:"-" json:"-"`
 	AuthNConfig     `mapstructure:",squash"`
+
+	// AgentStatus is server.auth.agent_status: where the KAS asks authnz-rs
+	// whether an agent's workload is eligible before every agent rewrap.
+	AgentStatus agentstatus.Config `mapstructure:"agent_status" json:"agent_status"`
 
 	// Programmatic role provider overrides (not loaded from config)
 	RoleProvider          authz.RoleProvider                   `mapstructure:"-" json:"-"`

@@ -13,6 +13,7 @@ import (
 	"github.com/opentdf/platform/service/entityresolution"
 	entityresolutionV2 "github.com/opentdf/platform/service/entityresolution/v2"
 	"github.com/opentdf/platform/service/health"
+	"github.com/opentdf/platform/service/internal/agentstatus"
 	authn "github.com/opentdf/platform/service/internal/auth"
 	"github.com/opentdf/platform/service/internal/server"
 	"github.com/opentdf/platform/service/kas"
@@ -206,8 +207,10 @@ func startServices(ctx context.Context, params startServicesParams) error {
 			}
 
 			var accessTokenVerifier authn.AccessTokenVerifier
+			var agentStatus agentstatus.Checker
 			if otdf != nil && otdf.AuthN != nil {
 				accessTokenVerifier = otdf.AuthN.AccessTokenVerifier()
+				agentStatus = otdf.AuthN.AgentStatus()
 			}
 
 			err = svc.Start(ctx, serviceregistry.RegistrationParams{
@@ -221,6 +224,7 @@ func startServices(ctx context.Context, params startServicesParams) error {
 				OTDF:                   otdf, // TODO: REMOVE THIS
 				Tracer:                 tracer,
 				AccessTokenVerifier:    accessTokenVerifier,
+				AgentStatus:            agentStatus,
 				NewCacheClient:         createCacheClient,
 				KeyManagerCtxFactories: keyManagerCtxFactories,
 			})

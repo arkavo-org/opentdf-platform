@@ -13,6 +13,7 @@ import (
 
 	"connectrpc.com/connect"
 	"github.com/opentdf/platform/sdk"
+	"github.com/opentdf/platform/service/internal/agentstatus"
 	authn "github.com/opentdf/platform/service/internal/auth"
 	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc"
@@ -49,6 +50,10 @@ type RegistrationParams struct {
 	trace.Tracer
 	// AccessTokenVerifier validates request tokens using the platform's shared auth configuration.
 	AccessTokenVerifier authn.AccessTokenVerifier
+
+	// AgentStatus checks an agent token's workload before key release; nil
+	// when server.auth.agent_status is unset (the KAS then refuses agents).
+	AgentStatus agentstatus.Checker
 
 	// NewCacheClient is a function that can be used to create a new cache instance for the service
 	NewCacheClient func(cache.Options) (*cache.Cache, error)
