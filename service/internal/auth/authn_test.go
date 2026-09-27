@@ -898,7 +898,10 @@ func TestActorAuthorized(t *testing.T) {
 		{"map entry missing sub", []any{map[string]any{"other": "x"}}, false},
 		{"map entry sub wrong type", []any{map[string]any{"sub": 42}}, false},
 		{"map entry sub is empty string", []any{map[string]any{"sub": ""}}, false},
+		{"empty act list", []any{}, false},
+		{"well-formed entry for another actor", []any{map[string]any{"sub": "https://other.test"}}, false},
 		{"well-formed entry matches", []any{map[string]any{"sub": wantSub}}, true},
+		{"match after a non-matching entry", []any{map[string]any{"sub": "https://other.test"}, map[string]any{"sub": wantSub}}, true},
 	}
 
 	for _, tt := range tests {

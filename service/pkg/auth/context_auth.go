@@ -32,10 +32,8 @@ type authContext struct {
 
 // actorSubjectContextKey is a distinct, unexported context key type for the
 // verified X-Actor-Token subject. Kept separate from authContext (rather
-// than widening it) because authContext's constructor signature is
-// exercised directly by tests in this package and by
-// service/kas/access/rewrap_test.go and
-// service/internal/auth/authn_ipc_metadata_interceptor_test.go.
+// than widening it) so ContextWithAuthNInfo keeps its signature for its
+// many callers.
 type actorSubjectContextKey struct{}
 
 var actorSubjectKey = actorSubjectContextKey{}
