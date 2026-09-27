@@ -34,7 +34,8 @@ type PDPAccessResult struct {
 // canAccess runs the ABAC decision for each policy. requester is the
 // requesting entity's identifier (the verified token's sub). With
 // enforce_dissem on, a policy with a non-empty dissem list is released only
-// when the list names requester exactly (spec/concepts/access_control.md:
+// when the list names requester exactly (see
+// https://github.com/opentdf/spec/blob/main/concepts/access_control.md:
 // the PEP checks the requesting entity's identifier against dissem); the
 // ABAC decision is still required. With it off, dissem is logged as not
 // enforced, as upstream does.

@@ -422,6 +422,9 @@ Environment Variable: `OPENTDF_SERVICES_KAS_KEYRING='[{"kid":"k1","alg":"rsa:204
 | `preview.ec_tdf_enabled` | Whether tdf based ecc support is enabled.                                       | `false`  |
 | `preview.key_management` | Whether new key management features are enabled.                                | `false`  |
 | `root_key`               | Key needed when new key_management functionality is enabled.                    |          |
+| `enforce_dissem`         | Enforce each policy's `dissem` list against the requester's token `sub`, for every caller. See below. | `false`  |
+
+`enforce_dissem` (environment variable `OPENTDF_SERVICES_KAS_ENFORCE_DISSEM`, which takes effect only when the key is present in the YAML file; the environment value must be `true` or `false`, and anything else stops the server at startup): when `true`, a policy whose `dissem` list is non-empty is released only when the list names the requesting entity's identifier, the verified access token's `sub`, exactly (case-sensitive, no trimming). An empty list, or no list, leaves the decision to ABAC alone, and the ABAC decision is always still required. A requester outside the list gets `forbidden` for every key access object of that policy, like an ABAC denial. When `false` (the default) the KAS keeps upstream's behaviour: `dissem` is logged as not enforced and ignored. Before enabling it, check which identifiers your TDFs put in `dissem`: a TDF that lists something other than its readers' token `sub` (a group name, an email address) becomes unreadable to them.
 
 Example:
 
