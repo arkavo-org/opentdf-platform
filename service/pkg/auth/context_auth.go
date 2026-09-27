@@ -43,8 +43,9 @@ var actorSubjectKey = actorSubjectContextKey{}
 // ContextWithActorSubject stores the verified subject of an X-Actor-Token
 // presented alongside the bearer token, for audit purposes. checkToken
 // calls this on the success path only after verifying the actor token's
-// signature and confirming it is authorized to act on behalf of the
-// bearer's subject (self-actation, or listed in the bearer's `act` claim).
+// signature and confirming its subject is listed in the bearer's `act`
+// claim; a subject equal to the bearer's own is not a self-presentation
+// shortcut and is rejected unless `act` lists it.
 func ContextWithActorSubject(ctx context.Context, actor string) context.Context {
 	return context.WithValue(ctx, actorSubjectKey, actor)
 }

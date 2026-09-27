@@ -506,13 +506,16 @@ func (a *Authentication) checkToken(ctx context.Context, authHeader []string, dp
 	// X-Actor-Token: carries a second token identifying the effective actor
 	// making the request on behalf of the bearer token's subject (e.g. an
 	// agent acting for a person). When present, it is verified with the same
-	// token verifier used for the bearer, and its subject must either equal
-	// the bearer's own subject (self-actation) or appear in the bearer
-	// token's `act` claim (a list of {"sub": "..."} entries); an actor token
-	// with no subject, or one that fails either check, is rejected. An
-	// absent header leaves behavior unchanged. See ContextWithActorSubject
-	// (service/pkg/auth/context_auth.go) for how the verified actor subject
-	// is carried forward for audit.
+	// token verifier used for the bearer, and its subject must appear in the
+	// bearer token's `act` claim (a list of {"sub": "..."} entries). A
+	// subject equal to the bearer's own is not a self-presentation
+	// shortcut: an actor token is only meaningful for a distinct forwarder,
+	// so that case is rejected unless `act` lists it (identity-plane end
+	// state, amended 2026-08-28; arks enforces the same rule). An actor
+	// token with no subject, or one that fails the `act` check, is
+	// rejected. An absent header leaves behavior unchanged. See
+	// ContextWithActorSubject (service/pkg/auth/context_auth.go) for how
+	// the verified actor subject is carried forward for audit.
 	var verifiedActorSub string
 	if len(actorHeader) > 0 && actorHeader[0] != "" {
 		actorRaw := actorHeader[0]
@@ -524,7 +527,7 @@ func (a *Authentication) checkToken(ctx context.Context, authHeader []string, dp
 		if actorSub == "" {
 			return nil, nil, errors.New("actor token has no subject")
 		}
-		if actorSub != accessToken.Subject() && !actorAuthorized(accessToken, actorSub) {
+		if !actorAuthorized(accessToken, actorSub) {
 			return nil, nil, errors.New("actor not authorized for this token")
 		}
 		verifiedActorSub = actorSub

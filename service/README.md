@@ -67,11 +67,12 @@ header, the platform recognizes:
 - `X-Actor-Token` - A second, separately verified access token identifying the
   effective actor making the request on behalf of the bearer token's subject
   (for example, an agent acting for a person). The platform enforces that the
-  actor token's subject either equals the bearer token's own subject
-  (self-actation) or appears in the bearer token's `act` claim (a list of
-  `{"sub": "..."}` entries); an actor token that verifies but carries no
-  subject is rejected. The header is optional — omitting it leaves
-  authentication behavior unchanged.
+  actor token's subject appears in the bearer token's `act` claim (a list of
+  `{"sub": "..."}` entries). A subject equal to the bearer's own is not a
+  self-presentation shortcut: an actor token is only meaningful for a
+  distinct forwarder, so that case is rejected unless `act` lists it. An
+  actor token that verifies but carries no subject is also rejected. The
+  header is optional — omitting it leaves authentication behavior unchanged.
 
 ## Development
 
