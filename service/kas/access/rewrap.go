@@ -21,13 +21,13 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
-	"github.com/lestrrat-go/jwx/v2/jwa"
 	"github.com/lestrrat-go/jwx/v2/jwk"
 	"github.com/lestrrat-go/jwx/v2/jwt"
 	"github.com/opentdf/platform/lib/identifier"
 	"github.com/opentdf/platform/lib/ocrypto"
 	"github.com/opentdf/platform/protocol/go/entity"
 	kaspb "github.com/opentdf/platform/protocol/go/kas"
+	authn "github.com/opentdf/platform/service/internal/auth"
 	"github.com/opentdf/platform/service/internal/security"
 	"github.com/opentdf/platform/service/logger"
 	"github.com/opentdf/platform/service/logger/audit"
@@ -251,14 +251,18 @@ func (p *Provider) validateSRTClaims(ctx context.Context, token jwt.Token, requi
 	return userErr
 }
 
-// verifySRTSignature validates the SRT signature against the supplied DPoP key when
-// verification is required.
+// verifySRTSignature validates the SRT signature against the DPoP key with the
+// one algorithm that key type signs with: RS256 for RSA (unchanged), ES256 for
+// P-256 and EdDSA for Ed25519 (agents sign the SRT with their caller key).
 func (p *Provider) verifySRTSignature(ctx context.Context, srt string, dpopJWK jwk.Key) error {
-	_, err := jwt.Parse(
-		[]byte(srt),
-		jwt.WithKey(jwa.RS256, dpopJWK),
-		jwt.WithValidate(false),
-	)
+	alg, err := authn.SignatureAlgorithmForKey(dpopJWK)
+	if err == nil {
+		_, err = jwt.Parse(
+			[]byte(srt),
+			jwt.WithKey(alg, dpopJWK),
+			jwt.WithValidate(false),
+		)
+	}
 	if err != nil {
 		if p.Logger != nil {
 			p.Logger.WarnContext(ctx,
