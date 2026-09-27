@@ -492,3 +492,37 @@ func TestCWTToken_NpeNestedStructures_Sanitized(t *testing.T) {
 		t.Errorf("nested_list[1] = %#v, want 7 as a number", nestedList[1])
 	}
 }
+
+// TestAgentCWT_EmitsOnlyDelegatedEntitlements pins end state §2.2 for the real
+// wire format: an agent's direct entitlements are exactly
+// arkavo_entitlements. The owner's account id travels only as the client-id
+// claim on the subject; no entity is keyed on it, nothing is resolved from
+// it, and a device class ceiling never applies to an agent.
+func TestAgentCWT_EmitsOnlyDelegatedEntitlements(t *testing.T) {
+	svc := newSvc(t, Config{
+		TrustMaterializedClaims: true,
+		TrustedIssuer:           issuer,
+		DeviceClassCeilings: map[string][]string{
+			"unverified": {"https://arkavo.ai/attr/classification/value/internal"},
+		},
+	})
+	ents := chainsFor(t, svc, agentCWT(t, issuer))
+	for _, e := range ents {
+		if e.GetClientId() == "00000000-0000-0000-0000-000000000001" {
+			t.Errorf("entity keyed on the owner's account id: %v", e)
+		}
+	}
+	got := entitlementsOf(t, svc, ents)
+	want := map[string]bool{
+		"https://arkavo.ai/attr/tdf/value/decrypt": true,
+		"https://arkavo.ai/attr/action/value/read": true,
+	}
+	if len(got) != len(want) {
+		t.Fatalf("agent entitlements = %v, want exactly %v", got, want)
+	}
+	for fqn := range got {
+		if !want[fqn] {
+			t.Errorf("agent received %s, which is not in arkavo_entitlements", fqn)
+		}
+	}
+}
