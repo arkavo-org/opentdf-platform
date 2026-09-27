@@ -142,10 +142,13 @@ entitlements and the policy snapshot vocabulary.
 
 An agent keeps its delegated entitlements only while authnz-rs says its
 workload may still use them. The resolver asks on every `ResolveEntities`
-call for an agent subject, so every v2 decision made from a verified token
-(the KAS path, and token identifiers) sees a quarantine once the status
-lease runs out (see **Timing** below), including a PEP that resolves a
-chain it built earlier from a token.
+call for an agent subject, so every v2 decision made from a token that
+authentication signature-verified — the KAS path, and RAR's request-token
+identifiers (see **Scope**) — sees a quarantine once the status lease runs
+out (see **Timing** below), including a PEP that resolves a chain it built
+earlier from such a token. A token identifier a caller supplies directly to
+`GetDecision` or `GetEntitlements` is outside this guarantee (see
+**Scope**).
 
 ```yaml
 services:
@@ -172,8 +175,10 @@ services:
 
 Setting any of `url`, `client_id` or `client_secret` enables the block, and
 a block that fails validation stops the server at startup. With none of them
-set, every agent subject resolves with no entitlements and the server logs a
-warning. The `OPENTDF_SERVICES_ENTITYRESOLUTION_AGENT_STATUS_*` environment
+set, every agent subject resolves with no entitlements, and the server logs
+a warning only when `trust_materialized_claims` is `true` (with it `false`,
+entitlements are already disabled on both paths, so no warning). The
+`OPENTDF_SERVICES_ENTITYRESOLUTION_AGENT_STATUS_*` environment
 variables only take effect when the same key is present in the YAML file.
 `cache_expiration` has no effect in this mode: the resolver keeps no entity
 cache, and the 5 s bound depends on that.
@@ -193,7 +198,7 @@ outage does not change their decisions.
 - its token's `cnf` carries a public key (`cnf.jwk` with `kty` `OKP` and `x`,
   or `EC` with `x` and `y`; the CWT verifier renders it from the COSE_Key
   authnz-rs mints), so its DPoP proof was key-bound (algorithm held to the
-  key, single-use `jti`);
+  key, single-use `jti`) where authentication ran (the KAS path);
 - it has `sub`, `arkavo_workload` (`wl-` plus 32 lowercase hex),
   `arkavo_swarm` and `arkavo_account_id` (read from `client_id_claim`); a
   token missing one is refused without calling authnz-rs;
@@ -256,16 +261,22 @@ the subject's claims too; neither matters while the deployed policy keeps
 `subject_mappings: []`, which `TestArkavoSnapshot_HasNoSubjectMappings`
 pins for the in-repo example.
 
-**Scope.** The check covers decisions made from a verified token: the KAS
-(which always sends the raw bearer) and token or request-token identifiers
-to `GetDecision`. A caller that supplies its own entity chain to
-`GetDecision` or `GetEntitlements` asserts its own claims (this was already
-true in claims-passthrough mode, and under the KAS gate this replaces): a
-SUBJECT carrying `arkavo_trusted` and no agent marker is not checked. In
-arkavo deployments, only trusted PEPs may call those endpoints with
-entity-chain identifiers. v1 authorization (`GetDecisions`) is not
-supported in arkavo mode: the v1 entity resolver has no arkavo mode, so v1
-decisions never reach this check.
+**Scope.** The check covers decisions made from a token that authentication
+signature-verified: the KAS (which always sends the raw bearer) and RAR's
+`/token` endpoint (`service/authorization/v2/rar.go`), which verifies the
+caller's `subject_token` before forwarding it as a request-token identifier
+to `GetEntitlements`/`GetDecisionMultiResource`. The ERS decodes an
+`EntityIdentifier_Token`'s claims without verifying its signature
+(`DecodeClaimsFromToken`, `jwt.WithVerify(false)`), and the JIT PDP does not
+verify it either, so a token identifier a caller supplies directly to
+`GetDecision` or `GetEntitlements` — bypassing the KAS and RAR's own
+verification — is asserted exactly like a supplied entity chain (this was
+already true of entity chains in claims-passthrough mode, and under the KAS
+gate this replaces): a SUBJECT carrying `arkavo_trusted` and no agent marker
+is not checked. In arkavo deployments, only trusted PEPs may call those
+endpoints with entity-chain or caller-supplied token identifiers. v1
+authorization (`GetDecisions`) is not supported in arkavo mode: the v1
+entity resolver has no arkavo mode, so v1 decisions never reach this check.
 
 **Deployment.** Deploy this together with the proof-of-possession change
 (the CWT verifier's COSE_Key `cnf` rendering): once agent tokens
@@ -273,8 +284,12 @@ authenticate, an arkavo resolver without this check grants their delegated
 entitlements with no status check. Configure `agent_status` in the process
 that runs this resolver and verify the status credentials (a 403 or a
 credentials refusal is logged at `ERROR`) before agent traffic is enabled.
-Dissemination for agents is a separate KAS option,
-`services.kas.enforce_dissem`, off by default.
+As a concrete pre-rollout check: after configuring `agent_status`, run a
+smoke rewrap as a known-eligible agent and check the ERS log has no
+`arkavo: agent entitlements withheld` at `ERROR` (a 403 from the status
+endpoint or rejected credentials) — the client mints its service token
+lazily, so nothing is checked at startup. Dissemination for agents is a
+separate KAS option, `services.kas.enforce_dissem`, off by default.
 
 **Known limits.** The generation high-water mark is per process and in
 memory, so a restarted or sibling platform process accepts any generation

@@ -121,8 +121,10 @@ func (s *EntityResolutionService) CreateEntityChainsFromTokens(
 
 // ResolveEntities: a claims entity carrying the trusted marker yields direct
 // entitlements: arkavo_entitlements (lowercased and deduplicated), plus the
-// class ceiling when the claims describe a device NPE. Everything else
-// resolves with no entitlements.
+// class ceiling when the claims describe a device NPE — but for a subject
+// carrying an agent marker, only when the agent gate (agent_gate.go) admits
+// it; a withheld agent resolves with no claims. Everything else resolves
+// with no entitlements.
 func (s *EntityResolutionService) ResolveEntities(
 	ctx context.Context,
 	req *connect.Request[entityresolutionV2.ResolveEntitiesRequest],
