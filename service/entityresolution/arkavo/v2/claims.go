@@ -30,7 +30,15 @@ type arkavoClaims struct {
 	Roles, Entitlements []string
 	Npe                 *npeClaim
 	Actors              []string
-	Raw                 map[string]any
+	// Workload and Swarm are "" when absent or not a string. The Has* flags
+	// are true whenever the claim is present, whatever its type, so a
+	// malformed value still gates the subject. AgentRole: arkavo_roles is
+	// "agent" or lists it.
+	Workload, Swarm                          string
+	HasWorkload, HasSwarm, HasNpe, AgentRole bool
+	// KeyBound: cnf carries the key itself (cnf.jwk).
+	KeyBound bool
+	Raw      map[string]any
 }
 
 func strList(v any) []string {
@@ -68,6 +76,13 @@ func parseArkavoClaims(m map[string]any) arkavoClaims {
 	c.AccountID, _ = m["arkavo_account_id"].(string)
 	c.Roles = strList(m["arkavo_roles"])
 	c.Entitlements = strList(m["arkavo_entitlements"])
+	c.Workload, _ = m[claimWorkload].(string)
+	_, c.HasWorkload = m[claimWorkload]
+	c.Swarm, _ = m[claimSwarm].(string)
+	_, c.HasSwarm = m[claimSwarm]
+	_, c.HasNpe = m[claimNpe]
+	c.AgentRole = hasAgentRole(m[claimRoles])
+	c.KeyBound = hasKeyCnf(m[claimCnf])
 	if raw, ok := m["arkavo_npe"].(map[string]any); ok {
 		n := &npeClaim{}
 		n.Type, _ = raw["type"].(string)

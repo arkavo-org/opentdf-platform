@@ -41,14 +41,33 @@ func newSvc(t *testing.T, cfg Config) *EntityResolutionService {
 
 const issuer = "https://identity.arkavo.net"
 
+// agentToken is a contract v1 agent token: workload, swarm and a cnf that
+// carries the agent key (cnf.jwk), as checkToken sees it after rendering the
+// COSE_Key cnf.
 func agentToken(t *testing.T, iss string) string {
-	return buildJWT(t, map[string]interface{}{
-		"iss": iss, "sub": "did:key:z6Mkagent",
-		"arkavo_account_id":   "00000000-0000-0000-0000-000000000001",
+	return buildJWT(t, agentClaims(iss))
+}
+
+func agentClaims(iss string) map[string]interface{} {
+	return map[string]interface{}{
+		"iss": iss, "sub": testAgentDID,
+		"arkavo_account_id":   testOwner,
 		"arkavo_roles":        []interface{}{"agent"},
 		"arkavo_entitlements": []interface{}{"https://arkavo.ai/attr/tdf/value/decrypt", "https://arkavo.ai/attr/action/value/read"},
-		"arkavo_npe":          map[string]interface{}{"type": "agent", "delegation_id": "did:key:z6Mkagent", "depth": 0},
-	})
+		"arkavo_npe":          map[string]interface{}{"type": "agent", "delegation_id": testAgentDID, "depth": 0},
+		"arkavo_workload":     testWorkload,
+		"arkavo_swarm":        testSwarm,
+		"cnf":                 map[string]interface{}{"jwk": testAgentJWK()},
+	}
+}
+
+// newAgentSvc is newSvc with a status checker that finds every workload
+// eligible, for tests about what an admitted agent resolves to.
+func newAgentSvc(t *testing.T, cfg Config) *EntityResolutionService {
+	t.Helper()
+	svc := newSvc(t, cfg)
+	svc.agentStatus = &fakeChecker{}
+	return svc
 }
 
 func chainsFor(t *testing.T, svc *EntityResolutionService, tok string) []*entity.Entity {
@@ -97,7 +116,7 @@ func TestAgentToken_SubjectAndEnvironmentEntities(t *testing.T) {
 }
 
 func TestAgentToken_DirectEntitlementsFromClaims(t *testing.T) {
-	svc := newSvc(t, Config{TrustMaterializedClaims: true, TrustedIssuer: issuer})
+	svc := newAgentSvc(t, Config{TrustMaterializedClaims: true, TrustedIssuer: issuer})
 	got := entitlementsOf(t, svc, chainsFor(t, svc, agentToken(t, issuer)))
 	want := []string{"https://arkavo.ai/attr/tdf/value/decrypt", "https://arkavo.ai/attr/action/value/read"}
 	for _, fqn := range want {
@@ -262,16 +281,25 @@ func signCWT(t *testing.T, iss, sub string, custom map[any]any) string {
 	return base64.RawURLEncoding.EncodeToString(raw)
 }
 
+// agentCWT is agentToken as a CWT. Its cnf is text-keyed ({"jwk": ...}),
+// which decodes to the same map the verifier renders a COSE_Key cnf into.
 func agentCWT(t *testing.T, iss string) string {
 	t.Helper()
-	return signCWT(t, iss, "did:key:z6Mkagent", map[any]any{
-		"arkavo_account_id": "00000000-0000-0000-0000-000000000001",
+	jwkMembers := map[any]any{}
+	for k, v := range testAgentJWK() {
+		jwkMembers[k] = v
+	}
+	return signCWT(t, iss, testAgentDID, map[any]any{
+		"arkavo_account_id": testOwner,
 		"arkavo_roles":      []any{"agent"},
 		"arkavo_entitlements": []any{
 			"https://arkavo.ai/attr/tdf/value/decrypt",
 			"https://arkavo.ai/attr/action/value/read",
 		},
-		"arkavo_npe": map[any]any{"type": "agent", "delegation_id": "did:key:z6Mkagent", "depth": int64(0)},
+		"arkavo_npe":      map[any]any{"type": "agent", "delegation_id": testAgentDID, "depth": int64(0)},
+		"arkavo_workload": testWorkload,
+		"arkavo_swarm":    testSwarm,
+		"cnf":             map[any]any{"jwk": jwkMembers},
 	})
 }
 
@@ -292,7 +320,7 @@ func subjectClaimsMap(t *testing.T, ents []*entity.Entity) map[string]interface{
 }
 
 func TestCWTToken_MatchesEquivalentJWT(t *testing.T) {
-	svc := newSvc(t, Config{TrustMaterializedClaims: true, TrustedIssuer: issuer})
+	svc := newAgentSvc(t, Config{TrustMaterializedClaims: true, TrustedIssuer: issuer})
 
 	jwtEnts := chainsFor(t, svc, agentToken(t, issuer))
 	cwtEnts := chainsFor(t, svc, agentCWT(t, issuer))
@@ -342,6 +370,9 @@ func TestCWTToken_MatchesEquivalentJWT(t *testing.T) {
 	}
 	sort.Strings(jwtKeys)
 	sort.Strings(cwtKeys)
+	if len(jwtKeys) == 0 {
+		t.Fatal("the agent resolved with no entitlements; the comparison would be vacuous")
+	}
 	if !reflect.DeepEqual(jwtKeys, cwtKeys) {
 		t.Fatalf("entitlement FQNs differ: jwt=%v cwt=%v", jwtKeys, cwtKeys)
 	}
@@ -490,5 +521,37 @@ func TestCWTToken_NpeNestedStructures_Sanitized(t *testing.T) {
 	}
 	if n, numOK := nestedList[1].(float64); !numOK || n != 7 {
 		t.Errorf("nested_list[1] = %#v, want 7 as a number", nestedList[1])
+	}
+}
+
+// TestAgentCWT_EmitsOnlyDelegatedEntitlements pins end state §2.2 for the real
+// wire format: an admitted agent's direct entitlements are exactly
+// arkavo_entitlements. The owner's account id travels only as the client-id
+// claim on the subject; no entity is keyed on it, nothing is resolved from
+// it, and a device class ceiling never applies to an agent.
+func TestAgentCWT_EmitsOnlyDelegatedEntitlements(t *testing.T) {
+	svc := newAgentSvc(t, Config{
+		TrustMaterializedClaims: true,
+		TrustedIssuer:           issuer,
+		DeviceClassCeilings: map[string][]string{
+			"unverified": {"https://arkavo.ai/attr/classification/value/internal"},
+		},
+	})
+	ents := chainsFor(t, svc, agentCWT(t, issuer))
+	for _, e := range ents {
+		if e.GetClientId() == testOwner {
+			t.Errorf("entity keyed on the owner's account id: %v", e)
+		}
+	}
+	got := entitlementsOf(t, svc, ents)
+	// Each delegated FQN carries exactly the configured direct-entitlement
+	// actions (default "read"): the key set alone would not catch an agent
+	// being granted more on an entitlement it does hold.
+	want := map[string][]string{
+		"https://arkavo.ai/attr/tdf/value/decrypt": {"read"},
+		"https://arkavo.ai/attr/action/value/read": {"read"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("agent entitlements = %v, want exactly %v", got, want)
 	}
 }

@@ -2,6 +2,8 @@
 // authnz-rs (identity.arkavo.net) tokens. It emits the person (PE) as the
 // SUBJECT entity, each arkavo_npe (agent, device) as an ENVIRONMENT entity,
 // and direct entitlements from arkavo_entitlements — no subject mappings.
+// An agent SUBJECT keeps its entitlements only while authnz-rs says its
+// workload is eligible (agent_status); see agent_gate.go.
 package arkavo
 
 import (
@@ -151,7 +153,16 @@ func (s *EntityResolutionService) ResolveEntities(
 			// TrustedIssuer comparison cannot be redone in this second pass (the
 			// marker is what carries that earlier decision forward).
 			if s.cfg.TrustMaterializedClaims && claims[trustedMarker] == true {
-				rep.DirectEntitlements = s.directEntitlements(parseArkavoClaims(claims))
+				c := parseArkavoClaims(claims)
+				subject := s.agentSubject(claims, c)
+				if err := s.agentDenial(ctx, subject, c); err != nil {
+					// No entitlements and no claims: with nothing to evaluate,
+					// no subject mapping can grant anything either.
+					s.logAgentDenial(ctx, subject, err)
+					reps = append(reps, &entityresolutionV2.EntityRepresentation{OriginalId: id})
+					continue
+				}
+				rep.DirectEntitlements = s.directEntitlements(c)
 			}
 		}
 		reps = append(reps, rep)
@@ -209,21 +220,43 @@ func (s *EntityResolutionService) entitiesFromToken(ctx context.Context, tokenRa
 }
 
 // addTrustedClaims adds the self-asserted, materialized-claims data —
-// arkavo_roles, arkavo_entitlements, and the raw arkavo_npe block — that is
-// only surfaced on the subject once the issuer has been trusted.
+// arkavo_roles, arkavo_entitlements, arkavo_workload, arkavo_swarm, cnf and
+// the raw arkavo_npe block — that is only surfaced on the subject once the
+// issuer has been trusted. ResolveEntities reads the workload, swarm and cnf
+// back to judge an agent, so they travel with the subject: a chain built
+// here and resolved later is judged against the status at resolution time.
 func addTrustedClaims(subjectClaims map[string]any, c arkavoClaims, m map[string]any) {
 	if len(c.Roles) > 0 {
 		subjectClaims["arkavo_roles"] = toAnySlice(c.Roles)
+	} else if role, ok := m[claimRoles].(string); ok && role != "" {
+		// A bare-string role must survive to the second pass: "agent" gates.
+		subjectClaims["arkavo_roles"] = role
 	}
 	if len(c.Entitlements) > 0 {
 		subjectClaims["arkavo_entitlements"] = toAnySlice(c.Entitlements)
 	}
-	raw, ok := m["arkavo_npe"].(map[string]any)
+	// Presence is kept even for a value of the wrong type ("" then), so the
+	// second pass still gates the subject.
+	if c.HasWorkload {
+		subjectClaims[claimWorkload] = c.Workload
+	}
+	if _, ok := m[claimSwarm]; ok {
+		subjectClaims[claimSwarm] = c.Swarm
+	}
+	if cnf, ok := m[claimCnf]; ok {
+		if safe, safeOK := auth.StructpbSafe(cnf); safeOK {
+			subjectClaims[claimCnf] = safe
+		}
+	}
+	raw, ok := m[claimNpe]
 	if !ok {
 		return
 	}
 	if safe, safeOK := auth.StructpbSafe(raw); safeOK {
-		subjectClaims["arkavo_npe"] = safe
+		subjectClaims[claimNpe] = safe
+	} else {
+		// Keep its presence: an unreadable arkavo_npe still gates the subject.
+		subjectClaims[claimNpe] = ""
 	}
 }
 
