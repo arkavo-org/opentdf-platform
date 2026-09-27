@@ -10,6 +10,7 @@ The platform leverages [viper](https://github.com/spf13/viper) to help load conf
   - [SDK Configuration](#sdk-configuration)
   - [Logger Configuration](#logger-configuration)
   - [Server Configuration](#server-configuration)
+    - [DPoP Proof of Possession](#dpop-proof-of-possession)
     - [CORS Configuration](#cors-configuration)
       - [Additive Configuration](#additive-configuration)
       - [Programmatic Configuration](#programmatic-configuration)
@@ -163,6 +164,30 @@ server:
           private: kas-ec-private.pem
           cert: kas-ec-cert.pem
 ```
+
+### DPoP Proof of Possession
+
+A token that carries a `cnf` claim must be presented with a DPoP proof (RFC 9449), whatever `auth.enforceDPoP` says; `auth.enforceDPoP` only decides whether a token without `cnf` is refused. `cnf` binds the token to a key in one of two forms:
+
+- **`cnf.jkt`**, the RFC 7638 thumbprint of the key. The proof's `jwk` must have that thumbprint. This path is unchanged.
+- **`cnf.jwk`**, the key itself (RFC 7800). The CWT verifier renders an RFC 8747 COSE_Key `cnf` (OKP/Ed25519 or EC2/P-256, integer labels) as `cnf.jwk`; a JSON JWT from a trusted issuer may carry `cnf.jwk` directly. A COSE_Key the verifier cannot render (another curve, private key material, a malformed key) stays in `cnf` as a marker, so the token is refused at the proof check instead of being accepted without one. A `cnf` that carries both `jkt` and `jwk` is refused.
+
+A proof against `cnf.jwk` is key-bound, and additionally:
+
+- its `jwk` must equal the `cnf` key, and it must be signed with the one algorithm that key type signs with: RS256 for RSA, ES256 for P-256, EdDSA for Ed25519. Any other key type is refused;
+- its `jti` is single-use (at most 256 bytes);
+- its `iat` may be up to `auth.skew` in the future, for devices whose clocks run ahead;
+- it is refused once the access token is past its `exp` plus `auth.skew`.
+
+EdDSA is an allowed DPoP algorithm on both paths. For a Connect call, `htu` is the RPC procedure path (for example `/kas.AccessService/Rewrap`); for REST, `htu` is built from the request's `Origin` header, or its `Host` and TLS state, which a reverse proxy can get wrong.
+
+The KAS verifies a Signed Request Token (SRT) with the DPoP key's own algorithm, by the same mapping (RS256, ES256, EdDSA); the SRT header's `alg` is never consulted, and a key type outside that mapping is refused. A P-256 key on the `cnf.jkt` path now verifies its SRT with ES256, where before every SRT was verified as RS256.
+
+Known limitations:
+
+- The `jti` replay cache is per process and in memory. An entry is kept until its proof could no longer be accepted: `min(iat + auth.dpopskew, access token exp + auth.skew)`. With more than one replica, or across a restart, a captured proof can be replayed once per replica (or once more after a restart) within that window.
+- The replay cache assumes the server's wall clock does not step backwards.
+- On the `cnf.jkt` path an EdDSA proof, like an RS/ES/PS one, gets no algorithm-to-key check and no `jti` replay check; those apply only to the key-bound `cnf.jwk` path.
 
 ### CORS Configuration
 
