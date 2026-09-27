@@ -34,6 +34,8 @@ func TestEvaluate(t *testing.T) {
 		{"quarantined", func(s *Status) { s.State = "quarantined"; s.Incident = &incident }, 0, ReasonNotEligible},
 		{"unknown state fails closed", func(s *Status) { s.State = "revoked" }, 0, ReasonNotEligible},
 		{"generation went backwards", func(*Status) {}, 4, ReasonGenerationRegressed},
+		// Contract v1: generation starts at 1, so 0 means the field was absent.
+		{"generation absent or zero", func(s *Status) { s.Generation = 0 }, 0, ReasonMissingGeneration},
 		{"sub is not current_did", func(s *Status) { s.CurrentDID = "did:key:z6Mkrotated" }, 0, ReasonDIDMismatch},
 		// Contract v1: recovery sets state=eligible, current_did="" and
 		// generation+1; nothing may be released until the owner authorizes again.
@@ -57,10 +59,12 @@ func TestEvaluate(t *testing.T) {
 			if assert.NotNil(t, d) {
 				assert.Equal(t, tt.reason, d.Reason)
 				assert.Equal(t, testWorkload, d.Workload)
+				assert.Equal(t, st.Generation, d.Generation)
 			}
 		})
 	}
 	d := evaluate(func() Status { s := liveStatus(); s.State = "quarantined"; s.Incident = &incident; return s }(), subject(), 0)
+	require.NotNil(t, d)
 	assert.Equal(t, "inc-9", d.Incident)
 }
 
@@ -97,6 +101,8 @@ func TestCheckSubject(t *testing.T) {
 		"pre-workload (track-1) token has no arkavo_workload": {Subject{DID: testDID, Swarm: testSwarm, Owner: "owner-1"}, ReasonMissingWorkload},
 		"workload hex too short":                              {Subject{DID: testDID, Workload: "wl-7", Swarm: testSwarm, Owner: "owner-1"}, ReasonMalformedWorkload},
 		"workload hex uppercase":                              {Subject{DID: testDID, Workload: "wl-00112233445566778899AABBCCDDEEFF", Swarm: testSwarm, Owner: "owner-1"}, ReasonMalformedWorkload},
+		"workload hex too long":                               {Subject{DID: testDID, Workload: "wl-00112233445566778899aabbccddeeff0", Swarm: testSwarm, Owner: "owner-1"}, ReasonMalformedWorkload},
+		"workload with a non-hex lowercase letter":            {Subject{DID: testDID, Workload: "wl-00112233445566778899aabbccddeefg", Swarm: testSwarm, Owner: "owner-1"}, ReasonMalformedWorkload},
 		"workload without the wl- prefix":                     {Subject{DID: testDID, Workload: "00112233445566778899aabbccddeeff", Swarm: testSwarm, Owner: "owner-1"}, ReasonMalformedWorkload},
 		// Contract v1 omits arkavo_swarm while the workload has no swarm; such a
 		// token is refused before any status call.

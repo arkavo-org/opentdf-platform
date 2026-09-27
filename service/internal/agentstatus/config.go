@@ -6,6 +6,7 @@ package agentstatus
 import (
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/url"
@@ -36,6 +37,10 @@ type Secret string
 func (Secret) String() string       { return redacted }
 func (Secret) LogValue() slog.Value { return slog.StringValue(redacted) }
 
+// Format covers the verbs String does not: %#v and %d print the underlying
+// string, also for a Config embedded in a larger struct.
+func (Secret) Format(f fmt.State, _ rune) { _, _ = io.WriteString(f, redacted) }
+
 // MarshalJSON renders an unset secret as "": pkg/config seeds its defaults
 // from the JSON of a zero config, and a "[REDACTED]" default would stand in
 // for a missing client_secret and get past validate().
@@ -50,9 +55,13 @@ func (s Secret) MarshalJSON() ([]byte, error) {
 func (c Config) Enabled() bool { return c.URL != "" }
 
 func (c Config) validate() error {
+	// Neither error names the URL: it may carry credentials.
 	u, err := url.Parse(c.URL)
 	if err != nil {
-		return fmt.Errorf("agent_status.url: %w", err)
+		return errors.New("agent_status.url is not a valid URL")
+	}
+	if u.User != nil {
+		return errors.New("agent_status.url must not carry userinfo; use client_id and client_secret")
 	}
 	if u.Host == "" {
 		return errors.New("agent_status.url has no host")

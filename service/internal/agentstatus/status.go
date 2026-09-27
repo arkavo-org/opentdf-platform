@@ -25,6 +25,7 @@ const (
 	ReasonWorkloadMismatch    = "status is for a different workload"
 	ReasonNotEligible         = "workload is not eligible"
 	ReasonGenerationRegressed = "status generation went backwards"
+	ReasonMissingGeneration   = "status has no generation (contract v1 starts at 1)"
 	ReasonDIDMismatch         = "sub is not the workload's current_did"
 	ReasonSwarmMismatch       = "arkavo_swarm does not match the workload's swarm"
 	ReasonMissingOwner        = "agent token has no arkavo_account_id"
@@ -125,6 +126,8 @@ func evaluate(st Status, s Subject, highWater uint64) *DenialError {
 		d.Reason = ReasonWorkloadMismatch
 	case st.State != stateEligible:
 		d.Reason = ReasonNotEligible
+	case st.Generation == 0:
+		d.Reason = ReasonMissingGeneration
 	case st.Generation < highWater:
 		d.Reason = ReasonGenerationRegressed
 	case !bound(st.CurrentDID, s.DID):
