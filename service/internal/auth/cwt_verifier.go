@@ -337,14 +337,14 @@ func decodeCWTClaims(payload []byte) (map[string]any, error) {
 				out["cwt:"+strconv.FormatInt(key, 10)] = normalizeCBOR(v)
 				continue
 			}
-			out[name] = normalizeCBOR(v)
+			out[name] = claimValue(name, v)
 		case uint64:
 			name, ok := cwtIntLabelToName(int64(key))
 			if !ok {
 				out["cwt:"+strconv.FormatUint(key, 10)] = normalizeCBOR(v)
 				continue
 			}
-			out[name] = normalizeCBOR(v)
+			out[name] = claimValue(name, v)
 		case string:
 			out[key] = normalizeCBOR(v)
 		default:
