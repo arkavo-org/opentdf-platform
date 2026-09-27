@@ -475,3 +475,39 @@ func TestVerifyAccessToken_UnsupportedCOSEKeyIsRefusedAtDPoP(t *testing.T) {
 	_, _, err = a.validateDPoP(tok, raw, rewrapReceiver(), []string{proof})
 	require.ErrorContains(t, err, "unsupported COSE_Key in `cnf` claim")
 }
+
+// validateDPoP decides a key-bound proof on one clock reading, and must not
+// accept a proof whose replay entry (which expires at token exp + skew at
+// the latest) would already be expired on that reading: the access token
+// verifier judged exp earlier, on its own clock and with no skew.
+func TestValidateDPoP_KeyBoundRefusedPastTokenExpiry(t *testing.T) {
+	edPub, edPriv, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	edJWK, err := jwk.FromRaw(edPub)
+	require.NoError(t, err)
+	const skew = time.Minute
+	a := Authentication{
+		oidcConfiguration: AuthNConfig{DPoPSkew: time.Hour, TokenSkew: skew},
+		dpopReplay:        newDPoPReplayCache(time.Now),
+	}
+	token := func(t *testing.T, exp time.Time) jwt.Token {
+		t.Helper()
+		tok := jwt.New()
+		require.NoError(t, tok.Set("cnf", map[string]any{"jwk": edJWK}))
+		require.NoError(t, tok.Set(jwt.ExpirationKey, exp))
+		return tok
+	}
+	const raw = "raw-access-token"
+
+	t.Run("exp + skew already passed: refused", func(t *testing.T) {
+		proof := agentProof(t, edPriv, jwa.EdDSA, raw, rewrapProcedure, "jti-past-exp")
+		_, _, err := a.validateDPoP(token(t, time.Now().Add(-skew-time.Second)), raw, rewrapReceiver(), []string{proof})
+		require.ErrorContains(t, err, "the access token has expired")
+	})
+	t.Run("exp passed but within skew: accepted", func(t *testing.T) {
+		proof := agentProof(t, edPriv, jwa.EdDSA, raw, rewrapProcedure, "jti-within-skew")
+		_, keyBound, err := a.validateDPoP(token(t, time.Now().Add(-skew/2)), raw, rewrapReceiver(), []string{proof})
+		require.NoError(t, err)
+		assert.True(t, keyBound)
+	})
+}

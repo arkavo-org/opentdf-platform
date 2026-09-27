@@ -119,7 +119,7 @@ func (a Authentication) claimProofID(proof jwt.Token, tokenExp time.Time, thumbp
 	}
 	expiry := proof.IssuedAt().Add(a.oidcConfiguration.DPoPSkew)
 	if !tokenExp.IsZero() {
-		expiry = minTime(expiry, tokenExp.Add(a.oidcConfiguration.TokenSkew))
+		expiry = minTime(expiry, tokenAcceptedUntil(tokenExp, a.oidcConfiguration.TokenSkew))
 	}
 	if !a.dpopReplay.claim(thumbprint+"."+jti, expiry, now) {
 		return errors.New("DPoP JWT `jti` has already been used")
@@ -132,4 +132,14 @@ func minTime(a, b time.Time) time.Time {
 		return b
 	}
 	return a
+}
+
+// tokenAcceptedUntil is the last instant a key-bound proof for a token with
+// this exp is accepted, and so how long its replay entry must live.
+func tokenAcceptedUntil(exp time.Time, skew time.Duration) time.Time { return exp.Add(skew) }
+
+// tokenExpired reports whether now is past tokenAcceptedUntil; a token
+// without exp never is.
+func tokenExpired(exp time.Time, skew time.Duration, now time.Time) bool {
+	return !exp.IsZero() && now.After(tokenAcceptedUntil(exp, skew))
 }

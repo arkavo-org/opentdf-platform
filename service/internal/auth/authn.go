@@ -700,6 +700,13 @@ func (a Authentication) validateDPoP(accessToken jwt.Token, acessTokenRaw string
 	if issuedAt.Add(a.oidcConfiguration.DPoPSkew).Before(now) {
 		return nil, false, errors.New("the DPoP JWT has expired")
 	}
+	// The access token verifier judged exp earlier, on its own clock. A
+	// key-bound proof's replay entry lives no longer than exp + skew, so on
+	// this reading the token must still be inside that bound, or a replay
+	// could find its entry already expired.
+	if keyBound && tokenExpired(accessToken.Expiration(), a.oidcConfiguration.TokenSkew, now) {
+		return nil, false, errors.New("the access token has expired")
+	}
 
 	htma, ok := dpopToken.Get("htm")
 	if !ok {
