@@ -27,6 +27,7 @@ import (
 	"github.com/opentdf/platform/lib/ocrypto"
 	"github.com/opentdf/platform/protocol/go/entity"
 	kaspb "github.com/opentdf/platform/protocol/go/kas"
+	"github.com/opentdf/platform/service/internal/agentstatus"
 	authn "github.com/opentdf/platform/service/internal/auth"
 	"github.com/opentdf/platform/service/internal/security"
 	"github.com/opentdf/platform/service/logger"
@@ -71,6 +72,9 @@ type entityInfo struct {
 	EntityID string `json:"sub"`
 	ClientID string `json:"clientId"`
 	Token    string `json:"-"`
+	// Agent is set when the verified bearer carries any agent marker (see
+	// agentFromToken); tdf3Rewrap gates its release before any unwrap.
+	Agent *agentstatus.Subject `json:"-"`
 }
 
 type kaoResult struct {
@@ -474,6 +478,17 @@ func extractPolicyBinding(policyBinding interface{}) (string, error) {
 	}
 }
 
+// decodePolicy reads a request's policy body (base64 JSON). It touches no key
+// material.
+func decodePolicy(body string) (*Policy, error) {
+	policy := &Policy{}
+	raw, err := base64.StdEncoding.DecodeString(body)
+	if err == nil {
+		err = json.Unmarshal(raw, policy)
+	}
+	return policy, err
+}
+
 func getEntityInfo(ctx context.Context, logger *logger.Logger) (*entityInfo, error) {
 	info := new(entityInfo)
 
@@ -493,6 +508,7 @@ func getEntityInfo(ctx context.Context, logger *logger.Logger) (*entityInfo, err
 		logger.WarnContext(ctx, "missing sub")
 	}
 
+	info.Agent = agentFromToken(token)
 	info.Token = ctxAuth.GetRawAccessTokenFromContext(ctx, logger)
 
 	return info, nil
@@ -627,7 +643,6 @@ func (p *Provider) verifyRewrapRequests(ctx context.Context, req *kaspb.Unsigned
 
 	results := make(map[string]kaoResult)
 	anyValidKAOs := false
-	policy := &Policy{}
 
 	// Check if req is nil
 	if req == nil {
@@ -642,10 +657,7 @@ func (p *Provider) verifyRewrapRequests(ctx context.Context, req *kaspb.Unsigned
 	}
 
 	p.Logger.DebugContext(ctx, "extracting policy", slog.Any("policy", req.GetPolicy()))
-	sDecPolicy, policyErr := base64.StdEncoding.DecodeString(req.GetPolicy().GetBody())
-	if policyErr == nil {
-		policyErr = json.Unmarshal(sDecPolicy, policy)
-	}
+	policy, policyErr := decodePolicy(req.GetPolicy().GetBody())
 
 	for _, kao := range req.GetKeyAccessObjects() {
 		if policyErr != nil {
@@ -871,6 +883,10 @@ func (p *Provider) tdf3Rewrap(ctx context.Context, requests []*kaspb.UnsignedRew
 		var span trace.Span
 		ctx, span = p.Start(ctx, "rewrap-tdf3")
 		defer span.End()
+	}
+
+	if entityInfo.Agent != nil && p.agentReleaseDenied(ctx, entityInfo.Agent) {
+		return "", p.denyAgentRewrap(ctx, requests), nil
 	}
 
 	results := make(policyKAOResults)
