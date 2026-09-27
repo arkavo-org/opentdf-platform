@@ -1,6 +1,10 @@
 package arkavo
 
-import "log/slog"
+import (
+	"log/slog"
+
+	"github.com/opentdf/platform/service/internal/agentstatus"
+)
 
 // defaultClientIDClaim is the fallback for Config.ClientIDClaim.
 //
@@ -27,6 +31,10 @@ type Config struct {
 	DeviceClassCeilings map[string][]string `mapstructure:"device_class_ceilings" json:"device_class_ceilings"`
 	// ClientIDClaim names the claim carrying the PE account id.
 	ClientIDClaim string `mapstructure:"client_id_claim" json:"client_id_claim"`
+	// AgentStatus is where this resolver asks authnz-rs whether an agent
+	// subject's workload is eligible, each time it resolves one. Unset, every
+	// agent subject resolves with no entitlements.
+	AgentStatus agentstatus.Config `mapstructure:"agent_status" json:"agent_status"`
 }
 
 // LogValue keeps config logging structured; nothing here is secret.
@@ -37,6 +45,9 @@ func (c Config) LogValue() slog.Value {
 		slog.Any("direct_entitlement_actions", c.DirectEntitlementActions),
 		slog.Int("device_class_ceilings", len(c.DeviceClassCeilings)),
 		slog.String("client_id_claim", c.ClientIDClaim),
+		slog.String("agent_status_url", c.AgentStatus.URL),
+		slog.String("agent_status_client_id", c.AgentStatus.ClientID),
+		slog.Duration("agent_status_timeout", c.AgentStatus.Timeout),
 	)
 }
 

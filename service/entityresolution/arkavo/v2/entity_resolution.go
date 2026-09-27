@@ -15,6 +15,7 @@ import (
 	"github.com/opentdf/platform/protocol/go/entity"
 	entityresolutionV2 "github.com/opentdf/platform/protocol/go/entityresolution/v2"
 	ent "github.com/opentdf/platform/service/entity"
+	"github.com/opentdf/platform/service/internal/agentstatus"
 	"github.com/opentdf/platform/service/internal/auth"
 	"github.com/opentdf/platform/service/logger"
 	"github.com/opentdf/platform/service/pkg/config"
@@ -46,12 +47,15 @@ type EntityResolutionService struct {
 	entityresolutionV2.UnimplementedEntityResolutionServiceServer
 	cfg    Config
 	logger *logger.Logger
+	// agentStatus judges agent subjects' workloads; nil when agent_status is
+	// unset, and then every agent subject resolves with no entitlements.
+	agentStatus agentstatus.Checker
 	trace.Tracer
 }
 
 func RegisterArkavoERS(cfg config.ServiceConfig, log *logger.Logger) (*EntityResolutionService, serviceregistry.HandlerServer) {
-	var c Config
-	if err := mapstructure.Decode(cfg, &c); err != nil {
+	c, err := decodeConfig(cfg)
+	if err != nil {
 		log.Error("failed to decode arkavo entity resolution config", slog.Any("error", err))
 		panic(fmt.Sprintf("failed to decode arkavo entity resolution config: %v", err))
 	}
@@ -60,7 +64,34 @@ func RegisterArkavoERS(cfg config.ServiceConfig, log *logger.Logger) (*EntityRes
 	if c.TrustMaterializedClaims && c.TrustedIssuer == "" {
 		log.Warn("arkavo: trust_materialized_claims is enabled with no trusted_issuer — any token the platform accepts can assert entitlements")
 	}
-	return &EntityResolutionService{cfg: c, logger: log}, nil
+	svc := &EntityResolutionService{cfg: c, logger: log}
+	if !c.AgentStatus.Enabled() {
+		if c.TrustMaterializedClaims {
+			log.Warn("arkavo: agent_status is not configured — every agent subject resolves with no entitlements")
+		}
+		return svc, nil
+	}
+	client, err := agentstatus.New(c.AgentStatus)
+	if err != nil {
+		log.Error("invalid arkavo agent_status config", slog.Any("error", err))
+		panic(fmt.Sprintf("entityresolution.agent_status: %v", err))
+	}
+	svc.agentStatus = client
+	return svc, nil
+}
+
+// decodeConfig reads the service config as RegisterArkavoERS always has,
+// plus a duration hook: agent_status.timeout arrives as a string ("3s").
+func decodeConfig(in config.ServiceConfig) (Config, error) {
+	var c Config
+	dec, err := mapstructure.NewDecoder(&mapstructure.DecoderConfig{
+		DecodeHook: mapstructure.StringToTimeDurationHookFunc(),
+		Result:     &c,
+	})
+	if err != nil {
+		return c, err
+	}
+	return c, dec.Decode(in)
 }
 
 func NewERS(cfg Config, log *logger.Logger) *EntityResolutionService {
