@@ -138,10 +138,11 @@ entirely — no marker check avoids this setting.
 Subject mappings are not used — all authorization flows through direct
 entitlements and the policy snapshot vocabulary.
 
-## Agent workload status (`agent_status`)
+## Agent status (`agent_status`)
 
-An agent keeps its delegated entitlements only while authnz-rs says its
-workload may still use them. The resolver asks on every `ResolveEntities`
+An agent keeps its delegated entitlements only while authnz-rs says the
+agent identity (its `did:key`, the token's `sub`) is eligible and the token
+is current. The resolver asks on every `ResolveEntities`
 call for an agent subject, so every v2 decision made from a token that
 authentication signature-verified — the KAS path, and RAR's request-token
 identifiers (see **Scope**) — sees a quarantine once the status lease runs
@@ -168,7 +169,7 @@ services:
 
 | Field | Description | Default |
 | --- | --- | --- |
-| `agent_status.url` | authnz-rs base URL. The resolver calls `GET {url}/agents/workloads/{id}/status` (contract v1). `https` with a host and no userinfo, query or fragment; plain `http` only on loopback. | |
+| `agent_status.url` | authnz-rs base URL. The resolver calls `GET {url}/agents/{did}/status` (contract v2), `{did}` being the token's `sub`. `https` with a host and no userinfo, query or fragment; plain `http` only on loopback. | |
 | `agent_status.client_id` | Confidential `client_credentials` client; its service CWT goes in `X-Auth-Token`. authnz-rs must list it in `AGENT_STATUS_CLIENT_IDS`. | |
 | `agent_status.client_secret` | Secret for `client_id`. Never logged. | |
 | `agent_status.timeout` | Per-call timeout; one status check (token call plus status call) is bounded at twice this. At most `5s`. | `3s` |
@@ -185,10 +186,12 @@ cache, and the 5 s bound depends on that.
 
 **Which subjects are checked.** A trusted-issuer subject is checked when it
 carries any agent marker: an `arkavo_npe` of any type but `device`
-(including a missing or malformed type), `arkavo_workload`, `arkavo_swarm`,
-or an `agent` role in `arkavo_roles`. A checked subject must be an
-`arkavo_npe` of type `agent`; any other combination (a workload without an
-agent NPE, an unknown NPE type) is refused without calling authnz-rs, so a
+(including a missing or malformed type), `arkavo_swarm`,
+`arkavo_state_version` (whatever its value), or an `agent` role in
+`arkavo_roles`. A marker only widens the check; it never grants anything.
+A checked subject must be an `arkavo_npe` of type `agent`;
+any other combination (a swarm without an agent NPE, an unknown NPE type) is
+refused without calling authnz-rs, so a
 new NPE type is refused until this resolver allows it. Person and device
 subjects carry none of these markers and are never checked, so an authnz-rs
 outage does not change their decisions.
@@ -199,16 +202,28 @@ outage does not change their decisions.
   or `EC` with `x` and `y`; the CWT verifier renders it from the COSE_Key
   authnz-rs mints), so its DPoP proof was key-bound (algorithm held to the
   key, single-use `jti`) where authentication ran (the KAS path);
-- it has `sub`, `arkavo_workload` (`wl-` plus 32 lowercase hex),
+- it has `sub` (a `did:key`: `did:key:z` and base58btc, at most 128
+  characters), `arkavo_state_version` (an integer from 1 to 2^53 − 1, read
+  exactly as written in a JWT payload or as a CBOR integer),
   `arkavo_swarm` and `arkavo_account_id` (read from `client_id_claim`); a
-  token missing one is refused without calling authnz-rs;
-- authnz-rs answers `state = eligible` for that workload, with `current_did`
-  equal to `sub`, `swarm` equal to `arkavo_swarm`, `owner` equal to the
-  account id, and a `generation` of at least 1 and not below the highest
-  this process has seen for the workload.
+  token missing one is refused without calling authnz-rs. A token minted
+  before contract v2 has no `arkavo_state_version`;
+- authnz-rs answers `state = eligible` for that DID (`unassessed`,
+  `suspended` and `quarantined` all refuse; authnz-rs derives `suspended`
+  from an expired appraisal), with `agent` equal to `sub`, `swarm` equal to
+  `arkavo_swarm`, `owner` equal to the account id, and a `state_version` of
+  at least 1 that is not below the highest this process has seen for the DID;
+- the token's `arkavo_state_version` equals that `state_version`: any
+  mismatch refuses. A lower one is a token minted before the identity's
+  latest state change (for example before a quarantine, then recovery and
+  re-appraisal, or before a swarm change) and is refused; a higher one means
+  the answer is older than the token and is refused too. An appraisal
+  renewal does not change `state_version`, so renewing never invalidates
+  tokens the agent already holds.
 
-An allowing answer is cached for `min(valid_until - now, 5s)`; a denying one
-is never cached. Any failure to get an answer (timeout, non-200, a redirect,
+An allowing answer is cached per DID for `min(valid_until - now, 5s)`
+(authnz-rs also caps `valid_until` at the end of the appraisal); a denying
+one is never cached, and a token newer than the cached answer asks again. Any failure to get an answer (timeout, non-200, a redirect,
 an undecodable body) refuses.
 
 **Timing.** Status is re-fetched at most 5 s after identity's last allowing
@@ -223,7 +238,8 @@ deadline.
 entitlements and no claims, and `ResolveEntities` still succeeds. The PDP
 denies (and audits the denial), and the KAS answers every key access object
 with the same `forbidden` an ABAC denial gets, inside a normal rewrap
-response. The reason, incident id and generation go to the log as
+response. The reason, the status's state and `state_version`, the token's
+`arkavo_state_version` and the incident id go to the log as
 `arkavo: agent entitlements withheld`; reasons that refuse every agent
 (unconfigured, the status client not allowed, its credentials rejected, a
 checker fault) are logged at `ERROR`.
@@ -291,11 +307,11 @@ endpoint or rejected credentials) — the client mints its service token
 lazily, so nothing is checked at startup. Dissemination for agents is a
 separate KAS option, `services.kas.enforce_dissem`, off by default.
 
-**Known limits.** The generation high-water mark is per process and in
-memory, so a restarted or sibling platform process accepts any generation
-of 1 or more. Contract v1 does not tie a token to a generation. Status
-freshness is bounded as described under **Timing**, not as a release
-deadline. Supplied entity chains are outside the check (see **Scope**).
+**Known limits.** The `state_version` high-water mark is per process and in
+memory, so a restarted or sibling platform process accepts any version of 1
+or more that equals the token's; the token/version binding still refuses a
+token minted before the identity's latest state change. Status freshness is
+bounded as described under **Timing**, not as a release deadline. Supplied entity chains are outside the check (see **Scope**).
 
 ## Testing
 
