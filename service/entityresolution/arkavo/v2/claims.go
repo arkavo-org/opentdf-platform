@@ -156,8 +156,9 @@ func exactStateVersion(raw json.RawMessage) any {
 // whether the token is one that carries the claim. A CWT (one base64url
 // segment) is not.
 func jwtPayloadClaim(tokenRaw, claim string) (json.RawMessage, bool) {
+	const compactJWSSegments = 3 // header.payload.signature
 	parts := strings.Split(tokenRaw, ".")
-	if len(parts) != 3 {
+	if len(parts) != compactJWSSegments {
 		return nil, false
 	}
 	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
