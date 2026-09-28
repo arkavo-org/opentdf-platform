@@ -2,6 +2,8 @@
 // authnz-rs (identity.arkavo.net) tokens. It emits the person (PE) as the
 // SUBJECT entity, each arkavo_npe (agent, device) as an ENVIRONMENT entity,
 // and direct entitlements from arkavo_entitlements — no subject mappings.
+// An agent SUBJECT keeps its entitlements only while authnz-rs says the agent
+// is eligible and its token is current (agent_status); see agent_gate.go.
 package arkavo
 
 import (
@@ -15,6 +17,7 @@ import (
 	"github.com/opentdf/platform/protocol/go/entity"
 	entityresolutionV2 "github.com/opentdf/platform/protocol/go/entityresolution/v2"
 	ent "github.com/opentdf/platform/service/entity"
+	"github.com/opentdf/platform/service/internal/agentstatus"
 	"github.com/opentdf/platform/service/internal/auth"
 	"github.com/opentdf/platform/service/logger"
 	"github.com/opentdf/platform/service/pkg/config"
@@ -46,12 +49,15 @@ type EntityResolutionService struct {
 	entityresolutionV2.UnimplementedEntityResolutionServiceServer
 	cfg    Config
 	logger *logger.Logger
+	// agentStatus judges agent subjects; nil when agent_status is
+	// unset, and then every agent subject resolves with no entitlements.
+	agentStatus agentstatus.Checker
 	trace.Tracer
 }
 
 func RegisterArkavoERS(cfg config.ServiceConfig, log *logger.Logger) (*EntityResolutionService, serviceregistry.HandlerServer) {
-	var c Config
-	if err := mapstructure.Decode(cfg, &c); err != nil {
+	c, err := decodeConfig(cfg)
+	if err != nil {
 		log.Error("failed to decode arkavo entity resolution config", slog.Any("error", err))
 		panic(fmt.Sprintf("failed to decode arkavo entity resolution config: %v", err))
 	}
@@ -60,7 +66,34 @@ func RegisterArkavoERS(cfg config.ServiceConfig, log *logger.Logger) (*EntityRes
 	if c.TrustMaterializedClaims && c.TrustedIssuer == "" {
 		log.Warn("arkavo: trust_materialized_claims is enabled with no trusted_issuer — any token the platform accepts can assert entitlements")
 	}
-	return &EntityResolutionService{cfg: c, logger: log}, nil
+	svc := &EntityResolutionService{cfg: c, logger: log}
+	if !c.AgentStatus.Enabled() {
+		if c.TrustMaterializedClaims {
+			log.Warn("arkavo: agent_status is not configured — every agent subject resolves with no entitlements")
+		}
+		return svc, nil
+	}
+	client, err := agentstatus.New(c.AgentStatus)
+	if err != nil {
+		log.Error("invalid arkavo agent_status config", slog.Any("error", err))
+		panic(fmt.Sprintf("entityresolution.agent_status: %v", err))
+	}
+	svc.agentStatus = client
+	return svc, nil
+}
+
+// decodeConfig reads the service config as RegisterArkavoERS always has,
+// plus a duration hook: agent_status.timeout arrives as a string ("3s").
+func decodeConfig(in config.ServiceConfig) (Config, error) {
+	var c Config
+	dec, err := mapstructure.NewDecoder(&mapstructure.DecoderConfig{
+		DecodeHook: mapstructure.StringToTimeDurationHookFunc(),
+		Result:     &c,
+	})
+	if err != nil {
+		return c, err
+	}
+	return c, dec.Decode(in)
 }
 
 func NewERS(cfg Config, log *logger.Logger) *EntityResolutionService {
@@ -88,8 +121,10 @@ func (s *EntityResolutionService) CreateEntityChainsFromTokens(
 
 // ResolveEntities: a claims entity carrying the trusted marker yields direct
 // entitlements: arkavo_entitlements (lowercased and deduplicated), plus the
-// class ceiling when the claims describe a device NPE. Everything else
-// resolves with no entitlements.
+// class ceiling when the claims describe a device NPE — but for a subject
+// carrying an agent marker, only when the agent gate (agent_gate.go) admits
+// it; a withheld agent resolves with no claims. Everything else resolves
+// with no entitlements.
 func (s *EntityResolutionService) ResolveEntities(
 	ctx context.Context,
 	req *connect.Request[entityresolutionV2.ResolveEntitiesRequest],
@@ -120,7 +155,16 @@ func (s *EntityResolutionService) ResolveEntities(
 			// TrustedIssuer comparison cannot be redone in this second pass (the
 			// marker is what carries that earlier decision forward).
 			if s.cfg.TrustMaterializedClaims && claims[trustedMarker] == true {
-				rep.DirectEntitlements = s.directEntitlements(parseArkavoClaims(claims))
+				c := parseArkavoClaims(claims)
+				subject := s.agentSubject(claims, c)
+				if err := s.agentDenial(ctx, subject, c); err != nil {
+					// No entitlements and no claims: with nothing to evaluate,
+					// no subject mapping can grant anything either.
+					s.logAgentDenial(ctx, subject, err)
+					reps = append(reps, &entityresolutionV2.EntityRepresentation{OriginalId: id})
+					continue
+				}
+				rep.DirectEntitlements = s.directEntitlements(c)
 			}
 		}
 		reps = append(reps, rep)
@@ -178,21 +222,51 @@ func (s *EntityResolutionService) entitiesFromToken(ctx context.Context, tokenRa
 }
 
 // addTrustedClaims adds the self-asserted, materialized-claims data —
-// arkavo_roles, arkavo_entitlements, and the raw arkavo_npe block — that is
-// only surfaced on the subject once the issuer has been trusted.
+// arkavo_roles, arkavo_entitlements, arkavo_state_version, arkavo_swarm, cnf
+// and the raw arkavo_npe block — that is only surfaced on the subject once
+// the issuer has been trusted. ResolveEntities reads the state version,
+// swarm and cnf back to judge an agent, so they travel with the subject: a
+// chain built here and resolved later is judged against the status at
+// resolution time.
 func addTrustedClaims(subjectClaims map[string]any, c arkavoClaims, m map[string]any) {
 	if len(c.Roles) > 0 {
 		subjectClaims["arkavo_roles"] = toAnySlice(c.Roles)
+	} else if role, ok := m[claimRoles].(string); ok && role != "" {
+		// A bare-string role must survive to the second pass: "agent" gates.
+		subjectClaims["arkavo_roles"] = role
 	}
 	if len(c.Entitlements) > 0 {
 		subjectClaims["arkavo_entitlements"] = toAnySlice(c.Entitlements)
 	}
-	raw, ok := m["arkavo_npe"].(map[string]any)
+	// Presence is kept whatever the value: a version that
+	// does not read as one travels as stateVersionMalformed, so the second
+	// pass still gates the subject and withholds it.
+	if c.HasStateVersion {
+		if c.StateVersion > 0 {
+			subjectClaims[claimStateVersion] = int64(c.StateVersion)
+		} else {
+			subjectClaims[claimStateVersion] = stateVersionMalformed
+		}
+	}
+	// Presence is kept even for a value of the wrong type ("" then), so the
+	// second pass still gates the subject.
+	if _, ok := m[claimSwarm]; ok {
+		subjectClaims[claimSwarm] = c.Swarm
+	}
+	if cnf, ok := m[claimCnf]; ok {
+		if safe, safeOK := auth.StructpbSafe(cnf); safeOK {
+			subjectClaims[claimCnf] = safe
+		}
+	}
+	raw, ok := m[claimNpe]
 	if !ok {
 		return
 	}
 	if safe, safeOK := auth.StructpbSafe(raw); safeOK {
-		subjectClaims["arkavo_npe"] = safe
+		subjectClaims[claimNpe] = safe
+	} else {
+		// Keep its presence: an unreadable arkavo_npe still gates the subject.
+		subjectClaims[claimNpe] = ""
 	}
 }
 

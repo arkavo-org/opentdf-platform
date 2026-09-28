@@ -2,6 +2,11 @@ package arkavo
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
+	"math"
+	"strconv"
+	"strings"
 
 	"github.com/opentdf/platform/service/internal/auth"
 )
@@ -11,8 +16,28 @@ import (
 // hands the ERS the raw bearer). Signature verification happened upstream.
 // The JOSE-then-CWT parse is shared with the Patreon provider via
 // auth.DecodeClaimsFromToken.
+//
+// arkavo_state_version is then judged exactly: on the JWT path it is read
+// from the payload text, before anything turns it into a float64, and
+// rewritten to an in-range int64 or to stateVersionMalformed; on the CWT
+// path the decoder's own int64 is kept as is, in or out of range (a value
+// outside 0..maxExactVersion later reads as "not a version" via
+// stateVersionClaim), and only a claim present in some other shape becomes
+// stateVersionMalformed. Either way the claim's presence still gates the
+// subject; it never reads as a version unless it is actually one.
 func claimsFromToken(ctx context.Context, tokenRaw string) (map[string]any, error) {
-	return auth.DecodeClaimsFromToken(ctx, tokenRaw)
+	m, err := auth.DecodeClaimsFromToken(ctx, tokenRaw)
+	if err != nil {
+		return nil, err
+	}
+	if raw, ok := jwtPayloadClaim(tokenRaw, claimStateVersion); ok {
+		m[claimStateVersion] = exactStateVersion(raw)
+	} else if v, present := m[claimStateVersion]; present {
+		if _, isInt := v.(int64); !isInt {
+			m[claimStateVersion] = stateVersionMalformed
+		}
+	}
+	return m, nil
 }
 
 type npeClaim struct {
@@ -30,7 +55,18 @@ type arkavoClaims struct {
 	Roles, Entitlements []string
 	Npe                 *npeClaim
 	Actors              []string
-	Raw                 map[string]any
+	// Swarm is "" when absent or not a string. The Has* flags are true
+	// whenever the claim is present, whatever its type or value, so a
+	// malformed value still gates the subject. AgentRole: arkavo_roles is
+	// "agent" or lists it.
+	Swarm                                        string
+	HasSwarm, HasStateVersion, HasNpe, AgentRole bool
+	// StateVersion is arkavo_state_version, 0 when absent or not an integer
+	// from 0 to maxExactVersion: such a token is withheld.
+	StateVersion uint64
+	// KeyBound: cnf carries the key itself (cnf.jwk).
+	KeyBound bool
+	Raw      map[string]any
 }
 
 func strList(v any) []string {
@@ -61,6 +97,82 @@ func asInt64(v any) int64 {
 	return 0
 }
 
+// maxExactVersion is the largest integer every representation on the way
+// holds exactly (2^53 - 1): the claim reaches ResolveEntities through
+// structpb, which carries every number as a float64, and a float64 cannot
+// tell 2^53 from 2^53+1.
+const maxExactVersion = 1<<53 - 1
+
+// maxVersionDigits is len("9007199254740991"), maxExactVersion's digits.
+const maxVersionDigits = 16
+
+// stateVersionMalformed stands in for an arkavo_state_version that is present
+// but is not an integer from 0 to maxExactVersion. Its presence still gates
+// the subject; a string never reads as a version.
+const stateVersionMalformed = "malformed"
+
+// stateVersionClaim reads arkavo_state_version as claimsFromToken leaves it
+// (int64) or as structpb hands it to the second pass (float64): a
+// non-negative integer no larger than maxExactVersion. Anything else, the
+// sentinel included, is not a version.
+func stateVersionClaim(v any) (uint64, bool) {
+	switch x := v.(type) {
+	case int64:
+		if x >= 0 && x <= maxExactVersion {
+			return uint64(x), true
+		}
+	case int:
+		return stateVersionClaim(int64(x))
+	case uint64:
+		if x <= maxExactVersion {
+			return x, true
+		}
+	case float64:
+		if x >= 0 && x <= maxExactVersion && x == math.Trunc(x) {
+			return uint64(x), true
+		}
+	}
+	return 0, false
+}
+
+// exactStateVersion judges arkavo_state_version as written in a JWT payload:
+// an integer literal (digits only: no sign, fraction or exponent) of at most
+// maxExactVersion, returned as the int64 the CWT decoder would give. Anything
+// else is stateVersionMalformed. Reading the text is what keeps 2^53+1 or
+// 1.00000000000000001 from passing as the float64 each rounds to.
+func exactStateVersion(raw json.RawMessage) any {
+	text := strings.TrimSpace(string(raw))
+	if text == "" || len(text) > maxVersionDigits || strings.Trim(text, "0123456789") != "" {
+		return stateVersionMalformed
+	}
+	v, err := strconv.ParseInt(text, 10, 64)
+	if err != nil || v > maxExactVersion {
+		return stateVersionMalformed
+	}
+	return v
+}
+
+// jwtPayloadClaim returns claim's raw JSON from a compact JWS payload, and
+// whether the token is one that carries the claim. A CWT (one base64url
+// segment) is not.
+func jwtPayloadClaim(tokenRaw, claim string) (json.RawMessage, bool) {
+	const compactJWSSegments = 3 // header.payload.signature
+	parts := strings.Split(tokenRaw, ".")
+	if len(parts) != compactJWSSegments {
+		return nil, false
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return nil, false
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &fields); err != nil {
+		return nil, false
+	}
+	raw, ok := fields[claim]
+	return raw, ok
+}
+
 func parseArkavoClaims(m map[string]any) arkavoClaims {
 	c := arkavoClaims{Raw: m}
 	c.Iss, _ = m["iss"].(string)
@@ -68,6 +180,13 @@ func parseArkavoClaims(m map[string]any) arkavoClaims {
 	c.AccountID, _ = m["arkavo_account_id"].(string)
 	c.Roles = strList(m["arkavo_roles"])
 	c.Entitlements = strList(m["arkavo_entitlements"])
+	c.StateVersion, _ = stateVersionClaim(m[claimStateVersion])
+	_, c.HasStateVersion = m[claimStateVersion]
+	c.Swarm, _ = m[claimSwarm].(string)
+	_, c.HasSwarm = m[claimSwarm]
+	_, c.HasNpe = m[claimNpe]
+	c.AgentRole = hasAgentRole(m[claimRoles])
+	c.KeyBound = hasKeyCnf(m[claimCnf])
 	if raw, ok := m["arkavo_npe"].(map[string]any); ok {
 		n := &npeClaim{}
 		n.Type, _ = raw["type"].(string)

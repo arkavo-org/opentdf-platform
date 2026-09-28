@@ -32,6 +32,7 @@ The platform leverages [viper](https://github.com/spf13/viper) to help load conf
       - [Entity Resolution v2 Only](#entity-resolution-v2-only)
       - [Example: Entity Resolution v1](#example-entity-resolution-v1)
       - [Example: Entity Resolution v2](#example-entity-resolution-v2)
+      - [Arkavo mode: agent status](#arkavo-mode-agent-status)
     - [Policy](#policy)
     - [Casbin Endpoint Authorization](#casbin-endpoint-authorization)
       - [Key Aspects of Authorization Configuration](#key-aspects-of-authorization-configuration)
@@ -531,6 +532,19 @@ services:
     cache_expiration: 30s
 ```
 
+
+#### Arkavo mode: agent status
+
+In `mode: arkavo`, `agent_status` tells the resolver where to ask authnz-rs whether an agent identity (its `did:key`) is eligible and its token current. An agent subject resolves with no entitlements while it is not, and whenever `agent_status` is unset. This applies to v2 decisions; v1 authorization is not supported in arkavo mode. Details, including the requirement that every sealed Arkavo TDF carry a data attribute, the scope of the check and the deployment order: [`service/entityresolution/arkavo/v2/README.md`](../service/entityresolution/arkavo/v2/README.md#agent-status-agent_status).
+
+| Field | Description | Default | Environment Variable |
+| --- | --- | --- | --- |
+| `agent_status.url` | authnz-rs base URL (`https`; plain `http` only on loopback) | | OPENTDF_SERVICES_ENTITYRESOLUTION_AGENT_STATUS_URL |
+| `agent_status.client_id` | `client_credentials` client listed in authnz-rs `AGENT_STATUS_CLIENT_IDS` | | OPENTDF_SERVICES_ENTITYRESOLUTION_AGENT_STATUS_CLIENT_ID |
+| `agent_status.client_secret` | Secret for `client_id` | | OPENTDF_SERVICES_ENTITYRESOLUTION_AGENT_STATUS_CLIENT_SECRET |
+| `agent_status.timeout` | Per-call timeout, at most `5s` | `3s` | OPENTDF_SERVICES_ENTITYRESOLUTION_AGENT_STATUS_TIMEOUT |
+
+The environment variables only take effect when the same key is present in the YAML file (an empty value is enough).
 
 ### Policy
 
