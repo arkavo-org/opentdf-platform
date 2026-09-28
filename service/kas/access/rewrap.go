@@ -917,7 +917,7 @@ func (p *Provider) tdf3Rewrap(ctx context.Context, requests []*kaspb.UnsignedRew
 		Jwt:         entityInfo.Token,
 	}
 
-	pdpAccessResults, accessErr := p.canAccess(ctx, tok, policies, additionalRewrapContext.Obligations.FulfillableFQNs)
+	pdpAccessResults, accessErr := p.canAccess(ctx, tok, policies, additionalRewrapContext.Obligations.FulfillableFQNs, entityInfo.EntityID)
 	if accessErr != nil {
 		p.Logger.DebugContext(ctx,
 			"tdf3rewrap: cannot access policy",
