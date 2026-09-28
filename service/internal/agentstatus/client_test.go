@@ -25,10 +25,10 @@ const (
 )
 
 // fakeIdentity stands in for authnz-rs: POST /oauth/token (client_credentials,
-// HTTP Basic) and GET /agents/workloads/{id}/status behind X-Auth-Token. Both
-// bodies are written from explicit JSON maps in authnz-rs's shape
-// (oidc.rs TokenResponse, workload.rs WorkloadStatus), so these tests do not
-// lean on Status's own JSON tags.
+// HTTP Basic) and GET /agents/{did}/status behind X-Auth-Token. Both bodies
+// are written from explicit JSON maps in authnz-rs's shape (oidc.rs
+// TokenResponse, agent_state.rs AgentStatus), so these tests do not lean on
+// Status's own JSON tags.
 type fakeIdentity struct {
 	mu          sync.Mutex
 	status      map[string]any
@@ -51,7 +51,8 @@ func (f *fakeIdentity) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.Method == http.MethodPost && r.URL.Path == "/oauth/token":
 		f.serveToken(w, r)
-	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.EscapedPath(), "/agents/workloads/"):
+	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.EscapedPath(), "/agents/") &&
+		strings.HasSuffix(r.URL.EscapedPath(), "/status"):
 		f.serveStatus(w, r)
 	default:
 		http.NotFound(w, r)
@@ -170,18 +171,19 @@ func newTestClient(t *testing.T, f http.Handler) (*Client, *clock, *httptest.Ser
 	return c, clk, srv
 }
 
-// wireStatus is a contract v1 status body for the test workload, as
-// authnz-rs's WorkloadStatus serializes it.
+// wireStatus is a contract v2 status body for the test agent, as authnz-rs's
+// AgentStatus serializes it.
 func wireStatus(validUntil time.Time, mutate ...func(map[string]any)) map[string]any {
 	st := map[string]any{
-		"workload":    testWorkload,
-		"owner":       "owner-1",
-		"current_did": testDID,
-		"swarm":       testSwarm,
-		"state":       "eligible",
-		"generation":  3,
-		"incident":    nil,
-		"valid_until": validUntil.Unix(),
+		"agent":           testDID,
+		"owner":           "owner-1",
+		"swarm":           testSwarm,
+		"state":           "eligible",
+		"state_version":   testVersion,
+		"appraised_until": validUntil.Unix() + 600,
+		"appraised_by":    "guardian",
+		"incident":        nil,
+		"valid_until":     validUntil.Unix(),
 	}
 	for _, m := range mutate {
 		m(st)
@@ -189,16 +191,23 @@ func wireStatus(validUntil time.Time, mutate ...func(map[string]any)) map[string
 	return st
 }
 
-func withGeneration(g int) func(map[string]any) {
-	return func(st map[string]any) { st["generation"] = g }
+func withVersion(v int) func(map[string]any) {
+	return func(st map[string]any) { st["state_version"] = v }
 }
 
-func quarantined(g int) func(map[string]any) {
+func quarantined(v int) func(map[string]any) {
 	return func(st map[string]any) {
 		st["state"] = "quarantined"
 		st["incident"] = testIncident
-		st["generation"] = g
+		st["state_version"] = v
 	}
+}
+
+// tokenAt is the test subject holding a token minted at state_version v.
+func tokenAt(v uint64) Subject {
+	s := subject()
+	s.StateVersion = v
+	return s
 }
 
 func denial(t *testing.T, err error) *DenialError {
@@ -239,7 +248,7 @@ func TestCheck_EligibleAgentPasses(t *testing.T) {
 	f.set(wireStatus(clk.get().Add(5 * time.Second)))
 
 	require.NoError(t, c.Check(t.Context(), subject()), "an eligible check must return a true nil")
-	assert.Equal(t, []string{"/agents/workloads/" + testWorkload + "/status"}, f.requested())
+	assert.Equal(t, []string{"/agents/" + testDID + "/status"}, f.requested())
 	assert.Equal(t, 1, f.tokens())
 }
 
@@ -248,17 +257,19 @@ func TestCheck_DeniesQuarantineAndMismatches(t *testing.T) {
 		mutate func(map[string]any)
 		reason string
 	}{
-		"quarantined":       {quarantined(4), ReasonNotEligible},
-		"DID mismatch":      {func(s map[string]any) { s["current_did"] = "did:key:z6Mkrotated" }, ReasonDIDMismatch},
-		"swarm mismatch":    {func(s map[string]any) { s["swarm"] = "kit-other" }, ReasonSwarmMismatch},
-		"owner mismatch":    {func(s map[string]any) { s["owner"] = "owner-2" }, ReasonOwnerMismatch},
-		"workload mismatch": {func(s map[string]any) { s["workload"] = "wl-8" }, ReasonWorkloadMismatch},
-		// Contract v1: recovery sets current_did to "" (and generation+1)
-		// until the owner authorizes again.
-		"recovered, not yet re-authorized": {func(s map[string]any) { s["current_did"] = ""; s["generation"] = 4 }, ReasonDIDMismatch},
-		// Contract v1: swarm is "" while the workload has no swarm.
-		"workload has no swarm": {func(s map[string]any) { s["swarm"] = "" }, ReasonSwarmMismatch},
-		"generation absent":     {func(s map[string]any) { delete(s, "generation") }, ReasonMissingGeneration},
+		"quarantined":    {quarantined(4), ReasonNotEligible},
+		"suspended":      {func(s map[string]any) { s["state"] = "suspended" }, ReasonNotEligible},
+		"agent mismatch": {func(s map[string]any) { s["agent"] = "did:key:z6Mkrotated" }, ReasonAgentMismatch},
+		"swarm mismatch": {func(s map[string]any) { s["swarm"] = "kit-other" }, ReasonSwarmMismatch},
+		"owner mismatch": {func(s map[string]any) { s["owner"] = "owner-2" }, ReasonOwnerMismatch},
+		// Contract v2: recovery leaves the identity unassessed (state_version+1)
+		// until a Guardian appraises it.
+		"recovered, not yet re-appraised": {func(s map[string]any) { s["state"] = "unassessed"; s["state_version"] = testVersion + 1 }, ReasonNotEligible},
+		// Re-appraised after recovery: the token from before the quarantine stays dead.
+		"re-appraised after recovery": {withVersion(testVersion + 2), ReasonTokenVersionStale},
+		// Contract v2: swarm is "" while the agent has no swarm.
+		"agent has no swarm":   {func(s map[string]any) { s["swarm"] = "" }, ReasonSwarmMismatch},
+		"state_version absent": {func(s map[string]any) { delete(s, "state_version") }, ReasonStatusMissingVersion},
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := &fakeIdentity{}
@@ -276,8 +287,9 @@ func TestCheck_QuarantineCarriesIncident(t *testing.T) {
 	d := denial(t, c.Check(t.Context(), subject()))
 	assert.Equal(t, ReasonNotEligible, d.Reason)
 	assert.Equal(t, testIncident, d.Incident)
-	assert.Equal(t, uint64(4), d.Generation)
-	assert.Equal(t, testWorkload, d.Workload)
+	assert.Equal(t, uint64(4), d.StateVersion)
+	assert.Equal(t, "quarantined", d.State)
+	assert.Equal(t, testDID, d.Agent)
 }
 
 func TestCheck_UnreachableDenies(t *testing.T) {
@@ -319,16 +331,16 @@ func TestCheck_UndecodableStatusDenies(t *testing.T) {
 		body   func(validUntil int64) string
 		reason string
 	}{
-		"not JSON":            {func(int64) string { return "<html>ok</html>" }, ReasonUnreachable},
-		"negative generation": {func(v int64) string { return statusJSON(`"generation":-1`, v) }, ReasonUnreachable},
-		"generation a string": {func(v int64) string { return statusJSON(`"generation":"7"`, v) }, ReasonUnreachable},
-		"truncated":           {func(int64) string { return `{"workload":"` + testWorkload + `"` }, ReasonUnreachable},
+		"not JSON":               {func(int64) string { return "<html>ok</html>" }, ReasonUnreachable},
+		"negative state_version": {func(v int64) string { return statusJSON(`"state_version":-1`, v) }, ReasonUnreachable},
+		"state_version a string": {func(v int64) string { return statusJSON(`"state_version":"7"`, v) }, ReasonUnreachable},
+		"truncated":              {func(int64) string { return `{"agent":"` + testDID + `"` }, ReasonUnreachable},
 		// The object only closes past the body limit, so the read is cut short.
 		"larger than the body limit": {func(v int64) string {
-			return `{"pad":"` + strings.Repeat("x", maxBodyBytes) + `",` + statusJSON(`"generation":3`, v)[1:]
+			return `{"pad":"` + strings.Repeat("x", maxBodyBytes) + `",` + statusJSON(`"state_version":3`, v)[1:]
 		}, ReasonUnreachable},
 		// null decodes to a zero Status, which binds to nothing.
-		"null": {func(int64) string { return "null" }, ReasonWorkloadMismatch},
+		"null": {func(int64) string { return "null" }, ReasonAgentMismatch},
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := &fakeIdentity{}
@@ -339,96 +351,156 @@ func TestCheck_UndecodableStatusDenies(t *testing.T) {
 	}
 }
 
-func statusJSON(generation string, validUntil int64) string {
-	return fmt.Sprintf(`{"workload":%q,"owner":"owner-1","current_did":%q,"swarm":%q,"state":"eligible",%s,"incident":null,"valid_until":%d}`,
-		testWorkload, testDID, testSwarm, generation, validUntil)
+func statusJSON(stateVersion string, validUntil int64) string {
+	return fmt.Sprintf(`{"agent":%q,"owner":"owner-1","swarm":%q,"state":"eligible",%s,"appraised_until":null,"appraised_by":"owner","incident":null,"valid_until":%d}`,
+		testDID, testSwarm, stateVersion, validUntil)
 }
 
 // The largest body that fits the limit is still accepted.
 func TestCheck_BodyWithinLimitAccepted(t *testing.T) {
 	f := &fakeIdentity{}
 	c, clk, _ := newTestClient(t, f)
-	body := statusJSON(`"generation":3`, clk.get().Add(5*time.Second).Unix())
+	body := statusJSON(`"state_version":3`, clk.get().Add(5*time.Second).Unix())
 	f.rawStatus = body + strings.Repeat(" ", maxBodyBytes-len(body))
 	require.NoError(t, c.Check(t.Context(), subject()))
 }
 
-func TestCheck_GenerationHighWater(t *testing.T) {
+func TestCheck_StateVersionHighWater(t *testing.T) {
 	t.Run("regression denied and not cached", func(t *testing.T) {
 		f := &fakeIdentity{}
 		c, clk, _ := newTestClient(t, f)
-		f.set(wireStatus(clk.get().Add(5*time.Second), withGeneration(5)))
-		require.NoError(t, c.Check(t.Context(), subject()))
+		f.set(wireStatus(clk.get().Add(5*time.Second), withVersion(5)))
+		require.NoError(t, c.Check(t.Context(), tokenAt(5)))
 
 		clk.advance(6 * time.Second)
-		f.set(wireStatus(clk.get().Add(5*time.Second), withGeneration(4)))
-		assert.Equal(t, ReasonGenerationRegressed, denialReason(t, c.Check(t.Context(), subject())))
-		assert.Equal(t, ReasonGenerationRegressed, denialReason(t, c.Check(t.Context(), subject())))
+		f.set(wireStatus(clk.get().Add(5*time.Second), withVersion(4)))
+		assert.Equal(t, ReasonStateVersionRegressed, denialReason(t, c.Check(t.Context(), tokenAt(4))))
+		assert.Equal(t, ReasonStateVersionRegressed, denialReason(t, c.Check(t.Context(), tokenAt(4))))
 		assert.Equal(t, 3, f.calls(), "a regressed status must never be cached")
 
-		// The mark stayed at 5: generation 5 is accepted again, 4 never was.
-		f.set(wireStatus(clk.get().Add(5*time.Second), withGeneration(5)))
-		require.NoError(t, c.Check(t.Context(), subject()))
+		// The mark stayed at 5: version 5 is accepted again, 4 never was.
+		f.set(wireStatus(clk.get().Add(5*time.Second), withVersion(5)))
+		require.NoError(t, c.Check(t.Context(), tokenAt(5)))
 	})
 	t.Run("a denied status still raises the mark", func(t *testing.T) {
 		f := &fakeIdentity{}
 		c, clk, _ := newTestClient(t, f)
 		f.set(wireStatus(clk.get().Add(5*time.Second), quarantined(6)))
-		assert.Equal(t, ReasonNotEligible, denialReason(t, c.Check(t.Context(), subject())))
-		assert.Equal(t, ReasonNotEligible, denialReason(t, c.Check(t.Context(), subject())))
+		assert.Equal(t, ReasonNotEligible, denialReason(t, c.Check(t.Context(), tokenAt(5))))
+		assert.Equal(t, ReasonNotEligible, denialReason(t, c.Check(t.Context(), tokenAt(5))))
 		assert.Equal(t, 2, f.calls(), "a denied status must never be cached")
 
 		// A replay of the pre-quarantine eligible status is refused.
-		f.set(wireStatus(clk.get().Add(5*time.Second), withGeneration(5)))
-		assert.Equal(t, ReasonGenerationRegressed, denialReason(t, c.Check(t.Context(), subject())))
+		f.set(wireStatus(clk.get().Add(5*time.Second), withVersion(5)))
+		assert.Equal(t, ReasonStateVersionRegressed, denialReason(t, c.Check(t.Context(), tokenAt(5))))
 		assert.Equal(t, 3, f.calls())
 
-		f.set(wireStatus(clk.get().Add(5*time.Second), withGeneration(7)))
-		require.NoError(t, c.Check(t.Context(), subject()))
-		assert.Equal(t, 4, f.calls())
+		// Recovered (7, unassessed) and re-appraised (8): only a token minted
+		// after the re-appraisal is released.
+		f.set(wireStatus(clk.get().Add(5*time.Second), withVersion(8)))
+		assert.Equal(t, ReasonTokenVersionStale, denialReason(t, c.Check(t.Context(), tokenAt(5))))
+		require.NoError(t, c.Check(t.Context(), tokenAt(8)))
 	})
-	t.Run("a status for another workload does not move the mark", func(t *testing.T) {
+	t.Run("a status for another agent does not move the mark", func(t *testing.T) {
 		f := &fakeIdentity{}
 		c, clk, _ := newTestClient(t, f)
-		f.set(wireStatus(clk.get().Add(5*time.Second), withGeneration(99), func(s map[string]any) {
-			s["workload"] = "wl-ffffffffffffffffffffffffffffffff"
+		f.set(wireStatus(clk.get().Add(5*time.Second), withVersion(99), func(s map[string]any) {
+			s["agent"] = "did:key:z6Mkother"
 		}))
-		assert.Equal(t, ReasonWorkloadMismatch, denialReason(t, c.Check(t.Context(), subject())))
-		f.set(wireStatus(clk.get().Add(5*time.Second), withGeneration(3)))
+		assert.Equal(t, ReasonAgentMismatch, denialReason(t, c.Check(t.Context(), subject())))
+		f.set(wireStatus(clk.get().Add(5 * time.Second)))
 		require.NoError(t, c.Check(t.Context(), subject()))
 	})
 	// A concurrent fetch that saw the quarantine raises the mark past the
-	// cached generation; the entry is dropped, so the next request asks
+	// cached version; the entry is dropped, so the next request asks
 	// identity and logs the quarantine and its incident rather than a
-	// generation regression.
-	t.Run("a mark raised past the cached generation drops the entry", func(t *testing.T) {
+	// regression.
+	t.Run("a mark raised past the cached version drops the entry", func(t *testing.T) {
 		f := &fakeIdentity{}
 		c, clk, _ := newTestClient(t, f)
-		f.set(wireStatus(clk.get().Add(5*time.Second), withGeneration(5)))
-		require.NoError(t, c.Check(t.Context(), subject()))
+		f.set(wireStatus(clk.get().Add(5*time.Second), withVersion(5)))
+		require.NoError(t, c.Check(t.Context(), tokenAt(5)))
 
 		f.set(wireStatus(clk.get().Add(5*time.Second), quarantined(6)))
-		st, err := c.fetch(t.Context(), testWorkload)
+		st, err := c.fetch(t.Context(), testDID)
 		require.NoError(t, err)
-		require.NotNil(t, c.record(st, subject()))
+		require.NotNil(t, c.record(st, tokenAt(5)))
 
-		d := denial(t, c.Check(t.Context(), subject()))
+		d := denial(t, c.Check(t.Context(), tokenAt(5)))
 		assert.Equal(t, ReasonNotEligible, d.Reason)
 		assert.Equal(t, testIncident, d.Incident)
-		assert.Equal(t, uint64(6), d.Generation)
+		assert.Equal(t, uint64(6), d.StateVersion)
 	})
 	t.Run("a cache hit is judged against the current mark", func(t *testing.T) {
 		f := &fakeIdentity{}
 		c, clk, _ := newTestClient(t, f)
-		f.set(wireStatus(clk.get().Add(5*time.Second), withGeneration(5)))
-		require.NoError(t, c.Check(t.Context(), subject()))
-		// Stands in for a concurrent fetch that saw a later generation while
-		// generation 5 was still cached.
+		f.set(wireStatus(clk.get().Add(5*time.Second), withVersion(5)))
+		require.NoError(t, c.Check(t.Context(), tokenAt(5)))
+		// Stands in for a concurrent fetch that saw a later version while
+		// version 5 was still cached.
 		c.mu.Lock()
-		c.highWater[testWorkload] = 6
+		c.highWater[testDID] = 6
 		c.mu.Unlock()
-		assert.Equal(t, ReasonGenerationRegressed, denialReason(t, c.Check(t.Context(), subject())))
+		assert.Equal(t, ReasonStateVersionRegressed, denialReason(t, c.Check(t.Context(), tokenAt(5))))
 		assert.Equal(t, 1, f.calls())
+	})
+}
+
+// A renewal keeps state_version, so tokens minted before it keep working;
+// a token newer than the cached status skips the cache, and one newer than
+// the live status is refused (identity never serves an older version than a
+// token it minted). Any mismatch between the token's version and the
+// status's withholds.
+func TestCheck_TokenStateVersion(t *testing.T) {
+	t.Run("renewal keeps earlier tokens", func(t *testing.T) {
+		f := &fakeIdentity{}
+		c, clk, _ := newTestClient(t, f)
+		f.set(wireStatus(clk.get().Add(5 * time.Second)))
+		require.NoError(t, c.Check(t.Context(), subject()))
+		clk.advance(6 * time.Second)
+		f.set(wireStatus(clk.get().Add(5*time.Second), func(s map[string]any) {
+			s["appraised_until"] = clk.get().Add(15 * time.Minute).Unix()
+		}))
+		require.NoError(t, c.Check(t.Context(), subject()))
+	})
+	t.Run("a newer token skips the cached status", func(t *testing.T) {
+		f := &fakeIdentity{}
+		c, clk, _ := newTestClient(t, f)
+		f.set(wireStatus(clk.get().Add(5 * time.Second)))
+		require.NoError(t, c.Check(t.Context(), subject()))
+		f.set(wireStatus(clk.get().Add(5*time.Second), withVersion(testVersion+2)))
+		require.NoError(t, c.Check(t.Context(), tokenAt(testVersion+2)))
+		assert.Equal(t, 2, f.calls())
+		assert.Equal(t, ReasonTokenVersionStale, denialReason(t, c.Check(t.Context(), subject())),
+			"the older token is judged against the newer cached status")
+		assert.Equal(t, 2, f.calls())
+	})
+	t.Run("a live status behind the token is refused", func(t *testing.T) {
+		f := &fakeIdentity{}
+		c, clk, _ := newTestClient(t, f)
+		f.set(wireStatus(clk.get().Add(5 * time.Second)))
+		assert.Equal(t, ReasonStatusBehindToken, denialReason(t, c.Check(t.Context(), tokenAt(testVersion+1))))
+	})
+	// Contract v2 bumps state_version on a swarm change, so a token minted in
+	// swarm A never matches again once the agent has moved to B, even after
+	// it moves back to A.
+	t.Run("a swarm change and back withholds the first token", func(t *testing.T) {
+		f := &fakeIdentity{}
+		c, clk, _ := newTestClient(t, f)
+		f.set(wireStatus(clk.get().Add(5 * time.Second)))
+		require.NoError(t, c.Check(t.Context(), subject()))
+
+		clk.advance(6 * time.Second)
+		f.set(wireStatus(clk.get().Add(5*time.Second), withVersion(testVersion+1), func(s map[string]any) {
+			s["swarm"] = "kit-other"
+		}))
+		assert.Equal(t, ReasonTokenVersionStale, denialReason(t, c.Check(t.Context(), subject())))
+
+		clk.advance(6 * time.Second)
+		f.set(wireStatus(clk.get().Add(5*time.Second), withVersion(testVersion+2)))
+		assert.Equal(t, ReasonTokenVersionStale, denialReason(t, c.Check(t.Context(), subject())),
+			"back in the first swarm, the first token still does not match")
+		require.NoError(t, c.Check(t.Context(), tokenAt(testVersion+2)))
 	})
 }
 
@@ -490,10 +562,11 @@ func TestCheck_CacheHonoursValidUntil(t *testing.T) {
 		c, clk, _ := newTestClient(t, f)
 		f.set(wireStatus(clk.get().Add(5 * time.Second)))
 		require.NoError(t, c.Check(t.Context(), subject()))
-		stale := subject()
-		stale.DID = "did:key:z6Mkold"
-		assert.Equal(t, ReasonDIDMismatch, denialReason(t, c.Check(t.Context(), stale)))
-		assert.Equal(t, 1, f.calls())
+		// The cache is keyed by DID: another agent asks for its own status.
+		other := subject()
+		other.DID = "did:key:z6Mkother"
+		assert.Equal(t, ReasonAgentMismatch, denialReason(t, c.Check(t.Context(), other)))
+		assert.Equal(t, 2, f.calls())
 	})
 }
 
@@ -529,7 +602,7 @@ func TestCheck_ServiceToken(t *testing.T) {
 		assert.Equal(t, 2, f.tokens())
 		assert.Equal(t, 2, f.calls())
 	})
-	// The token endpoint's own 404 says nothing about the workload.
+	// The token endpoint's own 404 says nothing about the agent.
 	for _, code := range []int{http.StatusNotFound, http.StatusInternalServerError} {
 		t.Run(fmt.Sprintf("token endpoint %d denies as unreachable", code), func(t *testing.T) {
 			f := &fakeIdentity{tokenCode: code}
@@ -619,14 +692,14 @@ func TestCheck_RefusesUnscopedTokensWithoutCalling(t *testing.T) {
 		s      Subject
 		reason string
 	}{
-		{Subject{Workload: testWorkload, Swarm: testSwarm, Owner: "owner-1"}, ReasonMissingSubject},
-		{Subject{DID: testDID, Swarm: testSwarm, Owner: "owner-1"}, ReasonMissingWorkload},
-		{Subject{DID: testDID, Workload: testWorkload, Owner: "owner-1"}, ReasonMissingSwarm},
-		{Subject{DID: testDID, Workload: testWorkload, Swarm: testSwarm}, ReasonMissingOwner},
-		{Subject{DID: testDID, Workload: "..", Swarm: testSwarm, Owner: "owner-1"}, ReasonMalformedWorkload},
-		{Subject{DID: testDID, Workload: "a/b", Swarm: testSwarm, Owner: "owner-1"}, ReasonMalformedWorkload},
-		{Subject{DID: testDID, Workload: "wl-00112233445566778899aabbccddeeff%2f", Swarm: testSwarm, Owner: "owner-1"}, ReasonMalformedWorkload},
-		{Subject{DID: testDID, Owner: "owner-1", Workload: "wl-7", Swarm: testSwarm}, ReasonMalformedWorkload},
+		{Subject{Swarm: testSwarm, Owner: "owner-1", StateVersion: testVersion}, ReasonMissingSubject},
+		{Subject{DID: testDID, Swarm: testSwarm, Owner: "owner-1"}, ReasonMissingStateVersion},
+		{Subject{DID: testDID, Owner: "owner-1", StateVersion: testVersion}, ReasonMissingSwarm},
+		{Subject{DID: testDID, Swarm: testSwarm, StateVersion: testVersion}, ReasonMissingOwner},
+		{Subject{DID: "..", Swarm: testSwarm, Owner: "owner-1", StateVersion: testVersion}, ReasonMalformedDID},
+		{Subject{DID: "did:key:z6Mk/b", Swarm: testSwarm, Owner: "owner-1", StateVersion: testVersion}, ReasonMalformedDID},
+		{Subject{DID: "did:key:z6Mk%2f", Swarm: testSwarm, Owner: "owner-1", StateVersion: testVersion}, ReasonMalformedDID},
+		{Subject{DID: "wl-00112233445566778899aabbccddeeff", Swarm: testSwarm, Owner: "owner-1", StateVersion: testVersion}, ReasonMalformedDID},
 	} {
 		assert.Equal(t, tt.reason, denialReason(t, c.Check(t.Context(), tt.s)), "%+v", tt.s)
 	}
@@ -634,9 +707,9 @@ func TestCheck_RefusesUnscopedTokensWithoutCalling(t *testing.T) {
 	assert.Equal(t, 0, f.tokens())
 }
 
-// The fetch path refuses a malformed id on its own too, so no future caller
-// can put an unchecked id into the status URL.
-func TestStatusRefusesMalformedWorkload(t *testing.T) {
+// The fetch path refuses a malformed sub on its own too, so no future caller
+// can put an unchecked value into the status URL.
+func TestStatusRefusesMalformedDID(t *testing.T) {
 	f := &fakeIdentity{}
 	c, _, _ := newTestClient(t, f)
 	_, err := c.fetchOnce(t.Context(), "../../oauth/token", false)
@@ -645,12 +718,12 @@ func TestStatusRefusesMalformedWorkload(t *testing.T) {
 	assert.Equal(t, 0, f.tokens())
 }
 
-// Contract v1 errors: 404 unknown workload and 403 (this platform's client
+// Contract v2 errors: 404 unknown agent and 403 (this platform's client
 // is not in AGENT_STATUS_CLIENT_IDS) both deny, each with its own reason so
 // the log names the misconfiguration.
 func TestCheck_NotFoundAndForbiddenDeny(t *testing.T) {
 	for code, reason := range map[int]string{
-		http.StatusNotFound:  ReasonUnknownWorkload,
+		http.StatusNotFound:  ReasonUnknownAgent,
 		http.StatusForbidden: ReasonStatusForbidden,
 	} {
 		t.Run(http.StatusText(code), func(t *testing.T) {
@@ -662,7 +735,7 @@ func TestCheck_NotFoundAndForbiddenDeny(t *testing.T) {
 }
 
 func TestCheck_Concurrent(t *testing.T) {
-	other := "wl-ffeeddccbbaa99887766554433221100"
+	other := "did:key:z6Mkother"
 	f := &fakeIdentity{}
 	c, clk, _ := newTestClient(t, f)
 	f.set(wireStatus(clk.get().Add(5 * time.Second)))
@@ -675,7 +748,7 @@ func TestCheck_Concurrent(t *testing.T) {
 			defer wg.Done()
 			s := subject()
 			if i%2 == 1 {
-				s.Workload = other
+				s.DID = other
 			}
 			if i%8 == 0 {
 				clk.advance(time.Second)
@@ -685,18 +758,18 @@ func TestCheck_Concurrent(t *testing.T) {
 	}
 	wg.Wait()
 	close(errs)
-	var allowed, workloadMismatch int
+	var allowed, agentMismatch int
 	for err := range errs {
 		if err == nil {
 			allowed++
 			continue
 		}
-		// The fake answers with testWorkload's status for every id.
-		require.Equal(t, ReasonWorkloadMismatch, denialReason(t, err))
-		workloadMismatch++
+		// The fake answers with testDID's status for every DID.
+		require.Equal(t, ReasonAgentMismatch, denialReason(t, err))
+		agentMismatch++
 	}
 	assert.Equal(t, 32, allowed)
-	assert.Equal(t, 32, workloadMismatch)
+	assert.Equal(t, 32, agentMismatch)
 }
 
 // Neither the client secret nor the service CWT reaches an error, a log line

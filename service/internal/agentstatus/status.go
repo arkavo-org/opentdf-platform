@@ -6,63 +6,73 @@ import (
 )
 
 const (
-	stateEligible    = "eligible"
-	workloadIDPrefix = "wl-"
-	workloadIDHexLen = 32
+	stateEligible = "eligible"
+	// didKeyPrefix and base58Alphabet bound what reaches the status URL: an
+	// Ed25519 did:key is "did:key:z" and base58btc (contract v2, CWT sub).
+	didKeyPrefix   = "did:key:z"
+	didKeyMaxLen   = 128
+	base58Alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 )
 
 // Denial reasons. They go to the server log only: the resolver withholds
 // every entitlement, and the KAS answers with its generic "forbidden".
 const (
-	ReasonUnconfigured    = "agent status not configured"
-	ReasonUnreachable     = "status service unreachable"
-	ReasonUnknownWorkload = "workload unknown to identity (404)"
+	ReasonUnconfigured = "agent status not configured"
+	ReasonUnreachable  = "status service unreachable"
+	// ReasonUnknownAgent: authnz-rs has no live delegation for the DID
+	// (unknown, revoked or expired, and not quarantined).
+	ReasonUnknownAgent    = "agent unknown to identity, or its delegation revoked or expired (404)"
 	ReasonStatusForbidden = "misconfiguration: this platform's status client is not in authnz-rs AGENT_STATUS_CLIENT_IDS (403)"
 	// ReasonStatusCredentialsRejected is the token endpoint refusing this
 	// platform's client_id/client_secret (401 or 403): a wrong secret, not a
 	// transient fault.
 	ReasonStatusCredentialsRejected = "misconfiguration: identity rejected agent_status.client_id/client_secret at /oauth/token"
 	ReasonMissingSubject            = "agent token has no sub"
-	ReasonMissingWorkload           = "agent token has no arkavo_workload (pre-workload token)"
+	ReasonMalformedDID              = "sub is not a did:key (did:key:z + base58btc, at most 128 characters)"
+	ReasonMissingStateVersion       = "agent token has no arkavo_state_version (minted before contract v2)"
 	ReasonMissingSwarm              = "agent token has no arkavo_swarm"
-	ReasonMalformedWorkload         = "arkavo_workload is not wl- followed by 32 lowercase hex"
-	ReasonWorkloadMismatch          = "status is for a different workload"
-	ReasonNotEligible               = "workload is not eligible"
-	ReasonGenerationRegressed       = "status generation went backwards"
-	ReasonMissingGeneration         = "status has no generation (contract v1 starts at 1)"
-	ReasonDIDMismatch               = "sub is not the workload's current_did"
-	ReasonSwarmMismatch             = "arkavo_swarm does not match the workload's swarm"
 	ReasonMissingOwner              = "agent token has no arkavo_account_id"
-	ReasonOwnerMismatch             = "arkavo_account_id is not the workload's owner"
+	ReasonAgentMismatch             = "status is for a different agent"
+	ReasonNotEligible               = "agent is not eligible"
+	ReasonStatusMissingVersion      = "status has no state_version (contract v2 starts at 1)"
+	ReasonStateVersionRegressed     = "status state_version went backwards"
+	ReasonTokenVersionStale         = "token was minted before the agent's latest state change (arkavo_state_version below state_version)"
+	ReasonStatusBehindToken         = "status state_version is below the token's arkavo_state_version"
+	ReasonSwarmMismatch             = "arkavo_swarm does not match the agent's swarm"
+	ReasonOwnerMismatch             = "arkavo_account_id is not the agent's owner"
 )
 
-// Status is the body of GET /agents/workloads/{workload}/status (contract v1).
+// Status is the body of GET /agents/{did}/status (contract v2).
 type Status struct {
-	Workload   string  `json:"workload"`
-	Owner      string  `json:"owner"`
-	CurrentDID string  `json:"current_did"`
-	Swarm      string  `json:"swarm"`
-	State      string  `json:"state"`
-	Generation uint64  `json:"generation"`
-	Incident   *string `json:"incident"`
-	ValidUntil int64   `json:"valid_until"`
+	Agent          string  `json:"agent"`
+	Owner          string  `json:"owner"`
+	Swarm          string  `json:"swarm"`
+	State          string  `json:"state"`
+	StateVersion   uint64  `json:"state_version"`
+	AppraisedUntil *int64  `json:"appraised_until"`
+	AppraisedBy    *string `json:"appraised_by"`
+	Incident       *string `json:"incident"`
+	ValidUntil     int64   `json:"valid_until"`
 }
 
 // Subject is the agent as its verified token describes it.
 type Subject struct {
-	DID      string
-	Workload string
-	Swarm    string
-	Owner    string // the token's arkavo_account_id
+	DID   string
+	Swarm string
+	Owner string // the token's arkavo_account_id
+	// StateVersion is the token's arkavo_state_version; 0 when absent.
+	StateVersion uint64
 }
 
 // DenialError explains a refused agent for logs and audit.
 type DenialError struct {
-	Reason     string
-	Workload   string
-	Generation uint64
-	Incident   string
-	Cause      error
+	Reason string
+	Agent  string
+	// State and StateVersion are the status's, when one was read.
+	State        string
+	StateVersion uint64
+	Incident     string
+	Cause        error
 }
 
 func (d *DenialError) Error() string {
@@ -81,33 +91,34 @@ type Checker interface {
 }
 
 // checkSubject refuses an agent token that cannot be scoped. A token minted
-// before workloads existed (identity-plane track 1) has no arkavo_workload
-// and is refused here. A workload id outside contract v1's shape never
-// reaches the status URL.
+// before contract v2 has no arkavo_state_version and is refused here. A sub
+// outside the did:key shape never reaches the status URL.
 func checkSubject(s Subject) *DenialError {
 	switch {
 	case s.DID == "":
-		return &DenialError{Reason: ReasonMissingSubject, Workload: s.Workload}
-	case s.Workload == "":
-		return &DenialError{Reason: ReasonMissingWorkload}
+		return &DenialError{Reason: ReasonMissingSubject}
+	case !validAgentDID(s.DID):
+		return &DenialError{Reason: ReasonMalformedDID, Agent: s.DID}
+	case s.StateVersion == 0:
+		return &DenialError{Reason: ReasonMissingStateVersion, Agent: s.DID}
 	case s.Swarm == "":
-		return &DenialError{Reason: ReasonMissingSwarm, Workload: s.Workload}
+		return &DenialError{Reason: ReasonMissingSwarm, Agent: s.DID}
 	case s.Owner == "":
-		return &DenialError{Reason: ReasonMissingOwner, Workload: s.Workload}
-	case !validWorkloadID(s.Workload):
-		return &DenialError{Reason: ReasonMalformedWorkload, Workload: s.Workload}
+		return &DenialError{Reason: ReasonMissingOwner, Agent: s.DID}
 	}
 	return nil
 }
 
-// validWorkloadID accepts contract v1's workload id: "wl-" + 32 lowercase hex.
-func validWorkloadID(id string) bool {
-	hexPart, ok := strings.CutPrefix(id, workloadIDPrefix)
-	if !ok || len(hexPart) != workloadIDHexLen {
+// validAgentDID accepts "did:key:z" followed by base58btc, at most
+// didKeyMaxLen characters in all: nothing that could climb or split the
+// status path.
+func validAgentDID(did string) bool {
+	rest, ok := strings.CutPrefix(did, didKeyPrefix)
+	if !ok || rest == "" || len(did) > didKeyMaxLen {
 		return false
 	}
-	for _, r := range hexPart {
-		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+	for _, r := range rest {
+		if !strings.ContainsRune(base58Alphabet, r) {
 			return false
 		}
 	}
@@ -115,27 +126,29 @@ func validWorkloadID(id string) bool {
 }
 
 // evaluate applies the release conditions to a live status. highWater is the
-// largest generation this process had seen for the workload before st.
+// largest state_version this process had seen for the agent before st.
 //
-// An empty status field never matches, even an empty claim: contract v1 uses
-// "" for "none" (current_did after recovery, swarm before specialization),
-// and release must not hinge on checkSubject having run first.
+// An empty status field never matches, even an empty claim: contract v2 uses
+// "" for "none" (swarm before specialization), and release must not hinge on
+// checkSubject having run first.
 func evaluate(st Status, s Subject, highWater uint64) *DenialError {
-	d := &DenialError{Workload: s.Workload, Generation: st.Generation}
+	d := &DenialError{Agent: s.DID, State: st.State, StateVersion: st.StateVersion}
 	if st.Incident != nil {
 		d.Incident = *st.Incident
 	}
 	switch {
-	case !bound(st.Workload, s.Workload):
-		d.Reason = ReasonWorkloadMismatch
+	case !bound(st.Agent, s.DID):
+		d.Reason = ReasonAgentMismatch
 	case st.State != stateEligible:
 		d.Reason = ReasonNotEligible
-	case st.Generation == 0:
-		d.Reason = ReasonMissingGeneration
-	case st.Generation < highWater:
-		d.Reason = ReasonGenerationRegressed
-	case !bound(st.CurrentDID, s.DID):
-		d.Reason = ReasonDIDMismatch
+	case st.StateVersion == 0:
+		d.Reason = ReasonStatusMissingVersion
+	case st.StateVersion < highWater:
+		d.Reason = ReasonStateVersionRegressed
+	case s.StateVersion < st.StateVersion:
+		d.Reason = ReasonTokenVersionStale
+	case s.StateVersion > st.StateVersion:
+		d.Reason = ReasonStatusBehindToken
 	case !bound(st.Swarm, s.Swarm):
 		d.Reason = ReasonSwarmMismatch
 	case !bound(st.Owner, s.Owner):

@@ -32,8 +32,8 @@ type Config struct {
 	// ClientIDClaim names the claim carrying the PE account id.
 	ClientIDClaim string `mapstructure:"client_id_claim" json:"client_id_claim"`
 	// AgentStatus is where this resolver asks authnz-rs whether an agent
-	// subject's workload is eligible, each time it resolves one. Unset, every
-	// agent subject resolves with no entitlements.
+	// subject is eligible, each time it resolves one. Unset, every agent
+	// subject resolves with no entitlements.
 	AgentStatus agentstatus.Config `mapstructure:"agent_status" json:"agent_status"`
 }
 

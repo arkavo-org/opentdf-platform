@@ -26,10 +26,10 @@ import (
 )
 
 const (
-	testAgentDID = "did:key:z6Mkagent"
-	testOwner    = "00000000-0000-0000-0000-000000000001"
-	testWorkload = "wl-00112233445566778899aabbccddeeff"
-	testSwarm    = "kit-42"
+	testAgentDID     = "did:key:z6Mkagent"
+	testOwner        = "00000000-0000-0000-0000-000000000001"
+	testStateVersion = 3
+	testSwarm        = "kit-42"
 
 	statusClientSecret = "status-client-secret-never-logged"
 	statusServiceToken = "svc-cwt-never-logged"
@@ -75,7 +75,7 @@ type checkerFunc func(context.Context, agentstatus.Subject) error
 func (f checkerFunc) Check(ctx context.Context, s agentstatus.Subject) error { return f(ctx, s) }
 
 func wantSubject() agentstatus.Subject {
-	return agentstatus.Subject{DID: testAgentDID, Workload: testWorkload, Swarm: testSwarm, Owner: testOwner}
+	return agentstatus.Subject{DID: testAgentDID, Swarm: testSwarm, Owner: testOwner, StateVersion: testStateVersion}
 }
 
 func trustedCfg() Config { return Config{TrustMaterializedClaims: true, TrustedIssuer: issuer} }
@@ -162,7 +162,7 @@ func TestAgentGate_EligibleAgentKeepsDelegatedEntitlements(t *testing.T) {
 }
 
 func TestAgentGate_QuarantinedAgentResolvesWithNothing(t *testing.T) {
-	checker := &fakeChecker{err: &agentstatus.DenialError{Reason: agentstatus.ReasonNotEligible, Workload: testWorkload, Generation: 4, Incident: "inc-9"}}
+	checker := &fakeChecker{err: &agentstatus.DenialError{Reason: agentstatus.ReasonNotEligible, Agent: testAgentDID, State: "quarantined", StateVersion: 4, Incident: "inc-9"}}
 	svc, buf := gateSvc(t, trustedCfg(), checker)
 	tok := agentToken(t, issuer)
 	assertWithheld(t, resolveSubject(t, svc, chainsFor(t, svc, tok)))
@@ -170,10 +170,11 @@ func TestAgentGate_QuarantinedAgentResolvesWithNothing(t *testing.T) {
 	assert.Equal(t, "WARN", rec["level"])
 	assert.Equal(t, agentstatus.ReasonNotEligible, rec["reason"])
 	assert.Equal(t, "inc-9", rec["incident"])
-	assert.InDelta(t, 4, rec["generation"], 0)
+	assert.InDelta(t, 4, rec["state_version"], 0)
+	assert.Equal(t, "quarantined", rec["state"])
+	assert.InDelta(t, testStateVersion, rec["token_state_version"], 0)
 	assert.Equal(t, testAgentDID, rec["agent"])
 	assert.Equal(t, testOwner, rec["owner"])
-	assert.Equal(t, testWorkload, rec["workload"])
 	assert.Equal(t, testSwarm, rec["swarm"])
 	assert.NotContains(t, buf.String(), tok)
 }
@@ -186,7 +187,7 @@ func TestAgentGate_ChainResolvedAfterQuarantineIsWithheld(t *testing.T) {
 	ents := chainsFor(t, svc, agentToken(t, issuer))
 	require.Len(t, resolveSubject(t, svc, ents).GetDirectEntitlements(), 2)
 
-	checker.setErr(&agentstatus.DenialError{Reason: agentstatus.ReasonNotEligible, Workload: testWorkload})
+	checker.setErr(&agentstatus.DenialError{Reason: agentstatus.ReasonNotEligible, Agent: testAgentDID})
 	assertWithheld(t, resolveSubject(t, svc, ents))
 	assert.Equal(t, 2, checker.callCount(), "every resolution asks")
 }
@@ -278,16 +279,25 @@ func TestAgentGate_PartialAgentShapesAreWithheld(t *testing.T) {
 		}
 	}
 	for name, add := range map[string]map[string]interface{}{
-		"arkavo_workload alone":                 {"arkavo_workload": testWorkload},
-		"arkavo_swarm alone":                    {"arkavo_swarm": testSwarm},
-		"agent role without arkavo_npe":         {"arkavo_roles": []interface{}{"user", "agent"}},
-		"agent role as a bare string":           {"arkavo_roles": "agent"},
-		"device npe also carrying a workload":   {"arkavo_npe": map[string]interface{}{"type": "device"}, "arkavo_workload": testWorkload},
-		"arkavo_npe that is not an object":      {"arkavo_npe": "agent"},
-		"arkavo_npe without a type":             {"arkavo_npe": map[string]interface{}{"delegation_id": testAgentDID}},
-		"arkavo_npe with a non-string type":     {"arkavo_npe": map[string]interface{}{"type": 7}},
-		"arkavo_npe with an unknown type":       {"arkavo_npe": map[string]interface{}{"type": "service"}},
-		"swarm and workload without arkavo_npe": {"arkavo_workload": testWorkload, "arkavo_swarm": testSwarm},
+		"arkavo_swarm alone":                         {"arkavo_swarm": testSwarm},
+		"agent role without arkavo_npe":              {"arkavo_roles": []interface{}{"user", "agent"}},
+		"agent role as a bare string":                {"arkavo_roles": "agent"},
+		"device npe also carrying a swarm":           {"arkavo_npe": map[string]interface{}{"type": "device"}, "arkavo_swarm": testSwarm},
+		"arkavo_npe that is not an object":           {"arkavo_npe": "agent"},
+		"arkavo_npe without a type":                  {"arkavo_npe": map[string]interface{}{"delegation_id": testAgentDID}},
+		"arkavo_npe with a non-string type":          {"arkavo_npe": map[string]interface{}{"type": 7}},
+		"arkavo_npe with an unknown type":            {"arkavo_npe": map[string]interface{}{"type": "service"}},
+		"swarm and state version without arkavo_npe": {"arkavo_state_version": testStateVersion, "arkavo_swarm": testSwarm},
+		// arkavo_state_version alone is a marker, whatever
+		// its value, so a person-shaped token carrying it is never resolved
+		// as a person.
+		"arkavo_state_version alone":              {"arkavo_state_version": testStateVersion},
+		"arkavo_state_version alone, null":        {"arkavo_state_version": nil},
+		"arkavo_state_version alone, zero":        {"arkavo_state_version": 0},
+		"arkavo_state_version alone, a string":    {"arkavo_state_version": "3"},
+		"arkavo_state_version alone, negative":    {"arkavo_state_version": -1},
+		"arkavo_state_version alone, a fraction":  {"arkavo_state_version": 3.5},
+		"arkavo_state_version alone, beyond 2^53": {"arkavo_state_version": 1 << 54},
 	} {
 		t.Run(name, func(t *testing.T) {
 			claims := base()
@@ -303,15 +313,124 @@ func TestAgentGate_PartialAgentShapesAreWithheld(t *testing.T) {
 	}
 }
 
-// An agent whose arkavo_workload has the wrong type reaches the checker with
-// an empty workload, which checkSubject refuses without calling identity.
-func TestAgentGate_WorkloadOfTheWrongTypeReachesTheCheckerEmpty(t *testing.T) {
-	checker := &fakeChecker{}
-	svc, _ := gateSvc(t, trustedCfg(), checker)
-	tok := tokenWith(t, func(c map[string]interface{}) { c["arkavo_workload"] = 42 })
-	resolveSubject(t, svc, chainsFor(t, svc, tok))
-	require.Equal(t, 1, checker.callCount())
-	assert.Empty(t, checker.got.Workload)
+// An agent whose arkavo_state_version is not a non-negative integer reaches
+// the checker with version 0, which checkSubject refuses without calling
+// identity.
+func TestAgentGate_StateVersionThatIsNotOneReachesTheCheckerAsZero(t *testing.T) {
+	for name, bad := range map[string]interface{}{
+		"a string":                   "3",
+		"a fraction":                 3.5,
+		"negative":                   -1,
+		"2^53":                       1 << 53,
+		"beyond 2^53":                1 << 54,
+		"an object":                  map[string]interface{}{"v": 3},
+		"null":                       nil,
+		"zero":                       0,
+		"an integer-valued fraction": json.Number("3.0"),
+		"an exponent":                json.Number("3e0"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			checker := &fakeChecker{}
+			svc, _ := gateSvc(t, trustedCfg(), checker)
+			tok := tokenWith(t, func(c map[string]interface{}) { c["arkavo_state_version"] = bad })
+			resolveSubject(t, svc, chainsFor(t, svc, tok))
+			require.Equal(t, 1, checker.callCount())
+			assert.Zero(t, checker.got.StateVersion)
+		})
+	}
+}
+
+// The version survives both passes on both wire formats: an int64 from the
+// CWT decoder and a float64 from the JWT bridge in the first, a float64 from
+// structpb in the second.
+func TestAgentGate_StateVersionReachesTheCheckerFromEitherFormat(t *testing.T) {
+	for name, tok := range map[string]func(t *testing.T) string{
+		"JWT": func(t *testing.T) string { return agentToken(t, issuer) },
+		"CWT": func(t *testing.T) string { return agentCWT(t, issuer) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			checker := &fakeChecker{}
+			svc, _ := gateSvc(t, trustedCfg(), checker)
+			resolveSubject(t, svc, chainsFor(t, svc, tok(t)))
+			assert.Equal(t, wantSubject(), checker.got)
+		})
+	}
+}
+
+// The first pass reads arkavo_state_version from the JWT payload text, so a
+// number a float64 would round (2^53+1, a fraction past float64 precision)
+// is never taken for an integer; the second pass then withholds it.
+func TestAgentGate_StateVersionIsReadExactlyFromTheJWTPayload(t *testing.T) {
+	for raw, want := range map[string]uint64{
+		"9007199254740991":    9007199254740991,
+		"9007199254740992":    0,
+		"9007199254740993":    0,
+		"1.0000000001":        0,
+		"1.00000000000000001": 0,
+		"3.0":                 0,
+		"3e0":                 0,
+	} {
+		t.Run(raw, func(t *testing.T) {
+			checker := &fakeChecker{}
+			svc, _ := gateSvc(t, trustedCfg(), checker)
+			tok := tokenWith(t, func(c map[string]interface{}) { c["arkavo_state_version"] = json.Number(raw) })
+			resolveSubject(t, svc, chainsFor(t, svc, tok))
+			require.Equal(t, 1, checker.callCount())
+			assert.Equal(t, want, checker.got.StateVersion)
+		})
+	}
+}
+
+// On the CWT path the decoder renders a CBOR integer as int64; a CBOR float,
+// or an integer past 2^53-1, reads as malformed and reaches the checker as 0.
+func TestAgentGate_StateVersionFromACWT(t *testing.T) {
+	for name, tt := range map[string]struct {
+		v    any
+		want uint64
+	}{
+		"an integer":    {int64(3), 3},
+		"beyond 2^53-1": {uint64(1<<53 + 1), 0},
+		"a float":       {float64(3), 0},
+	} {
+		t.Run(name, func(t *testing.T) {
+			jwk := map[any]any{}
+			for k, v := range testAgentJWK() {
+				jwk[k] = v
+			}
+			tok := signCWT(t, issuer, testAgentDID, map[any]any{
+				"arkavo_account_id":    testOwner,
+				"arkavo_roles":         []any{"agent"},
+				"arkavo_entitlements":  []any{"https://arkavo.ai/attr/tdf/value/decrypt"},
+				"arkavo_npe":           map[any]any{"type": "agent", "delegation_id": testAgentDID, "depth": int64(0)},
+				"arkavo_state_version": tt.v,
+				"arkavo_swarm":         testSwarm,
+				"cnf":                  map[any]any{"jwk": jwk},
+			})
+			checker := &fakeChecker{}
+			svc, _ := gateSvc(t, trustedCfg(), checker)
+			resolveSubject(t, svc, chainsFor(t, svc, tok))
+			require.Equal(t, 1, checker.callCount())
+			assert.Equal(t, tt.want, checker.got.StateVersion)
+		})
+	}
+}
+
+// addTrustedClaims carries arkavo_state_version onto the SUBJECT for the
+// second pass: the integer when it reads as one, the sentinel when it does
+// not (so its presence still gates). It only ever widens gating: the claim
+// grants nothing by itself.
+func TestAddTrustedClaims_CarriesTheStateVersionOntoTheSubject(t *testing.T) {
+	svc := newAgentSvc(t, trustedCfg())
+	good := subjectClaimsMap(t, chainsFor(t, svc, agentToken(t, issuer)))
+	assert.InDelta(t, testStateVersion, good[claimStateVersion], 0)
+	bad := tokenWith(t, func(c map[string]interface{}) { c["arkavo_state_version"] = "3" })
+	assert.Equal(t, stateVersionMalformed, subjectClaimsMap(t, chainsFor(t, svc, bad))[claimStateVersion])
+	person := buildJWT(t, map[string]interface{}{
+		"iss": issuer, "sub": testOwner,
+		"arkavo_entitlements": []interface{}{"https://arkavo.ai/attr/tdf/value/decrypt"},
+	})
+	_, present := subjectClaimsMap(t, chainsFor(t, svc, person))[claimStateVersion]
+	assert.False(t, present)
 }
 
 // Scope boundary: a caller that supplies its own entity chain asserts its
@@ -403,7 +522,7 @@ func (f *fakeIdentity) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.Method == http.MethodPost && r.URL.Path == "/oauth/token":
 		_ = json.NewEncoder(w).Encode(map[string]any{"access_token": statusServiceToken, "token_type": "Bearer", "expires_in": 3600})
-	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/agents/workloads/"):
+	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/agents/") && strings.HasSuffix(r.URL.Path, "/status"):
 		if f.hang {
 			<-r.Context().Done()
 			return
@@ -418,8 +537,9 @@ func (f *fakeIdentity) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func eligibleStatus() map[string]any {
 	return map[string]any{
-		"workload": testWorkload, "owner": testOwner, "current_did": testAgentDID, "swarm": testSwarm,
-		"state": "eligible", "generation": 3, "incident": nil,
+		"agent": testAgentDID, "owner": testOwner, "swarm": testSwarm,
+		"state": "eligible", "state_version": testStateVersion, "incident": nil,
+		"appraised_until": time.Now().Add(15 * time.Minute).Unix(), "appraised_by": "guardian",
 		"valid_until": time.Now().Add(5 * time.Second).Unix(),
 	}
 }
@@ -443,9 +563,9 @@ func TestAgentGate_RealStatusClient(t *testing.T) {
 		assert.Len(t, resolveSubject(t, svc, ents).GetDirectEntitlements(), 2)
 		assert.Equal(t, int32(2), f.calls.Load())
 	})
-	t.Run("quarantined: withheld with generation and incident, no secret logged", func(t *testing.T) {
+	t.Run("quarantined: withheld with state version and incident, no secret logged", func(t *testing.T) {
 		st := eligibleStatus()
-		st["state"], st["generation"], st["incident"] = "quarantined", 4, "inc-9"
+		st["state"], st["state_version"], st["incident"] = "quarantined", 4, "inc-9"
 		f := &fakeIdentity{status: st}
 		c, _ := realClient(t, f, time.Second)
 		svc, buf := gateSvc(t, trustedCfg(), c)
@@ -477,9 +597,9 @@ func TestAgentGate_RealStatusClient(t *testing.T) {
 		mutate func(map[string]interface{})
 		reason string
 	}{
-		"pre-workload agent token":  {func(c map[string]interface{}) { delete(c, "arkavo_workload") }, agentstatus.ReasonMissingWorkload},
-		"agent token without swarm": {func(c map[string]interface{}) { delete(c, "arkavo_swarm") }, agentstatus.ReasonMissingSwarm},
-		"malformed workload id":     {func(c map[string]interface{}) { c["arkavo_workload"] = "wl-XYZ" }, agentstatus.ReasonMalformedWorkload},
+		"agent token minted before contract v2": {func(c map[string]interface{}) { delete(c, "arkavo_state_version") }, agentstatus.ReasonMissingStateVersion},
+		"agent token without swarm":             {func(c map[string]interface{}) { delete(c, "arkavo_swarm") }, agentstatus.ReasonMissingSwarm},
+		"sub that is not a did:key":             {func(c map[string]interface{}) { c["sub"] = "did:key:z6Mk/../x" }, agentstatus.ReasonMalformedDID},
 	} {
 		t.Run(name+": withheld without calling identity", func(t *testing.T) {
 			f := &fakeIdentity{status: eligibleStatus()}

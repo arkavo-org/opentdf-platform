@@ -4,6 +4,8 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
 )
 
 // buildJWT encodes claims as a compact, unsigned (alg=none) JWT, mirroring
@@ -93,4 +95,64 @@ func TestParseArkavoClaims_DeviceShape(t *testing.T) {
 	if c.Npe == nil || c.Npe.Class != "attested" || c.Npe.AttestationExpiry != 1800000000 || c.Npe.DeviceID != "K1" {
 		t.Errorf("device npe: %+v", c.Npe)
 	}
+}
+
+func TestStateVersionClaim(t *testing.T) {
+	for name, tt := range map[string]struct {
+		in   any
+		want uint64
+		ok   bool
+	}{
+		"first pass int64":       {int64(7), 7, true},
+		"uint64":                 {uint64(7), 7, true},
+		"int":                    {7, 7, true},
+		"second pass float64":    {float64(7), 7, true},
+		"2^53 - 1":               {float64(1<<53 - 1), 1<<53 - 1, true},
+		"2^53 is past the bound": {float64(1 << 53), 0, false},
+		"int64 2^53":             {int64(1 << 53), 0, false},
+		"zero reads as zero":     {int64(0), 0, true},
+		"negative":               {int64(-1), 0, false},
+		"fraction":               {7.5, 0, false},
+		"string":                 {"7", 0, false},
+		"the malformed sentinel": {stateVersionMalformed, 0, false},
+		"json.Number":            {json.Number("7"), 0, false},
+		"absent":                 {nil, 0, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got, ok := stateVersionClaim(tt.in)
+			assert.Equal(t, tt.ok, ok)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+// claimsFromToken judges arkavo_state_version from the JWT payload text,
+// before jwx turns it into a float64: only an integer literal from 0 to
+// 2^53-1 survives, as an int64; any other value present becomes the sentinel.
+func TestClaimsFromToken_StateVersionIsReadFromThePayloadText(t *testing.T) {
+	for raw, want := range map[string]any{
+		`3`:                   int64(3),
+		`0`:                   int64(0),
+		`9007199254740991`:    int64(9007199254740991),
+		`9007199254740992`:    stateVersionMalformed,
+		`9007199254740993`:    stateVersionMalformed,
+		`1.0000000001`:        stateVersionMalformed,
+		`1.00000000000000001`: stateVersionMalformed,
+		`3.0`:                 stateVersionMalformed,
+		`-1`:                  stateVersionMalformed,
+		`"3"`:                 stateVersionMalformed,
+		`null`:                stateVersionMalformed,
+		`{"v":3}`:             stateVersionMalformed,
+	} {
+		t.Run(raw, func(t *testing.T) {
+			tok := buildJWT(t, map[string]interface{}{"iss": "i", "sub": "s", claimStateVersion: json.RawMessage(raw)})
+			m, err := claimsFromToken(t.Context(), tok)
+			assert.NoError(t, err)
+			assert.Equal(t, want, m[claimStateVersion])
+		})
+	}
+	m, err := claimsFromToken(t.Context(), buildJWT(t, map[string]interface{}{"iss": "i", "sub": "s"}))
+	assert.NoError(t, err)
+	_, present := m[claimStateVersion]
+	assert.False(t, present, "an absent claim stays absent")
 }

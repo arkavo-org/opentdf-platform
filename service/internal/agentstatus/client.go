@@ -16,7 +16,7 @@ import (
 
 const (
 	tokenPath        = "/oauth/token" //nolint:gosec // G101 false positive: an endpoint path, not a credential
-	statusPathPrefix = "/agents/workloads/"
+	statusPathPrefix = "/agents/"
 	statusPathSuffix = "/status"
 	// serviceTokenHeader is where authnz-rs's require_service_cwt reads the
 	// caller's service CWT.
@@ -33,16 +33,16 @@ const (
 )
 
 var (
-	errMalformedWorkload = errors.New("workload id is not contract v1 shaped")
+	errMalformedDID = errors.New("sub is not a did:key")
 	// errCredentialsRejected is the token endpoint answering 401 or 403:
 	// identity refuses this platform's client_id/client_secret.
 	errCredentialsRejected = errors.New("service token: identity rejected the client credentials")
 )
 
-// Client checks agent workloads against authnz-rs. A status that allows the
+// Client checks agent identities against authnz-rs. A status that allows the
 // agent is cached for min(valid_until-now, 5 s); a denying one never is. The
-// highest generation seen per workload is kept for the process lifetime, so
-// a rolled-back or replayed status is refused.
+// highest state_version seen per agent DID is kept for the process lifetime,
+// so a rolled-back or replayed status is refused.
 type Client struct {
 	cfg     Config
 	http    *http.Client
@@ -126,7 +126,7 @@ type httpStatusError struct{ code int }
 
 func (e *httpStatusError) Error() string { return fmt.Sprintf("identity returned HTTP %d", e.code) }
 
-// fetchFailureReason: every failure denies. A 404 (unknown workload), a 403
+// fetchFailureReason: every failure denies. A 404 (unknown agent), a 403
 // (this platform's client is not in AGENT_STATUS_CLIENT_IDS) and a 401 or
 // 403 from the token endpoint (wrong client_id/client_secret) get their own
 // reasons; the last two are misconfiguration. Everything else, including a
@@ -140,7 +140,7 @@ func fetchFailureReason(err error) string {
 	if errors.As(err, &hse) {
 		switch hse.code {
 		case http.StatusNotFound:
-			return ReasonUnknownWorkload
+			return ReasonUnknownAgent
 		case http.StatusForbidden:
 			return ReasonStatusForbidden
 		}
@@ -150,49 +150,51 @@ func fetchFailureReason(err error) string {
 
 // decide judges s against a cached status when one is still leased, else
 // against a live one. A cache hit is still evaluated with the current
-// high-water mark and this subject's claims.
+// high-water mark and this subject's claims. A token newer than the cached
+// status (minted after a state change this process has not seen) skips the
+// cache and asks.
 func (c *Client) decide(ctx context.Context, s Subject) *DenialError {
-	if st, hw, ok := c.cached(s.Workload); ok {
+	if st, hw, ok := c.cached(s.DID); ok && st.StateVersion >= s.StateVersion {
 		return evaluate(st, s, hw)
 	}
-	st, err := c.fetch(ctx, s.Workload)
+	st, err := c.fetch(ctx, s.DID)
 	if err != nil {
-		return &DenialError{Reason: fetchFailureReason(err), Workload: s.Workload, Cause: err}
+		return &DenialError{Reason: fetchFailureReason(err), Agent: s.DID, Cause: err}
 	}
 	return c.record(st, s)
 }
 
-func (c *Client) cached(workload string) (Status, uint64, bool) {
+func (c *Client) cached(did string) (Status, uint64, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	e, ok := c.cache[workload]
+	e, ok := c.cache[did]
 	if !ok {
 		return Status{}, 0, false
 	}
 	if !c.now().Before(e.expires) {
-		delete(c.cache, workload)
+		delete(c.cache, did)
 		return Status{}, 0, false
 	}
-	return e.status, c.highWater[workload], true
+	return e.status, c.highWater[did], true
 }
 
-// record judges a live status, raises the workload's high-water mark and
+// record judges a live status, raises the agent's high-water mark and
 // caches the status only if it allowed the agent.
 func (c *Client) record(st Status, s Subject) *DenialError {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	hw := c.highWater[s.Workload]
+	hw := c.highWater[s.DID]
 	d := evaluate(st, s, hw)
-	// A denying status raises the mark too: after a quarantine at generation
-	// n, a replay of the eligible status below n must fail. A status naming
-	// another workload says nothing about this one's generation.
-	if st.Workload == s.Workload && st.Generation > hw {
-		c.highWater[s.Workload] = st.Generation
+	// A denying status raises the mark too: after a quarantine at version n,
+	// a replay of the eligible status below n must fail. A status naming
+	// another agent says nothing about this one's version.
+	if st.Agent == s.DID && st.StateVersion > hw {
+		c.highWater[s.DID] = st.StateVersion
 		// A cached status below the new mark can only deny now, and would
 		// log a regression instead of what identity says (a quarantine and
 		// its incident); drop it so the next request asks.
-		if e, ok := c.cache[s.Workload]; ok && e.status.Generation < st.Generation {
-			delete(c.cache, s.Workload)
+		if e, ok := c.cache[s.DID]; ok && e.status.StateVersion < st.StateVersion {
+			delete(c.cache, s.DID)
 		}
 	}
 	if d != nil {
@@ -204,33 +206,33 @@ func (c *Client) record(st Status, s Subject) *DenialError {
 	// 5 s.
 	now := c.now()
 	if ttl := min(time.Unix(st.ValidUntil, 0).Sub(now), maxStatusTTL); ttl > 0 {
-		c.cache[s.Workload] = cachedStatus{status: st, expires: now.Add(ttl)}
+		c.cache[s.DID] = cachedStatus{status: st, expires: now.Add(ttl)}
 	}
 	return nil
 }
 
-func (c *Client) fetch(ctx context.Context, workload string) (Status, error) {
-	st, err := c.fetchOnce(ctx, workload, false)
+func (c *Client) fetch(ctx context.Context, did string) (Status, error) {
+	st, err := c.fetchOnce(ctx, did, false)
 	var hse *httpStatusError
 	if errors.As(err, &hse) && hse.code == http.StatusUnauthorized {
 		// The cached service CWT was refused (expired early, or identity
 		// rotated keys): mint a fresh one and try once more.
-		return c.fetchOnce(ctx, workload, true)
+		return c.fetchOnce(ctx, did, true)
 	}
 	return st, err
 }
 
-func (c *Client) fetchOnce(ctx context.Context, workload string, freshToken bool) (Status, error) {
-	// Check has already run checkSubject; this keeps an unchecked id out of
+func (c *Client) fetchOnce(ctx context.Context, did string, freshToken bool) (Status, error) {
+	// Check has already run checkSubject; this keeps an unchecked sub out of
 	// the URL whoever calls.
-	if !validWorkloadID(workload) {
-		return Status{}, errMalformedWorkload
+	if !validAgentDID(did) {
+		return Status{}, errMalformedDID
 	}
 	token, err := c.serviceToken(ctx, freshToken)
 	if err != nil {
 		return Status{}, err
 	}
-	endpoint := c.endpoint(statusPathPrefix + url.PathEscape(workload) + statusPathSuffix)
+	endpoint := c.endpoint(statusPathPrefix + url.PathEscape(did) + statusPathSuffix)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return Status{}, err
@@ -238,7 +240,7 @@ func (c *Client) fetchOnce(ctx context.Context, workload string, freshToken bool
 	req.Header.Set(serviceTokenHeader, string(token))
 	var st Status
 	if err := c.doJSON(req, &st); err != nil {
-		return Status{}, fmt.Errorf("workload status: %w", err)
+		return Status{}, fmt.Errorf("agent status: %w", err)
 	}
 	return st, nil
 }
@@ -265,7 +267,7 @@ func (c *Client) serviceToken(ctx context.Context, fresh bool) (Secret, error) {
 		var hse *httpStatusError
 		if errors.As(err, &hse) {
 			// Dropped as a type: the token endpoint's 404 or 403 says nothing
-			// about the workload, and its 401 must not look like a stale CWT
+			// about the agent, and its 401 must not look like a stale CWT
 			// (fetch would retry it).
 			if hse.code == http.StatusUnauthorized || hse.code == http.StatusForbidden {
 				return "", fmt.Errorf("%w (HTTP %d)", errCredentialsRejected, hse.code)

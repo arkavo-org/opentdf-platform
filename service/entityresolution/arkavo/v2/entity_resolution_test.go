@@ -41,9 +41,9 @@ func newSvc(t *testing.T, cfg Config) *EntityResolutionService {
 
 const issuer = "https://identity.arkavo.net"
 
-// agentToken is a contract v1 agent token: workload, swarm and a cnf that
-// carries the agent key (cnf.jwk), as checkToken sees it after rendering the
-// COSE_Key cnf.
+// agentToken is a contract v2 agent token: state version, swarm and a cnf
+// that carries the agent key (cnf.jwk), as checkToken sees it after rendering
+// the COSE_Key cnf.
 func agentToken(t *testing.T, iss string) string {
 	return buildJWT(t, agentClaims(iss))
 }
@@ -51,17 +51,17 @@ func agentToken(t *testing.T, iss string) string {
 func agentClaims(iss string) map[string]interface{} {
 	return map[string]interface{}{
 		"iss": iss, "sub": testAgentDID,
-		"arkavo_account_id":   testOwner,
-		"arkavo_roles":        []interface{}{"agent"},
-		"arkavo_entitlements": []interface{}{"https://arkavo.ai/attr/tdf/value/decrypt", "https://arkavo.ai/attr/action/value/read"},
-		"arkavo_npe":          map[string]interface{}{"type": "agent", "delegation_id": testAgentDID, "depth": 0},
-		"arkavo_workload":     testWorkload,
-		"arkavo_swarm":        testSwarm,
-		"cnf":                 map[string]interface{}{"jwk": testAgentJWK()},
+		"arkavo_account_id":    testOwner,
+		"arkavo_roles":         []interface{}{"agent"},
+		"arkavo_entitlements":  []interface{}{"https://arkavo.ai/attr/tdf/value/decrypt", "https://arkavo.ai/attr/action/value/read"},
+		"arkavo_npe":           map[string]interface{}{"type": "agent", "delegation_id": testAgentDID, "depth": 0},
+		"arkavo_state_version": testStateVersion,
+		"arkavo_swarm":         testSwarm,
+		"cnf":                  map[string]interface{}{"jwk": testAgentJWK()},
 	}
 }
 
-// newAgentSvc is newSvc with a status checker that finds every workload
+// newAgentSvc is newSvc with a status checker that finds every agent
 // eligible, for tests about what an admitted agent resolves to.
 func newAgentSvc(t *testing.T, cfg Config) *EntityResolutionService {
 	t.Helper()
@@ -296,10 +296,10 @@ func agentCWT(t *testing.T, iss string) string {
 			"https://arkavo.ai/attr/tdf/value/decrypt",
 			"https://arkavo.ai/attr/action/value/read",
 		},
-		"arkavo_npe":      map[any]any{"type": "agent", "delegation_id": testAgentDID, "depth": int64(0)},
-		"arkavo_workload": testWorkload,
-		"arkavo_swarm":    testSwarm,
-		"cnf":             map[any]any{"jwk": jwkMembers},
+		"arkavo_npe":           map[any]any{"type": "agent", "delegation_id": testAgentDID, "depth": int64(0)},
+		"arkavo_state_version": int64(testStateVersion),
+		"arkavo_swarm":         testSwarm,
+		"cnf":                  map[any]any{"jwk": jwkMembers},
 	})
 }
 

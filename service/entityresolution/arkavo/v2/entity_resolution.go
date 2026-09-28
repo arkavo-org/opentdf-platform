@@ -2,8 +2,8 @@
 // authnz-rs (identity.arkavo.net) tokens. It emits the person (PE) as the
 // SUBJECT entity, each arkavo_npe (agent, device) as an ENVIRONMENT entity,
 // and direct entitlements from arkavo_entitlements — no subject mappings.
-// An agent SUBJECT keeps its entitlements only while authnz-rs says its
-// workload is eligible (agent_status); see agent_gate.go.
+// An agent SUBJECT keeps its entitlements only while authnz-rs says the agent
+// is eligible and its token is current (agent_status); see agent_gate.go.
 package arkavo
 
 import (
@@ -49,7 +49,7 @@ type EntityResolutionService struct {
 	entityresolutionV2.UnimplementedEntityResolutionServiceServer
 	cfg    Config
 	logger *logger.Logger
-	// agentStatus judges agent subjects' workloads; nil when agent_status is
+	// agentStatus judges agent subjects; nil when agent_status is
 	// unset, and then every agent subject resolves with no entitlements.
 	agentStatus agentstatus.Checker
 	trace.Tracer
@@ -222,11 +222,12 @@ func (s *EntityResolutionService) entitiesFromToken(ctx context.Context, tokenRa
 }
 
 // addTrustedClaims adds the self-asserted, materialized-claims data —
-// arkavo_roles, arkavo_entitlements, arkavo_workload, arkavo_swarm, cnf and
-// the raw arkavo_npe block — that is only surfaced on the subject once the
-// issuer has been trusted. ResolveEntities reads the workload, swarm and cnf
-// back to judge an agent, so they travel with the subject: a chain built
-// here and resolved later is judged against the status at resolution time.
+// arkavo_roles, arkavo_entitlements, arkavo_state_version, arkavo_swarm, cnf
+// and the raw arkavo_npe block — that is only surfaced on the subject once
+// the issuer has been trusted. ResolveEntities reads the state version,
+// swarm and cnf back to judge an agent, so they travel with the subject: a
+// chain built here and resolved later is judged against the status at
+// resolution time.
 func addTrustedClaims(subjectClaims map[string]any, c arkavoClaims, m map[string]any) {
 	if len(c.Roles) > 0 {
 		subjectClaims["arkavo_roles"] = toAnySlice(c.Roles)
@@ -237,11 +238,18 @@ func addTrustedClaims(subjectClaims map[string]any, c arkavoClaims, m map[string
 	if len(c.Entitlements) > 0 {
 		subjectClaims["arkavo_entitlements"] = toAnySlice(c.Entitlements)
 	}
+	// Presence is kept whatever the value: a version that
+	// does not read as one travels as stateVersionMalformed, so the second
+	// pass still gates the subject and withholds it.
+	if c.HasStateVersion {
+		if c.StateVersion > 0 {
+			subjectClaims[claimStateVersion] = int64(c.StateVersion)
+		} else {
+			subjectClaims[claimStateVersion] = stateVersionMalformed
+		}
+	}
 	// Presence is kept even for a value of the wrong type ("" then), so the
 	// second pass still gates the subject.
-	if c.HasWorkload {
-		subjectClaims[claimWorkload] = c.Workload
-	}
 	if _, ok := m[claimSwarm]; ok {
 		subjectClaims[claimSwarm] = c.Swarm
 	}

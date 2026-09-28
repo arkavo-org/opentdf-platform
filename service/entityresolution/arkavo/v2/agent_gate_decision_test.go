@@ -53,11 +53,11 @@ func TestAgentGate_ThroughTheV2PDP(t *testing.T) {
 	require.NoError(t, err)
 	agent := buildJWT(t, map[string]interface{}{
 		"iss": issuer, "sub": "did:key:z6Mkagent",
-		"arkavo_account_id":   "00000000-0000-0000-0000-000000000001",
-		"arkavo_entitlements": []interface{}{"https://arkavo.ai/attr/tdf/value/decrypt"},
-		"arkavo_npe":          map[string]interface{}{"type": "agent"},
-		"arkavo_workload":     "wl-00112233445566778899aabbccddeeff",
-		"arkavo_swarm":        "kit-42",
+		"arkavo_account_id":    "00000000-0000-0000-0000-000000000001",
+		"arkavo_entitlements":  []interface{}{"https://arkavo.ai/attr/tdf/value/decrypt"},
+		"arkavo_npe":           map[string]interface{}{"type": "agent"},
+		"arkavo_state_version": 3,
+		"arkavo_swarm":         "kit-42",
 		"cnf": map[string]interface{}{"jwk": map[string]interface{}{
 			"kty": "OKP", "crv": "Ed25519", "x": "11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo",
 		}},

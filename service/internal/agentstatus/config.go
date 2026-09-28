@@ -1,8 +1,8 @@
-// Package agentstatus asks authnz-rs whether an agent's workload is still
+// Package agentstatus asks authnz-rs whether an agent identity is still
 // eligible. The arkavo entity resolver consults it whenever it resolves an
-// agent subject, so a quarantined agent resolves with no entitlements.
-// Contract: authnz-rs docs/agent-credentials-contract.md v1
-// (GET /agents/workloads/{id}/status).
+// agent subject, so an agent that is unassessed, suspended or quarantined
+// resolves with no entitlements. Contract: authnz-rs
+// docs/agent-credentials-contract.md v2 (GET /agents/{did}/status).
 package agentstatus
 
 import (

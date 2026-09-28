@@ -1505,7 +1505,7 @@ func (s *PDPTestSuite) Test_GetDecision_BareEntityRepresentationDenies() {
 // mapping of any kind is evaluated for it.
 func (s *PDPTestSuite) Test_GetDecision_NotInMappingGrantsWhenTheSelectorIsMissing() {
 	f := s.fixtures
-	notIn := createSimpleSubjectMapping(testClassSecretFQN, "secret", []*policy.Action{testActionRead}, ".arkavo_workload_state", []string{"quarantined"}, nil)
+	notIn := createSimpleSubjectMapping(testClassSecretFQN, "secret", []*policy.Action{testActionRead}, ".arkavo_agent_state", []string{"quarantined"}, nil)
 	notIn.GetSubjectConditionSet().GetSubjectSets()[0].GetConditionGroups()[0].GetConditions()[0].Operator = policy.SubjectMappingOperatorEnum_SUBJECT_MAPPING_OPERATOR_ENUM_NOT_IN
 	pdp, err := NewPolicyDecisionPoint(s.T().Context(), s.logger, []*policy.Attribute{f.classificationAttr}, []*policy.SubjectMapping{notIn}, nil, true, false)
 	s.Require().NoError(err)

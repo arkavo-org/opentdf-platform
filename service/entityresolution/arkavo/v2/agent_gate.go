@@ -9,17 +9,18 @@ import (
 	"github.com/opentdf/platform/service/internal/agentstatus"
 )
 
-// Claims the agent gate reads. authnz-rs contract v1 mints arkavo_workload
-// and arkavo_swarm on agent tokens; cnf is the RFC 7800 confirmation claim
-// (the CWT verifier renders an RFC 8747 COSE_Key cnf as cnf.jwk).
+// Claims the agent gate reads. authnz-rs contract v2 mints
+// arkavo_state_version and arkavo_swarm on agent tokens; cnf is the RFC 7800
+// confirmation claim (the CWT verifier renders an RFC 8747 COSE_Key cnf as
+// cnf.jwk).
 const (
-	claimWorkload = "arkavo_workload"
-	claimSwarm    = "arkavo_swarm"
-	claimCnf      = "cnf"
-	claimNpe      = "arkavo_npe"
-	claimRoles    = "arkavo_roles"
-	npeTypeAgent  = "agent"
-	roleAgent     = "agent"
+	claimStateVersion = "arkavo_state_version"
+	claimSwarm        = "arkavo_swarm"
+	claimCnf          = "cnf"
+	claimNpe          = "arkavo_npe"
+	claimRoles        = "arkavo_roles"
+	npeTypeAgent      = "agent"
+	roleAgent         = "agent"
 
 	agentWithheldMsg = "arkavo: agent entitlements withheld"
 	// reasonNotKeyBound: checkToken holds a DPoP proof to the algorithm of
@@ -36,14 +37,15 @@ const (
 
 // gated reports whether a trusted subject carries any agent marker: an
 // arkavo_npe of any type but device (including a missing, empty or
-// malformed type), arkavo_workload, arkavo_swarm, or an agent role. A token
-// that looks partly like an agent's is judged as one, never resolved as a
-// person. Person and device subjects carry none of these, so they never
-// reach the status service and an identity outage cannot change their
-// decisions.
+// malformed type), arkavo_swarm, arkavo_state_version (whatever its
+// value), or an agent role. A token that looks partly like an
+// agent's is judged as one, never resolved as a person. Person and device
+// subjects carry none of these, so they never reach the status service and
+// an identity outage cannot change their decisions. A marker only ever
+// widens gating: it grants nothing by itself.
 func gated(c arkavoClaims) bool {
 	npeNotDevice := c.HasNpe && (c.Npe == nil || c.Npe.Type != npeTypeDevice)
-	return npeNotDevice || c.HasWorkload || c.HasSwarm || c.AgentRole
+	return npeNotDevice || c.HasSwarm || c.HasStateVersion || c.AgentRole
 }
 
 // isAgentProfile: the only consistent shape for a gated subject.
@@ -94,10 +96,10 @@ func hasKeyCnf(cnf any) bool {
 // arkavo_account_id.
 func (s *EntityResolutionService) agentSubject(claims map[string]any, c arkavoClaims) agentstatus.Subject {
 	owner, _ := claims[s.cfg.ClientIDClaim].(string)
-	return agentstatus.Subject{DID: c.Sub, Workload: c.Workload, Swarm: c.Swarm, Owner: owner}
+	return agentstatus.Subject{DID: c.Sub, Swarm: c.Swarm, Owner: owner, StateVersion: c.StateVersion}
 }
 
-// agentDenial returns nil when the subject is not gated or its workload is
+// agentDenial returns nil when the subject is not gated or the agent is
 // eligible, and why it is refused otherwise. It never fails the resolution:
 // a refused agent resolves with no entitlements and no claims, so the PDP
 // denies and the KAS answers each KAO with "forbidden".
@@ -106,11 +108,11 @@ func (s *EntityResolutionService) agentDenial(ctx context.Context, subject agent
 	case !gated(c):
 		return nil
 	case !isAgentProfile(c):
-		return &agentstatus.DenialError{Reason: reasonNotAgentProfile, Workload: subject.Workload}
+		return &agentstatus.DenialError{Reason: reasonNotAgentProfile, Agent: subject.DID}
 	case !c.KeyBound:
-		return &agentstatus.DenialError{Reason: reasonNotKeyBound, Workload: subject.Workload}
+		return &agentstatus.DenialError{Reason: reasonNotKeyBound, Agent: subject.DID}
 	case s.agentStatus == nil:
-		return &agentstatus.DenialError{Reason: agentstatus.ReasonUnconfigured, Workload: subject.Workload}
+		return &agentstatus.DenialError{Reason: agentstatus.ReasonUnconfigured, Agent: subject.DID}
 	}
 	return s.checkStatus(ctx, subject)
 }
@@ -120,7 +122,7 @@ func (s *EntityResolutionService) agentDenial(ctx context.Context, subject agent
 func (s *EntityResolutionService) checkStatus(ctx context.Context, subject agentstatus.Subject) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
-			err = &agentstatus.DenialError{Reason: reasonCheckerPanicked, Workload: subject.Workload, Cause: fmt.Errorf("%v", r)}
+			err = &agentstatus.DenialError{Reason: reasonCheckerPanicked, Agent: subject.DID, Cause: fmt.Errorf("%v", r)}
 		}
 	}()
 	return s.agentStatus.Check(ctx, subject)
@@ -132,16 +134,17 @@ func (s *EntityResolutionService) logAgentDenial(ctx context.Context, subject ag
 	attrs := []slog.Attr{
 		slog.String("agent", subject.DID),
 		slog.String("owner", subject.Owner),
-		slog.String("workload", subject.Workload),
 		slog.String("swarm", subject.Swarm),
+		slog.Uint64("token_state_version", subject.StateVersion),
 	}
 	level := slog.LevelWarn
 	var d *agentstatus.DenialError
 	if errors.As(err, &d) {
 		attrs = append(attrs,
 			slog.String("reason", d.Reason),
+			slog.String("state", d.State),
 			slog.String("incident", d.Incident),
-			slog.Uint64("generation", d.Generation),
+			slog.Uint64("state_version", d.StateVersion),
 		)
 		if d.Cause != nil {
 			attrs = append(attrs, slog.String("cause", d.Cause.Error()))
