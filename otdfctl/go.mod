@@ -2,7 +2,7 @@ module github.com/opentdf/platform/otdfctl
 
 go 1.25.0
 
-toolchain go1.25.9
+toolchain go1.25.14
 
 require (
 	github.com/adrg/frontmatter v0.2.0
@@ -93,7 +93,7 @@ require (
 	github.com/xeipuuv/gojsonreference v0.0.0-20180127040603-bd5ef7bd5415 // indirect
 	github.com/xeipuuv/gojsonschema v1.2.0 // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
-	github.com/yuin/goldmark v1.7.8 // indirect
+	github.com/yuin/goldmark v1.7.17 // indirect
 	github.com/yuin/goldmark-emoji v1.0.5 // indirect
 	github.com/zalando/go-keyring v0.2.6 // indirect
 	github.com/zitadel/logging v0.6.2 // indirect
