@@ -314,8 +314,9 @@ func TestAgentGate_PartialAgentShapesAreWithheld(t *testing.T) {
 }
 
 // An agent whose arkavo_state_version is not a non-negative integer reaches
-// the checker with version 0, which checkSubject refuses without calling
-// identity.
+// the checker with StateVersion 0 (the fake checker is still called once,
+// with that zero); checkSubject's own refusal of a zero state_version is
+// pinned separately by agentstatus.TestCheckSubject.
 func TestAgentGate_StateVersionThatIsNotOneReachesTheCheckerAsZero(t *testing.T) {
 	for name, bad := range map[string]interface{}{
 		"a string":                   "3",
@@ -341,8 +342,8 @@ func TestAgentGate_StateVersionThatIsNotOneReachesTheCheckerAsZero(t *testing.T)
 }
 
 // The version survives both passes on both wire formats: an int64 from the
-// CWT decoder and a float64 from the JWT bridge in the first, a float64 from
-// structpb in the second.
+// CWT decoder and an exact int64 read from the JWT payload text in the
+// first pass, a float64 from structpb in the second.
 func TestAgentGate_StateVersionReachesTheCheckerFromEitherFormat(t *testing.T) {
 	for name, tok := range map[string]func(t *testing.T) string{
 		"JWT": func(t *testing.T) string { return agentToken(t, issuer) },

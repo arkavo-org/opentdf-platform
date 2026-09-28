@@ -17,11 +17,14 @@ import (
 // The JOSE-then-CWT parse is shared with the Patreon provider via
 // auth.DecodeClaimsFromToken.
 //
-// arkavo_state_version is then judged exactly: from the JWT payload text,
-// before anything turns it into a float64, or as the CWT decoder's integer.
-// A present claim that is not an integer from 0 to maxExactVersion becomes
-// stateVersionMalformed, so it stays present (and gates) but never reads as
-// a version.
+// arkavo_state_version is then judged exactly: on the JWT path it is read
+// from the payload text, before anything turns it into a float64, and
+// rewritten to an in-range int64 or to stateVersionMalformed; on the CWT
+// path the decoder's own int64 is kept as is, in or out of range (a value
+// outside 0..maxExactVersion later reads as "not a version" via
+// stateVersionClaim), and only a claim present in some other shape becomes
+// stateVersionMalformed. Either way the claim's presence still gates the
+// subject; it never reads as a version unless it is actually one.
 func claimsFromToken(ctx context.Context, tokenRaw string) (map[string]any, error) {
 	m, err := auth.DecodeClaimsFromToken(ctx, tokenRaw)
 	if err != nil {

@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // buildJWT encodes claims as a compact, unsigned (alg=none) JWT, mirroring
@@ -147,12 +148,12 @@ func TestClaimsFromToken_StateVersionIsReadFromThePayloadText(t *testing.T) {
 		t.Run(raw, func(t *testing.T) {
 			tok := buildJWT(t, map[string]interface{}{"iss": "i", "sub": "s", claimStateVersion: json.RawMessage(raw)})
 			m, err := claimsFromToken(t.Context(), tok)
-			assert.NoError(t, err)
+			require.NoError(t, err)
 			assert.Equal(t, want, m[claimStateVersion])
 		})
 	}
 	m, err := claimsFromToken(t.Context(), buildJWT(t, map[string]interface{}{"iss": "i", "sub": "s"}))
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	_, present := m[claimStateVersion]
 	assert.False(t, present, "an absent claim stays absent")
 }
