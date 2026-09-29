@@ -12,6 +12,7 @@ import (
 	"github.com/opentdf/platform/protocol/go/entity"
 	entityresolutionV2 "github.com/opentdf/platform/protocol/go/entityresolution/v2"
 	ent "github.com/opentdf/platform/service/entity"
+	"github.com/opentdf/platform/service/internal/agentstatus"
 	"github.com/opentdf/platform/service/internal/auth"
 	"github.com/opentdf/platform/service/logger"
 	"github.com/opentdf/platform/service/pkg/config"
@@ -29,6 +30,27 @@ const (
 	defaultClientIDClaim      = "azp"
 	defaultPatreonTokenClaim  = "patreon_access_token"
 )
+
+// claimAgentWithheld marks the subject entity this provider emits for an
+// agent token, so the decision flow's second pass withholds it too. It can
+// only ever take entitlements away.
+const (
+	claimAgentWithheld = "arkavo_agent_withheld"
+	agentWithheldMsg   = "patreon: agent entitlements withheld"
+)
+
+// agentWithheld reports whether claims describe an agent (or were emitted
+// for one). This provider cannot ask authnz-rs whether an agent is eligible
+// (that is the arkavo resolver's agent_status check), so it never entitles
+// one: an agent subject resolves with no Patreon membership and no direct
+// entitlements, and InferUnknownAsFree never applies to it. Person and
+// device subjects carry no agent marker and are unaffected.
+func agentWithheld(claims map[string]any) bool {
+	if flag, _ := claims[claimAgentWithheld].(bool); flag {
+		return true
+	}
+	return agentstatus.HasAgentMarker(claims)
+}
 
 // Config configures the Patreon entity resolution provider.
 type Config struct {
@@ -220,6 +242,16 @@ func (s *EntityResolutionService) entitiesFromToken(ctx context.Context, tokenRa
 		return nil, fmt.Errorf("parse bearer token: %w", err)
 	}
 
+	// An agent gets one withheld subject entity and nothing else: no
+	// environment entity, no patreon.* view, no materialized claim.
+	if agentWithheld(claims) {
+		sub, _ := claims["sub"].(string)
+		s.logger.WarnContext(ctx, agentWithheldMsg,
+			slog.String("agent", sub),
+			slog.String("reason", "patreon mode does not entitle agent subjects"))
+		return withheldEntities(sub)
+	}
+
 	out := []*entity.Entity{}
 	if v, ok := claims[s.cfg.JWT.ClientIDClaim].(string); ok && v != "" {
 		out = append(out, &entity.Entity{
@@ -304,9 +336,34 @@ func (s *EntityResolutionService) resolveEntity(ctx context.Context, e *entity.E
 		if err := claimsEntity.Claims.UnmarshalTo(&asStruct); err != nil {
 			return nil, fmt.Errorf("unpack claims: %w", err)
 		}
-		return s.resolveFromClaims(ctx, asStruct.AsMap())
+		claims := asStruct.AsMap()
+		if agentWithheld(claims) {
+			return &resolution{mem: &Membership{}, withheld: true}, nil
+		}
+		return s.resolveFromClaims(ctx, claims)
 	}
 	return nil, ErrMemberNotFound
+}
+
+// withheldEntities is the entity chain for an agent token: a single subject
+// entity that carries only claimAgentWithheld.
+func withheldEntities(sub string) ([]*entity.Entity, error) {
+	subjectClaims, err := structpb.NewStruct(map[string]interface{}{claimAgentWithheld: true})
+	if err != nil {
+		return nil, err
+	}
+	anyClaims, err := anypb.New(subjectClaims)
+	if err != nil {
+		return nil, err
+	}
+	if sub == "" {
+		sub = "anonymous"
+	}
+	return []*entity.Entity{{
+		EntityType:  &entity.Entity_Claims{Claims: anyClaims},
+		EphemeralId: "patreon-agent-" + sub,
+		Category:    entity.Entity_CATEGORY_SUBJECT,
+	}}, nil
 }
 
 // resolveFromClaims is the single resolution path: the claims-passthrough.
@@ -359,6 +416,16 @@ func membershipStruct(mem *Membership) (*structpb.Struct, error) {
 }
 
 func resolutionToRepresentation(originalID string, res *resolution) (*entityresolutionV2.EntityRepresentation, error) {
+	if res.withheld {
+		props, err := structpb.NewStruct(map[string]interface{}{claimAgentWithheld: true})
+		if err != nil {
+			return nil, err
+		}
+		return &entityresolutionV2.EntityRepresentation{
+			OriginalId:      originalID,
+			AdditionalProps: []*structpb.Struct{props},
+		}, nil
+	}
 	mem := res.mem
 	patreonStruct, err := membershipStruct(mem)
 	if err != nil {

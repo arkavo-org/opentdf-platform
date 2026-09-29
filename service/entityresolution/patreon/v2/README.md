@@ -75,6 +75,21 @@ token — JOSE JWT or base64url CWT, the format the KAS rewrap path forwards
 entity carrying the `patreon` block plus the preserved claim for the decision
 flow's second pass.
 
+## Agents are never entitled
+
+This provider cannot ask authnz-rs whether an agent is eligible — that is the
+arkavo resolver's `agent_status` check — so it withholds every agent. A
+subject carrying any agent marker (`arkavo_npe` of any type but `device`,
+`arkavo_swarm`, `arkavo_state_version`, or the `agent` role; the same test the
+arkavo resolver gates on) resolves to a single `SUBJECT` entity with no
+`patreon` block, no preserved `arkavo_patreon`, no `azp` environment entity
+and no direct entitlements. `infer_unknown_as_free` never applies to it, so it
+cannot match the free/former subject mappings either. The KAS answers such an
+agent's rewrap with a per-KAO `forbidden` (a policy with no data attributes
+is still released without a decision, as for any caller), and the log reads
+`patreon: agent entitlements withheld`. Person and device subjects are
+unaffected. To give agents gated access, run the arkavo resolver.
+
 ## Testing
 
 ```bash

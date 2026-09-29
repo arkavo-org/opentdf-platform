@@ -14,13 +14,12 @@ import (
 // confirmation claim (the CWT verifier renders an RFC 8747 COSE_Key cnf as
 // cnf.jwk).
 const (
-	claimStateVersion = "arkavo_state_version"
-	claimSwarm        = "arkavo_swarm"
+	claimStateVersion = agentstatus.ClaimStateVersion
+	claimSwarm        = agentstatus.ClaimSwarm
 	claimCnf          = "cnf"
-	claimNpe          = "arkavo_npe"
-	claimRoles        = "arkavo_roles"
-	npeTypeAgent      = "agent"
-	roleAgent         = "agent"
+	claimNpe          = agentstatus.ClaimNpe
+	claimRoles        = agentstatus.ClaimRoles
+	npeTypeAgent      = agentstatus.NpeTypeAgent
 
 	agentWithheldMsg = "arkavo: agent entitlements withheld"
 	// reasonNotKeyBound: checkToken holds a DPoP proof to the algorithm of
@@ -35,37 +34,19 @@ const (
 	reasonCheckerPanicked = "agent status checker panicked"
 )
 
-// gated reports whether a trusted subject carries any agent marker: an
-// arkavo_npe of any type but device (including a missing, empty or
-// malformed type), arkavo_swarm, arkavo_state_version (whatever its
-// value), or an agent role. A token that looks partly like an
-// agent's is judged as one, never resolved as a person. Person and device
-// subjects carry none of these, so they never reach the status service and
-// an identity outage cannot change their decisions. A marker only ever
-// widens gating: it grants nothing by itself.
+// gated reports whether a trusted subject carries any agent marker (see
+// agentstatus.HasAgentMarker, which every resolver shares). A token that
+// looks partly like an agent's is judged as one, never resolved as a
+// person. Person and device subjects carry none of these, so they never
+// reach the status service and an identity outage cannot change their
+// decisions.
 func gated(c arkavoClaims) bool {
-	npeNotDevice := c.HasNpe && (c.Npe == nil || c.Npe.Type != npeTypeDevice)
-	return npeNotDevice || c.HasSwarm || c.HasStateVersion || c.AgentRole
+	return agentstatus.HasAgentMarker(c.Raw)
 }
 
 // isAgentProfile: the only consistent shape for a gated subject.
 func isAgentProfile(c arkavoClaims) bool {
 	return c.Npe != nil && c.Npe.Type == npeTypeAgent
-}
-
-// hasAgentRole reads arkavo_roles as a string or a list.
-func hasAgentRole(roles any) bool {
-	switch r := roles.(type) {
-	case string:
-		return r == roleAgent
-	case []any:
-		for _, role := range r {
-			if role == roleAgent {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 // hasKeyCnf reports whether cnf carries a well-formed public key (cnf.jwk):

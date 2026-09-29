@@ -32,7 +32,7 @@ import (
 // subject to DeviceClassCeilings.
 const (
 	classUnverified = "unverified"
-	npeTypeDevice   = "device"
+	npeTypeDevice   = agentstatus.NpeTypeDevice
 )
 
 // trustedMarker is set on the subject entity's claims by entitiesFromToken
