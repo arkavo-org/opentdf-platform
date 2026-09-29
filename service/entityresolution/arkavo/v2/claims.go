@@ -55,12 +55,11 @@ type arkavoClaims struct {
 	Roles, Entitlements []string
 	Npe                 *npeClaim
 	Actors              []string
-	// Swarm is "" when absent or not a string. The Has* flags are true
-	// whenever the claim is present, whatever its type or value, so a
-	// malformed value still gates the subject. AgentRole: arkavo_roles is
-	// "agent" or lists it.
-	Swarm                                        string
-	HasSwarm, HasStateVersion, HasNpe, AgentRole bool
+	// Swarm is "" when absent or not a string. HasStateVersion is true
+	// whenever the claim is present, whatever its type or value. Whether
+	// the subject is gated is read from Raw (agentstatus.HasAgentMarker).
+	Swarm           string
+	HasStateVersion bool
 	// StateVersion is arkavo_state_version, 0 when absent or not an integer
 	// from 0 to maxExactVersion: such a token is withheld.
 	StateVersion uint64
@@ -183,9 +182,6 @@ func parseArkavoClaims(m map[string]any) arkavoClaims {
 	c.StateVersion, _ = stateVersionClaim(m[claimStateVersion])
 	_, c.HasStateVersion = m[claimStateVersion]
 	c.Swarm, _ = m[claimSwarm].(string)
-	_, c.HasSwarm = m[claimSwarm]
-	_, c.HasNpe = m[claimNpe]
-	c.AgentRole = hasAgentRole(m[claimRoles])
 	c.KeyBound = hasKeyCnf(m[claimCnf])
 	if raw, ok := m["arkavo_npe"].(map[string]any); ok {
 		n := &npeClaim{}

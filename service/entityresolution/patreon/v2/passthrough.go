@@ -48,6 +48,9 @@ var numericCampaignID = regexp.MustCompile(`^[0-9]+$`)
 type resolution struct {
 	mem          *Membership
 	entitlements []string
+	// withheld: the subject is an agent, which this provider never
+	// entitles (see agentWithheld).
+	withheld bool
 }
 
 // materializedMembership is one campaign membership as materialized into
