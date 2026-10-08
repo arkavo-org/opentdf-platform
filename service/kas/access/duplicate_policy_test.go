@@ -89,8 +89,21 @@ func releasableRequest(t *testing.T, policyID string, kaoIDs ...string) *kaspb.U
 }
 
 // requestWithBody is releasableRequest for a given base64 policy body; the
-// binding is computed over that body.
+// binding is computed over that body and written in the legacy
+// Base64(hex(HMAC)) form.
 func requestWithBody(t *testing.T, policyBody []byte, policyID string, kaoIDs ...string) *kaspb.UnsignedRewrapRequest_WithPolicyRequest {
+	t.Helper()
+	return requestWithBinding(t, policyBody, policyID, legacyHexBinding, kaoIDs...)
+}
+
+// legacyHexBinding is the Base64(hex(HMAC)) policy binding older writers emit.
+func legacyHexBinding(mac []byte) string {
+	return base64.StdEncoding.EncodeToString([]byte(hex.EncodeToString(mac)))
+}
+
+// requestWithBinding is requestWithBody with the policy binding hash produced
+// by encode from the raw HMAC-SHA256 of the policy body under plainKey.
+func requestWithBinding(t *testing.T, policyBody []byte, policyID string, encode func(mac []byte) string, kaoIDs ...string) *kaspb.UnsignedRewrapRequest_WithPolicyRequest {
 	t.Helper()
 	asym, err := ocrypto.FromPublicPEM(rsaPublic)
 	require.NoError(t, err)
@@ -109,7 +122,7 @@ func requestWithBody(t *testing.T, policyBody []byte, policyID string, kaoIDs ..
 				KeyType:       "wrapped",
 				Kid:           kasTestKID,
 				WrappedKey:    wrapped,
-				PolicyBinding: &kaspb.PolicyBinding{Algorithm: "HS256", Hash: base64.StdEncoding.EncodeToString([]byte(hex.EncodeToString(binding)))},
+				PolicyBinding: &kaspb.PolicyBinding{Algorithm: "HS256", Hash: encode(binding)},
 			},
 		})
 	}
