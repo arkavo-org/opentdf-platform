@@ -16,6 +16,7 @@ import (
 	"github.com/opentdf/platform/protocol/go/policy"
 	otdf "github.com/opentdf/platform/sdk"
 	"github.com/opentdf/platform/service/internal/access/v2"
+	"github.com/opentdf/platform/service/internal/access/v2/jevrestrictor"
 	"github.com/opentdf/platform/service/internal/access/v2/obligations/jevtrigger"
 	authn "github.com/opentdf/platform/service/internal/auth"
 	"github.com/opentdf/platform/service/logger"
@@ -96,6 +97,18 @@ func NewRegistration() *serviceregistry.Service[authzV2Connect.AuthorizationServ
 					as.jitOptions = append(as.jitOptions, access.WithObligationDynamicTrigger(trigger))
 					l.Info("authorization service consulting jev decision model for obligations",
 						slog.String("mode", string(authZCfg.Jev.Client.Seams.Obligations.Mode)),
+					)
+				}
+
+				restrictor, err := jevrestrictor.New(authZCfg.JevRestrictor, l)
+				if err != nil {
+					l.Error("failed to build jev decision restrictor", slog.Any("error", err))
+					panic(fmt.Errorf("failed to build jev decision restrictor: %w", err))
+				}
+				if restrictor != nil {
+					as.jitOptions = append(as.jitOptions, access.WithDecisionRestrictor(restrictor))
+					l.Info("authorization service consulting jev decision model as restrictor",
+						slog.String("mode", string(authZCfg.JevRestrictor.Client.Seams.Restrictor.Mode)),
 					)
 				}
 

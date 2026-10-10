@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/opentdf/platform/service/internal/access/v2/jevrestrictor"
 	"github.com/opentdf/platform/service/internal/access/v2/obligations/jevtrigger"
 )
 
@@ -50,6 +51,11 @@ type Config struct {
 	// by default once enabled. It may only add obligations; it can never grant
 	// access that policy denies.
 	Jev jevtrigger.Config `mapstructure:"jev" json:"jev"`
+
+	// JevRestrictor optionally lets a decision model deny a decision that
+	// policy permitted, for request-shaped anomalies policy cannot express.
+	// It can only deny; see access.DecisionRestrictor.
+	JevRestrictor jevrestrictor.Config `mapstructure:"jev_restrictor" json:"jev_restrictor"`
 }
 
 // RARConfig controls the RFC 9396 access-token issuance endpoint.
@@ -113,6 +119,10 @@ func (c *Config) Validate() error {
 		return err
 	}
 
+	if err := c.JevRestrictor.Client.Validate(); err != nil {
+		return err
+	}
+
 	return validateCWTVerifier(&c.RAR.CWTVerifier)
 }
 
@@ -171,6 +181,7 @@ func (c *Config) LogValue() slog.Value {
 			),
 		),
 		slog.Any("jev", c.Jev.Client.LogValue()),
+		slog.Any("jev_restrictor", c.JevRestrictor.Client.LogValue()),
 		slog.Bool("allow_direct_entitlements", c.AllowDirectEntitlements),
 		slog.Bool("enforce_namespaced_entitlements", c.EnforceNamespacedEntitlements),
 	)
