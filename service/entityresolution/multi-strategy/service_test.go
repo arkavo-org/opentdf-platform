@@ -2,12 +2,113 @@ package multistrategy
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
+	"reflect"
 	"testing"
 
 	"github.com/opentdf/platform/service/entityresolution/multi-strategy/types"
 	"github.com/opentdf/platform/service/logger"
 )
+
+func TestMultiStrategyService_JevProviderEndToEnd(t *testing.T) {
+	t.Setenv("OPENROUTER_API_KEY", "test-key")
+
+	var state map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			State map[string]any `json:"state"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		state = body.State
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+  "id":"jev-service-test",
+  "model":"typesafe/jev-1.13-20260917",
+  "answers":{
+    "risk_tier":{
+      "type":"choice",
+      "choice":"elevated",
+      "confidence":0.93,
+      "probabilities":{"elevated":0.93,"routine":0.07}
+    }
+  },
+  "usage":{"cost":0.000002,"input_tokens":20,"output_tokens":3}
+}`))
+	}))
+	t.Cleanup(server.Close)
+
+	config := types.MultiStrategyConfig{
+		Providers: map[string]types.ProviderConfig{
+			"risk": {
+				Type: "jev",
+				Connection: map[string]any{
+					"enabled":              true,
+					"base_url":             server.URL,
+					"state_allowlist":      []string{"department", "employment_type"},
+					"confidence_threshold": 0.8,
+					"seams": map[string]any{
+						"ers_claims": map[string]any{"enabled": true, "mode": "enforce"},
+					},
+					"questions": map[string]any{
+						"risk_tier": map[string]any{
+							"type":         "choice",
+							"instructions": "How much scrutiny does this context warrant?",
+							"criteria": map[string]any{
+								"elevated": "unusual employment context",
+								"routine":  "ordinary employment context",
+							},
+						},
+					},
+				},
+			},
+		},
+		MappingStrategies: []types.MappingStrategy{
+			{
+				Name:       "derive_risk",
+				Provider:   "risk",
+				EntityType: types.EntityTypeSubject,
+				Conditions: types.StrategyConditions{JWTClaims: []types.JWTClaimCondition{
+					{Claim: "aud", Operator: "exists"},
+				}},
+				InputMapping: []types.InputMapping{
+					{JWTClaim: "department", Parameter: "department", Required: true},
+					{JWTClaim: "employment_type", Parameter: "employment_type", Default: "unknown"},
+				},
+				OutputMapping: []types.OutputMapping{
+					{SourceAnswer: "risk_tier", ClaimName: "jev.risk_tier", Transformation: "array"},
+				},
+			},
+		},
+	}
+
+	service, err := NewService(t.Context(), config, &logger.Logger{})
+	if err != nil {
+		t.Fatalf("NewService() error = %v", err)
+	}
+	t.Cleanup(func() { _ = service.Close() })
+
+	result, err := service.ResolveEntity(t.Context(), "user-123", types.JWTClaims{
+		"aud":        "arkavo",
+		"department": "finance",
+	})
+	if err != nil {
+		t.Fatalf("ResolveEntity() error = %v", err)
+	}
+
+	wantClaim := []any{"elevated"}
+	if !reflect.DeepEqual(result.Claims["jev.risk_tier"], wantClaim) {
+		t.Fatalf("derived claim = %#v, want %#v", result.Claims["jev.risk_tier"], wantClaim)
+	}
+	if got := state["employment_type"]; got != "unknown" {
+		t.Fatalf("defaulted state employment_type = %#v, want unknown", got)
+	}
+}
 
 func TestMultiStrategyService_JWT_Claims_Provider(t *testing.T) {
 	// Test configuration with JWT claims provider

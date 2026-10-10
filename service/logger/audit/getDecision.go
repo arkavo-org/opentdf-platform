@@ -52,6 +52,11 @@ type GetDecisionV2EventParams struct {
 	ObligationsSatisfied           bool
 	// Allow ResourceDecisions to be typed by the caller as structure is in-flight
 	ResourceDecisions any
+	// Jev carries observations from any decision-model seam consulted during
+	// this request. Seams publish to a per-request collector rather than
+	// emitting their own audit records, so one decision yields one event with
+	// the model's influence recorded inline. Nil when no model was consulted.
+	Jev any
 }
 
 func CreateGetDecisionEvent(ctx context.Context, params GetDecisionEventParams) (*EventObject, error) {
@@ -117,6 +122,9 @@ func CreateV2GetDecisionEvent(ctx context.Context, params GetDecisionV2EventPara
 		"resource_decisions":                params.ResourceDecisions,
 		"fulfillable_obligation_value_fqns": fulfillable,
 		"obligations_satisfied":             params.ObligationsSatisfied,
+	}
+	if params.Jev != nil {
+		eventMetadata["jev"] = params.Jev
 	}
 
 	return &EventObject{
