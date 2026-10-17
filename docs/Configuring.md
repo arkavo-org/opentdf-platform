@@ -618,6 +618,19 @@ services:
 
 Complete configs: [`examples/config/opentdf-patreon-prod.yaml`](../examples/config/opentdf-patreon-prod.yaml) and [`examples/config/opentdf-arkavo-local-test.yaml`](../examples/config/opentdf-arkavo-local-test.yaml). What the `patreon-token` source grants: [`service/entityresolution/patreon/v2/README.md`](../service/entityresolution/patreon/v2/README.md).
 
+**Converting a `patreon` or `arkavo` mode config.** Those modes are gone: `mode: patreon` or `mode: arkavo`, in any case, is a startup error. So is any of their top-level keys below, with or without `sources`, and an `evidence` or `constraints` block without `sources` (it would otherwise start Keycloak). `cache_expiration` stays where it is.
+
+| Old top-level key | In the composite |
+| --- | --- |
+| `trust_materialized_claims` | Removed. A source reads claims only from a verified CWT or, when `pep_assertable`, from a PEP on `evidence.claims_chain_peps`. |
+| `trusted_issuer` | `evidence.issuers[].issuer` (with its `cose_keys_url` and `audience`), named by each source's `sources[].issuer`. |
+| `infer_unknown_as_free` | `sources[].infer_unknown_as_free` on the `patreon-token` source. |
+| `entitlements_namespace` | `sources[].entitlements_namespace` on the `patreon-token` source. |
+| `agent_status` | `constraints.agent_status`. |
+| `device_class_ceilings` | Split: what a device class is granted goes to a `device-class` source's `sources[].classes`; what it is capped to goes to `constraints.device_class_caps`. |
+| `client_id_claim` | Removed. The subject's account is always `arkavo_account_id`; a PEP's client ID is what the platform derives through `server.auth.policy.client_id_claim`. |
+| `direct_entitlement_actions` | `sources[].actions`. |
+
 #### Composite resolver: agent status
 
 `constraints.agent_status` tells the composite resolver where to ask authnz-rs whether an agent identity (its `did:key`) is eligible and its token current. An agent subject gets no grants while it is not, and whenever `agent_status` is unset. Details, including the requirement that every sealed Arkavo TDF carry a data attribute, when the check runs and its scope: [`service/entityresolution/arkavo/v2/README.md`](../service/entityresolution/arkavo/v2/README.md#agent-status).
