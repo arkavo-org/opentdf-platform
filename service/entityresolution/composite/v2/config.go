@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"slices"
 	"strings"
@@ -127,6 +128,21 @@ func (c Config) LogValue() slog.Value {
 		slog.Int("device_class_caps", len(c.Constraints.DeviceClassCaps)),
 	)
 }
+
+// String renders the evidence block as LogValue does, keys redacted.
+func (e EvidenceConfig) String() string { return e.LogValue().String() }
+
+// Format renders String for every verb, so no fmt verb (%#v and %d
+// included) prints a seal key, also for an EvidenceConfig inside a larger
+// struct. As for agentstatus.Secret, %p is beyond it: fmt handles that verb
+// before any Formatter.
+func (e EvidenceConfig) Format(f fmt.State, _ rune) { _, _ = io.WriteString(f, e.String()) }
+
+// String renders the config as LogValue does, keys redacted.
+func (c Config) String() string { return c.LogValue().String() }
+
+// Format renders String for every verb; see EvidenceConfig.Format.
+func (c Config) Format(f fmt.State, _ rune) { _, _ = io.WriteString(f, c.String()) }
 
 // DecodeConfig reads the service config. The bool reports whether it has a
 // "sources" key, which is what selects the composite. A zero deadline becomes

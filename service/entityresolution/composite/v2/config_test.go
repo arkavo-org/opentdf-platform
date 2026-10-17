@@ -2,6 +2,7 @@ package composite
 
 import (
 	"encoding/base64"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -185,6 +186,31 @@ func TestConfig_LogValueRedactsKeys(t *testing.T) {
 	assert.NotContains(t, out, cfg.Evidence.SealKey)
 	assert.NotContains(t, out, cfg.Evidence.PreviousSealKeys[0])
 	assert.Contains(t, out, testIssuer)
+}
+
+// Printing the config with fmt, in any verb, as a value, a pointer or a field
+// of a larger struct, redacts the seal keys as LogValue does.
+func TestConfig_FormatRedactsKeys(t *testing.T) {
+	cfg := validConfig()
+	type wrapper struct{ Entity Config }
+	values := map[string]any{
+		"Config":         cfg,
+		"*Config":        &cfg,
+		"EvidenceConfig": cfg.Evidence,
+		"*Evidence":      &cfg.Evidence,
+		"field":          wrapper{cfg},
+	}
+	for name, v := range values {
+		for _, verb := range []string{"%v", "%+v", "%#v", "%s", "%d", "%q", "%x"} {
+			t.Run(name+" "+verb, func(t *testing.T) {
+				out := fmt.Sprintf(verb, v)
+				assert.NotContains(t, out, cfg.Evidence.SealKey)
+				assert.NotContains(t, out, cfg.Evidence.PreviousSealKeys[0])
+			})
+		}
+	}
+	assert.Contains(t, fmt.Sprintf("%v", cfg), testIssuer, "the rest of the summary still prints")
+	assert.Contains(t, fmt.Sprint(cfg), redacted)
 }
 
 func loadServiceConfig(t *testing.T, body string) config.ServiceConfig {
