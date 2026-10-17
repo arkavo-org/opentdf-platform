@@ -59,10 +59,11 @@ func TestTokenRoute_ActionlessGrantTakesSourceActions(t *testing.T) {
 	defaulted := SourceConfig{ID: "defaulted", Issuer: testIssuer, Grants: []string{exampleDef}}
 	svc := newTestService(t, testConfig(), verifiersFor(&fakeVerifier{}), []configuredSource{
 		identityCoreSource(), // actions: [publish]
-		sourceOf(defaulted, newTokenClaimsSource("arkavo_entitlements", defaulted.Grants)),
+		sourceOf(defaulted, newTokenClaimsSource("example_entitlements", defaulted.Grants)),
 	}, nil)
 	claims := creatorClaims(time.Now().Add(time.Hour))
-	claims["arkavo_entitlements"] = []any{publishValue, exampleValue}
+	claims["arkavo_entitlements"] = []any{publishValue}
+	claims["example_entitlements"] = []any{exampleValue}
 
 	ev := tokenEvidence(t, svc, signCWT(t, claims))
 
@@ -161,7 +162,8 @@ func assertInvalidEvidence(t *testing.T, svc *Service, ev evidence) {
 	assert.Empty(t, ev.Grants)
 	assert.Empty(t, ev.Props)
 	assert.Equal(t, map[string]source.Outcome{"_token": source.OutcomeInvalid}, ev.Outcomes)
-	assert.Equal(t, svc.now().Add(60*time.Second).Unix(), ev.Exp)
+	expiry := ev.Exp
+	assert.Equal(t, svc.now().Add(60*time.Second).Unix(), expiry)
 	assert.Equal(t, evidenceVersion, ev.V)
 }
 
@@ -294,9 +296,11 @@ func TestTokenRoute_EvidenceExpiryIsTokenExpiry(t *testing.T) {
 
 	ev := tokenEvidence(t, svc, signCWT(t, creatorClaims(exp)))
 
-	assert.Equal(t, exp.Unix(), ev.Exp)
+	expiry := ev.Exp
+	assert.Equal(t, exp.Unix(), expiry)
 	assert.Zero(t, grantFor(t, ev, creatorCampaign).Exp, "a token-carried grant expires with the evidence")
-	assert.Equal(t, grantExp.Unix(), grantFor(t, ev, exampleValue).Exp)
+	leasedExpiry := grantFor(t, ev, exampleValue).Exp
+	assert.Equal(t, grantExp.Unix(), leasedExpiry)
 }
 
 func TestTokenRoute_SourceOrderIsIrrelevant(t *testing.T) {
