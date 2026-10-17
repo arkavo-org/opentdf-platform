@@ -59,7 +59,7 @@ func TestResolve_SealedEvidenceBecomesRepresentation(t *testing.T) {
 
 	rep := resolveAs(callerContext(t.Context(), "arks-media"), t, svc, chain.GetEntities()...)[0]
 
-	assert.Equal(t, "composite-subject", rep.GetOriginalId())
+	assert.Equal(t, "composite-subject-"+creatorSub, rep.GetOriginalId(), "the decision audit names the viewer")
 	assert.Equal(t, map[string][]string{
 		creatorCampaign:  {"read"},
 		creatorSupporter: {"read"},
@@ -142,7 +142,15 @@ func TestResolve_ForgedSealGrantsNothing(t *testing.T) {
 			assert.Equal(t, "subject", rep.GetOriginalId())
 			assert.Empty(t, rep.GetDirectEntitlements(), "neither the evidence's grants nor the PEP's claims around it")
 			assert.Empty(t, rep.GetAdditionalProps(), "no properties, not even the free view")
-			assert.Equal(t, "WARN", logRecord(t, buf, "composite: arkavo_evidence does not open; it grants nothing")["level"])
+			rec := logRecord(t, buf, "composite: arkavo_evidence does not open; it grants nothing")
+			assert.Equal(t, "WARN", rec["level"])
+			assert.Equal(t, "subject", rec["entity_id"], "the refusal names the entity")
+			assert.Equal(t, testPEP, rec["client_id"], "and the caller")
+			if _, isString := seal.(string); isString {
+				assert.NotContains(t, rec, "evidence_type")
+			} else {
+				assert.Equal(t, "float64", rec["evidence_type"], "a value that is not a string logs its type")
+			}
 		})
 	}
 }
@@ -186,6 +194,7 @@ func TestResolve_PEPChainFromOtherClientGrantsNothing(t *testing.T) {
 			rec := logRecord(t, buf, "composite: unsealed claims chain from a caller not on claims_chain_peps")
 			assert.Equal(t, "WARN", rec["level"])
 			assert.Equal(t, tc.logged, rec["client_id"])
+			assert.Equal(t, "catalog-subject", rec["entity_id"])
 		})
 	}
 }

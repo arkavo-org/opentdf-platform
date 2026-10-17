@@ -27,9 +27,12 @@ import (
 )
 
 const (
-	// subjectEphemeralID names the one entity of every chain the token route
-	// returns.
-	subjectEphemeralID = "composite-subject"
+	// subjectEphemeralIDPrefix starts the ephemeral ID of the one entity of
+	// every chain the token route returns. The evidence's sub, or
+	// anonymousSubject, follows it: the second call reports it as the
+	// representation's original ID, so decision audits name the viewer.
+	subjectEphemeralIDPrefix = "composite-subject-"
+	anonymousSubject         = "anonymous"
 	// tokenOutcome is the Outcomes key of the token itself.
 	tokenOutcome = "_token"
 	// invalidEvidenceTTL is how long the evidence of an invalid token lasts.
@@ -171,7 +174,7 @@ func (s *Service) ResolveEntities(
 		if id == "" {
 			id = ent.EntityIDPrefix + strconv.Itoa(i)
 		}
-		ev, err := s.resolveEntity(ctx, e, q)
+		ev, err := s.resolveEntity(ctx, id, e, q)
 		if err != nil {
 			s.logger.WarnContext(ctx, "composite: cannot read claims entity",
 				slog.String("entity_id", id),
@@ -208,9 +211,17 @@ func (s *Service) subjectEntity(ev evidence) (*entity.Entity, error) {
 	}
 	return &entity.Entity{
 		EntityType:  &entity.Entity_Claims{Claims: claims},
-		EphemeralId: subjectEphemeralID,
+		EphemeralId: subjectEphemeralID(ev.Sub),
 		Category:    entity.Entity_CATEGORY_SUBJECT,
 	}, nil
+}
+
+// subjectEphemeralID names a token route subject entity after its sub.
+func subjectEphemeralID(sub string) string {
+	if sub == "" {
+		sub = anonymousSubject
+	}
+	return subjectEphemeralIDPrefix + sub
 }
 
 // resolveToken verifies raw and resolves its subject until the token
@@ -267,8 +278,8 @@ func (s *Service) verifyToken(ctx context.Context, raw string) (map[string]any, 
 }
 
 // resolveEntity resolves one entity of a ResolveEntities request (see
-// there). Only claims that do not unpack are an error.
-func (s *Service) resolveEntity(ctx context.Context, e *entity.Entity, q source.Query) (evidence, error) {
+// there); id names it in logs. Only claims that do not unpack are an error.
+func (s *Service) resolveEntity(ctx context.Context, id string, e *entity.Entity, q source.Query) (evidence, error) {
 	anonymous := source.Subject{Trust: source.TrustNone}
 	if _, isClaims := e.GetEntityType().(*entity.Entity_Claims); !isClaims {
 		return s.resolveSubject(ctx, anonymous, q, s.now()), nil
@@ -279,11 +290,12 @@ func (s *Service) resolveEntity(ctx context.Context, e *entity.Entity, q source.
 	}
 	claims := st.AsMap()
 	if sealed, carried := claims[evidenceClaim]; carried {
-		return s.openSealed(ctx, sealed), nil
+		return s.openSealed(ctx, id, sealed), nil
 	}
 	clientID, allowlisted := callerClientID(ctx, s.peps)
 	if !allowlisted {
 		s.logger.WarnContext(ctx, "composite: unsealed claims chain from a caller not on claims_chain_peps",
+			slog.String("entity_id", id),
 			slog.String("client_id", clientID),
 		)
 		return s.resolveSubject(ctx, anonymous, q, s.now()), nil
@@ -292,19 +304,33 @@ func (s *Service) resolveEntity(ctx context.Context, e *entity.Entity, q source.
 	return s.resolveSubject(ctx, source.Subject{Claims: claims, AccountID: accountID, Trust: source.TrustPEP}, q, s.now()), nil
 }
 
-// openSealed opens a claims entity's arkavo_evidence. Whatever does not
-// open, a value that is not a string included, resolves to nothing: no
-// grants and no properties.
-func (s *Service) openSealed(ctx context.Context, sealed any) evidence {
-	str, _ := sealed.(string)
-	ev, err := openEvidence(s.sealKeys, str, s.now())
-	if err != nil {
-		s.logger.WarnContext(ctx, "composite: arkavo_evidence does not open; it grants nothing",
-			slog.Any("error", err),
-		)
+// openSealed opens the arkavo_evidence of the claims entity id. Whatever does
+// not open, a value that is not a string included, resolves to nothing: no
+// grants and no properties. The refusal names the entity and the caller, and
+// the value's type when it is not a string.
+func (s *Service) openSealed(ctx context.Context, id string, sealed any) evidence {
+	str, isString := sealed.(string)
+	if isString {
+		ev, err := openEvidence(s.sealKeys, str, s.now())
+		if err == nil {
+			return ev
+		}
+		s.logSealRefusal(ctx, id, err)
 		return evidence{}
 	}
-	return ev
+	s.logSealRefusal(ctx, id, errors.New("arkavo_evidence is not a string"),
+		slog.String("evidence_type", fmt.Sprintf("%T", sealed)))
+	return evidence{}
+}
+
+func (s *Service) logSealRefusal(ctx context.Context, id string, err error, extra ...slog.Attr) {
+	clientID, _ := callerClientID(ctx, s.peps)
+	attrs := append([]slog.Attr{
+		slog.String("entity_id", id),
+		slog.String("client_id", clientID),
+		slog.Any("error", err),
+	}, extra...)
+	s.logger.LogAttrs(ctx, slog.LevelWarn, "composite: arkavo_evidence does not open; it grants nothing", attrs...)
 }
 
 // resolveSubject runs every source that admits subj, keeps what each

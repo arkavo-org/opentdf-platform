@@ -250,10 +250,10 @@ func tokenEvidence(t *testing.T, svc *Service, token string, resources ...*authz
 }
 
 // openEntity checks the shape of a chain's subject entity and opens the
-// evidence sealed in it.
+// evidence sealed in it. Its ephemeral ID names the evidence's subject, so
+// decision audits identify the viewer.
 func openEntity(t *testing.T, svc *Service, e *entity.Entity) evidence {
 	t.Helper()
-	require.Equal(t, "composite-subject", e.GetEphemeralId())
 	require.Equal(t, entity.Entity_CATEGORY_SUBJECT, e.GetCategory())
 	claims, ok := e.GetEntityType().(*entity.Entity_Claims)
 	require.True(t, ok, "subject entity is %T, want claims", e.GetEntityType())
@@ -265,6 +265,11 @@ func openEntity(t *testing.T, svc *Service, e *entity.Entity) evidence {
 	require.True(t, ok, "%s is %T, want string", evidenceClaim, m[evidenceClaim])
 	ev, err := openEvidence(svc.sealKeys, sealed, svc.now())
 	require.NoError(t, err)
+	wantID := "composite-subject-anonymous"
+	if ev.Sub != "" {
+		wantID = "composite-subject-" + ev.Sub
+	}
+	require.Equal(t, wantID, e.GetEphemeralId())
 	return ev
 }
 

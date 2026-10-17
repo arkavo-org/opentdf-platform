@@ -408,6 +408,25 @@ func TestTokenRoute_OneChainPerToken(t *testing.T) {
 	assertInvalidEvidence(t, svc, openEntity(t, svc, chains[1].GetEntities()[0]))
 }
 
+// The subject entity's ephemeral ID becomes the representation's original ID,
+// which decision audits record, so it names the viewer: the verified sub, or
+// anonymous when there is none.
+func TestTokenRoute_SubjectEphemeralIDNamesTheViewer(t *testing.T) {
+	svc := newTestService(t, testConfig(), verifiersFor(&fakeVerifier{}), []configuredSource{patreonSource()}, nil)
+	noSub := creatorClaims(time.Now().Add(time.Hour))
+	delete(noSub, "sub")
+
+	chains := chainsFor(t, svc, []*entity.Token{
+		{EphemeralId: "creator", Jwt: signCWT(t, creatorClaims(time.Now().Add(time.Hour)))},
+		{EphemeralId: "no-sub", Jwt: signCWT(t, noSub)},
+		{EphemeralId: "garbage", Jwt: "definitely-not-a-token"},
+	})
+
+	assert.Equal(t, "composite-subject-did:key:z6Mkcreator", chains[0].GetEntities()[0].GetEphemeralId())
+	assert.Equal(t, "composite-subject-anonymous", chains[1].GetEntities()[0].GetEphemeralId())
+	assert.Equal(t, "composite-subject-anonymous", chains[2].GetEntities()[0].GetEphemeralId())
+}
+
 // A subject with no trust keeps no claims, so claims that were discarded
 // cannot make it a device and earn it device-class grants (Task 8 routes
 // such subjects here).
