@@ -22,9 +22,12 @@ import (
 	"github.com/opentdf/platform/service/internal/agentstatus"
 	"github.com/opentdf/platform/service/internal/auth"
 	"github.com/opentdf/platform/service/logger"
+	ctxAuth "github.com/opentdf/platform/service/pkg/auth"
 	"github.com/stretchr/testify/require"
 	"github.com/veraison/go-cose"
 	"go.opentelemetry.io/otel/trace/noop"
+	"google.golang.org/grpc/metadata"
+	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/structpb"
 )
 
@@ -196,6 +199,19 @@ func patreonSource() configuredSource {
 	}, patreon.NewTokenSource(patreon.SourceConfig{}))
 }
 
+// pepPatreonSource is the patreon source as production configures it:
+// pep_assertable, so an allowlisted PEP's claims count, and
+// infer_unknown_as_free, so a subject with no Patreon claim gets the free
+// view.
+func pepPatreonSource() configuredSource {
+	return sourceOf(SourceConfig{
+		ID: "patreon", Issuer: testIssuer,
+		Grants:        []string{campaignDef, tierDef},
+		PEPAssertable: true,
+		PropertiesKey: "patreon",
+	}, patreon.NewTokenSource(patreon.SourceConfig{InferUnknownAsFree: true}))
+}
+
 func identityCoreSource() configuredSource {
 	sc := SourceConfig{
 		ID: "identity-core", Issuer: testIssuer,
@@ -269,6 +285,73 @@ func grantFor(t *testing.T, ev evidence, fqn string) sealedGrant {
 	}
 	require.Failf(t, "grant missing", "%s not in %v", fqn, grantFQNs(ev))
 	return sealedGrant{}
+}
+
+// testPEP is the allowlisted PEP: the catalog node's client ID.
+const testPEP = "arks-test"
+
+// pepConfig allowlists testPEP.
+func pepConfig() Config {
+	cfg := testConfig()
+	cfg.Evidence.ClaimsChainPEPs = []string{testPEP}
+	return cfg
+}
+
+// callerContext carries clientIDs as the platform records the caller's
+// client ID; with none it carries no metadata at all.
+func callerContext(ctx context.Context, clientIDs ...string) context.Context {
+	if len(clientIDs) == 0 {
+		return ctx
+	}
+	pairs := make([]string, 0, 2*len(clientIDs))
+	for _, id := range clientIDs {
+		pairs = append(pairs, ctxAuth.ClientIDKey, id)
+	}
+	return metadata.NewIncomingContext(ctx, metadata.Pairs(pairs...))
+}
+
+// claimsEntity is a SUBJECT claims entity, as a PEP sends it in a chain.
+func claimsEntity(t *testing.T, id string, claims map[string]any) *entity.Entity {
+	t.Helper()
+	st, err := structpb.NewStruct(claims)
+	require.NoError(t, err)
+	packed, err := anypb.New(st)
+	require.NoError(t, err)
+	return &entity.Entity{
+		EntityType:  &entity.Entity_Claims{Claims: packed},
+		EphemeralId: id,
+		Category:    entity.Entity_CATEGORY_SUBJECT,
+	}
+}
+
+// catalogCreatorClaims are the creator's claims as the catalog node forwards
+// them once it has verified the creator's CWT.
+func catalogCreatorClaims() map[string]any {
+	return map[string]any{
+		"iss":                 testIssuer,
+		"sub":                 creatorSub,
+		"arkavo_patreon":      map[string]any{"role": "creator", "campaign_id": "13167240", "memberships": []any{}},
+		"arkavo_entitlements": []any{creatorCampaign, creatorSupporter, publishValue},
+	}
+}
+
+// resolveAs runs ResolveEntities on entities as the caller ctx carries.
+func resolveAs(ctx context.Context, t *testing.T, svc *Service, entities ...*entity.Entity) []*entityresolutionV2.EntityRepresentation {
+	t.Helper()
+	resp, err := svc.ResolveEntities(ctx, connect.NewRequest(&entityresolutionV2.ResolveEntitiesRequest{Entities: entities}))
+	require.NoError(t, err)
+	reps := resp.Msg.GetEntityRepresentations()
+	require.Len(t, reps, len(entities))
+	return reps
+}
+
+// entitlements maps a representation's direct entitlements to their actions.
+func entitlements(rep *entityresolutionV2.EntityRepresentation) map[string][]string {
+	out := map[string][]string{}
+	for _, de := range rep.GetDirectEntitlements() {
+		out[de.GetAttributeValueFqn()] = de.GetActions()
+	}
+	return out
 }
 
 // statusAnswer is a status checker that always gives the same answer.
