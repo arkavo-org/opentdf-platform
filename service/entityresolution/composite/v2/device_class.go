@@ -29,15 +29,9 @@ func (s *deviceClassSource) Resolve(_ context.Context, subject source.Subject, _
 	if subject.Kind != source.KindDevice {
 		return source.Resolution{Outcome: source.OutcomeNotApplicable}, nil
 	}
-	class := classUnverified
-	if npe, _ := subject.Claims["arkavo_npe"].(map[string]any); npe != nil {
-		if c, _ := npe["class"].(string); c != "" {
-			class = c
-		}
-	}
 	var grants []source.Grant
 	seen := map[string]bool{}
-	for _, raw := range s.classes[class] {
+	for _, raw := range s.classes[deviceClass(subject.Claims)] {
 		fqn := strings.ToLower(raw)
 		if _, ok := source.ParseFQN(fqn); !ok || seen[fqn] {
 			continue
@@ -46,6 +40,17 @@ func (s *deviceClassSource) Resolve(_ context.Context, subject source.Subject, _
 		grants = append(grants, source.Grant{FQN: fqn})
 	}
 	return source.Resolution{Grants: grants, Outcome: source.OutcomeComplete}, nil
+}
+
+// deviceClass is a device's arkavo_npe.class, or "unverified" when the claim
+// has none.
+func deviceClass(claims map[string]any) string {
+	if npe, _ := claims["arkavo_npe"].(map[string]any); npe != nil {
+		if c, _ := npe["class"].(string); c != "" {
+			return c
+		}
+	}
+	return classUnverified
 }
 
 // deviceClasses reads a device-class source's classes option: a map of class
