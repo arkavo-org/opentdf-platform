@@ -39,7 +39,7 @@ The FairPlay licence for the creator's own recording was still denied, and so wa
 3. A source can only grant within the attribute space it is authorised for, so a bug in one source cannot unlock another source's content.
 4. Sources whose evidence travels in the token and sources looked up at decision time use the same interface.
 5. Fix the creator case: a creator is entitled to every tier of every campaign they own, on every route (licence, KAS rewrap and catalog). Their token carries those entitlements, and every route treats them exactly like a patron's.
-6. Keep every current patron permitted, and keep the `.patreon.*` subject-mapping behaviour, through the migration.
+6. Keep every current patron permitted, and keep the `.patreon.*` subject-mapping behaviour, across the cutover.
 
 **Non-goals (for this design)**
 - Designing the Stripe integration or the blockchain integration. Neither has been researched. Only their plug-in points are sketched (§9).
@@ -62,7 +62,7 @@ The FairPlay licence for the creator's own recording was still denied, and so wa
 - **Three routes reach the same ERS:**
   - *Licence:* arks calls `GetDecision` with the viewer's CWT as `entityIdentifier.token.jwt` (`arkavo-rs src/modules/license/pdp.rs`).
   - *Catalog:* tdf-iroh-s3's `GET /catalog/<campaign>` calls either `GetDecisionMultiResource` with a claims chain, or AuthZEN through arks (`tdf-iroh-s3 src/authz.rs`; AuthZEN is the default).
-  - *KAS rewrap:* `service/kas/access/accessPdp.go` calls `GetDecisionMultiResource` with the request's bearer as the token entity. Standard TDF rewraps reach the platform through arks's Connect proxy (`/kas.AccessService/*`). It is the one route where the bearer *is* the subject token, so it's the only one where an agent's proof of possession is checked (`ipcReauthRoutes`, `service/internal/auth/authn.go`). **In scope:** it joins the parity, shadow and switch steps in §8.
+  - *KAS rewrap:* `service/kas/access/accessPdp.go` calls `GetDecisionMultiResource` with the request's bearer as the token entity. Standard TDF rewraps reach the platform through arks's Connect proxy (`/kas.AccessService/*`). It is the one route where the bearer *is* the subject token, so it's the only one where an agent's proof of possession is checked (`ipcReauthRoutes`, `service/internal/auth/authn.go`). **In scope:** it is tested and cut over with the other routes (§8).
 - **The token route makes two ERS calls:** `JustInTimePDP` calls `CreateEntityChainsFromTokens` with the token and the requested resources, then `ResolveEntities` on the claims chain that comes back (`just_in_time_pdp.go`). The token, and the resources, exist only in the first call. The `EntityRepresentation` is built in the second. Both calls arrive with the calling service's client ID (`IPCMetadataClientInterceptor`, `authn.go`), so on the licence route the second call looks like `arks-media` sending a claims chain of its own.
 - **Tokens:** CWT, ES256, issuer `https://identity.arkavo.net`, one-hour lifetime. Patreon data is materialised at mint and cached for 5 minutes.
 - **Revocation baseline:** the token's lifetime. *My call, pending the Stripe research*, agreed in conversation as the default; sources that need faster revocation are looked up live.
@@ -75,13 +75,15 @@ The FairPlay licence for the creator's own recording was still denied, and so wa
 - "Creator" means the account owns a Patreon campaign, as Patreon reports it (authnz-rs #100). It does not mean a role a client asserted.
 - "A Creator should have all their campaigns entitled." The catalog can't tell a viewer from a creator, so a creator's own content must get the same answer on the catalog route as at Play. The fix belongs in what reaches the platform, not in creator-specific handling anywhere.
   - *My call, following from that:* the catalog route is part of phase 1, not deferred.
+- "Do hard cutovers, we are pre-release" (2026-10-17). No shadow period and no legacy compatibility path.
+  - *My reading of it:* the `patreon` and `arkavo` modes are deleted in the same change that adds the composite; the platform stops deriving Patreon grants from `arkavo_patreon` memberships and reads them only from `arkavo_entitlements`; upstream's own `mode` values are left alone; `mode` and `sources` together is a startup error.
   - authnz-rs reads the owned campaign from Patreon's `/identity` `campaign` relationship, which is to-one (`find_campaign_id`, `src/patreon.rs`). The composite takes whatever set of grants the token carries, so it doesn't depend on that count.
 
 ## 5. The design
 
 ### 5.1 One composite resolver
 
-Add a composite ERS, registered when `services.entityresolution.sources` is present. `mode` keeps working unchanged until migration ends (§8).
+Add a composite ERS, registered when `services.entityresolution.sources` is present. The `patreon` and `arkavo` modes are deleted in the same change (§4, §8). Upstream's own `mode` values stay, and setting `mode` together with `sources` is a startup error.
 
 For each subject entity in a request, the composite does four things:
 1. **Establish verified evidence** (§5.3).
@@ -145,7 +147,7 @@ Resolution = grants[{fqn, actions, expires_at}], properties (map), outcome
 outcome    = complete | not_applicable | unavailable | invalid
 ```
 
-- **Token-carried sources** do no I/O. They read verified claims and return grants that expire with the token. Examples: `patreon` (memberships plus the Patreon entries of `arkavo_entitlements`) and `identity-core`.
+- **Token-carried sources** do no I/O. They read verified claims and return grants that expire with the token. Examples: `patreon` (the Patreon entries of `arkavo_entitlements`, plus the `.patreon` membership view read from `arkavo_patreon`), `identity-core` and `device-class`.
 - **Live sources** call a configured, authenticated endpoint, never a URL taken from the token. They pass the stable account ID and the requested items.
   - **Cache:** keyed by (source, account, query, evidence version), with single-flight and a bounded size. The TTL is the smallest of the source's lease, the token's remaining life and the configured maximum.
   - **Failure:** fails closed. If a live source relevant to the request is `unavailable`, that request gets no ALLOW from it, and stale results are never served after an error. Sources not relevant to the requested definitions are not called.
@@ -154,7 +156,8 @@ outcome    = complete | not_applicable | unavailable | invalid
 ### 5.5 Constraints (subtractive, applied after the union)
 
 - **Agent gate:** a subject carrying the agent marker is checked live against authnz-rs agent status (`service/entityresolution/arkavo/v2/agent_gate.go`, `service/internal/agentstatus`). If it is withheld or unavailable, the subject gets no grants. *Open question:* the timeout (§11.1).
-- **Device caps:** a device class may cap what the subject holds; it never adds. Today `arkavo` mode's `directEntitlements` *appends* `device_class_ceilings` FQNs as grants (`service/entityresolution/arkavo/v2/entity_resolution.go`), so the composite must not copy that.
+- **Device caps:** a device class may cap what the subject holds; a constraint never adds. Today `arkavo` mode's `directEntitlements` *appends* `device_class_ceilings` FQNs as grants (`service/entityresolution/arkavo/v2/entity_resolution.go`). That is a grant, not a cap.
+  - *My call, needed to retire `arkavo` mode:* it becomes a `device-class` **source**. For a device subject it grants the FQNs configured for its `arkavo_npe.class` (default `unverified`), only within the definitions it owns, like any other source. Every configured FQN must fall within those definitions, or startup fails.
   - **Naming:** the composite uses a new key, `device_class_caps`, so no existing `device_class_ceilings` config silently inverts. A class missing from the map means **no cap**.
   - **Phase 1:** configures no caps. Device-subject tokens keep the person's grants, as today. authnz-rs mints only the `attested` and `managed` classes (`src/device_check.rs`), and device tokens carry the full user claims.
   - **Later:** what each class should be capped to is the owner's decision (§11.4). Caps on a device that comes with a person in the catalog chain need an authorization change (§6), because environment entities are skipped.
@@ -198,7 +201,7 @@ services:
     # enforce_namespaced_entitlements stays off in phase 1 (§6)
 
   entityresolution:
-    # presence of `sources` selects the composite; `mode` remains only until migration ends
+    # presence of `sources` selects the composite; setting `mode` as well is a startup error
     deadline: 300ms
     evidence:
       issuers:
@@ -207,7 +210,7 @@ services:
           audience: https://platform.arkavo.net
       verify_entity_tokens: true
       seal_key: ${ERS_EVIDENCE_SEAL_KEY}            # HMAC key for arkavo_evidence (§5.3)
-      claims_chain_peps: [client:arks-media, client:catalog-node]   # PEPs whose unsealed chains are accepted
+      claims_chain_peps: [<arks's client ID, from the pre-check>]   # PEPs whose unsealed chains are accepted
 
     sources:
       - id: patreon
@@ -217,7 +220,6 @@ services:
         grants:
           - https://patreon.arkavo.com/attr/campaign
           - https://patreon.arkavo.com/attr/campaign-tier
-        legacy_membership_derivation: true          # today's passthroughResolution, for parity
         properties_key: patreon                     # keeps .patreon.* subject mappings
         infer_unknown_as_free: true
         pep_assertable: true
@@ -229,6 +231,16 @@ services:
         grants:
           - https://patreon.arkavo.com/attr/arkavo-creator   # the publish entitlement
         pep_assertable: false
+
+      # local agent testing (opentdf-arkavo-local-test.yaml), not prod:
+      # - id: device-class
+      #   type: device-class
+      #   issuer: https://identity.arkavo.net
+      #   grants: [https://arkavo.ai/attr/classification]
+      #   classes:
+      #     unverified: [https://arkavo.ai/attr/classification/value/internal]
+      #     managed:    [https://arkavo.ai/attr/classification/value/confidential]
+      #     attested:   [https://arkavo.ai/attr/classification/value/restricted]
 
       # later, shape only:
       # - id: stripe
@@ -245,7 +257,7 @@ services:
       device_class_caps: {}   # phase 1: no caps; a missing class means no cap; caps intersect, never add (§5.5)
 ```
 
-## 8. Migration, and how the creator case gets fixed
+## 8. Cutover, and how the creator case gets fixed
 
 The creator case fails on every route. The composite alone fixes the token routes, but not the catalog.
 
@@ -260,37 +272,34 @@ The creator case fails on every route. The composite alone fixes the token route
 - it forwards them for every viewer, with no role check;
 - the composite then accepts them only from `arks-media`, and only into `pep_assertable` sources (§5.3).
 
-This keeps the AuthZEN facade, its device and environment entities, and the rule that CWTs are never sent as `EntityIdentifier.token` (arkavo-rs `docs/platform-proxy.md`; draft-arkavo-authzen-cwt-00). It does add a subject property to that draft. The trust is the same arks already extends to `arkavo_patreon` from the catalog node, which verifies the CWT before asking.
+This keeps the AuthZEN facade, its device and environment entities, and the rule that CWTs are never sent as `EntityIdentifier.token` (arkavo-rs `docs/platform-proxy.md`; draft-arkavo-authzen-cwt-00). It does add a subject property to that draft. The trust is the same arks already extends to `arkavo_patreon` from the catalog node, which verifies the CWT before asking. With the membership derivation gone (step 2 below), patrons on the catalog route depend on this change too, so arks must be live before the platform cuts over.
 
 Rejected alternatives:
 - **tdf-iroh-s3 `ConnectAuthzClient` in `entity_mode = token`** (`src/authz.rs`) needs no arks change, and its comment that CWTs fail the ERS parse is stale. But it drops the device entities. Also, tdf-iroh-s3 checks the person token's issuer, not its audience (`src/auth.rs`), so the composite's audience check could reject tokens the catalog accepts today.
 - **`protocol = "opentdf-v2"`** is labelled rollback-only in tdf-iroh-s3 (`src/config.rs`).
 
-**Steps:**
-1. **Pre-checks, read-only:**
-   - Confirm prod's ERS `mode` and the catalog node's `protocol`.
-   - Confirm that arks verifies the viewer CWT before calling `GetDecision`, and that the identity token's audience includes the platform.
-   - Confirm that standard TDF rewraps reach this platform's KAS and ERS. The prod config draft says `-kas`, while arks's `KAS_PROXY_MODE` forwards `/kas.AccessService/Rewrap` to a co-located platform.
-2. **Build the composite** behind `sources:`, with `patreon`, `identity-core` and the agent gate.
-   - **Parity reference:** today's `patreon` mode, with one deliberate change. The legacy membership derivation (`passthroughResolution`, `passthrough.go`) gets the same id-shaped-slug filter that authnz-rs #96 (`7b282ee`) applies in `campaign_entitlements`. Without it, a title slug shaped like `tier-<digits>` passes straight through. Inside one source, the capability check can't catch that, so the cross-tier escalation #96 closed would come back. *My call:* security over byte-for-byte parity.
-   - **Parity tests:**
+**Steps (hard cutover, §4):**
+1. **Pre-checks, read-only.** They block the cutover, since no shadow period will catch a mistake:
+   - the catalog node's `protocol`;
+   - arks's client ID as the platform sees it, which becomes `claims_chain_peps`;
+   - that the identity token's audience includes the platform;
+   - that standard TDF rewraps reach this platform's KAS and ERS. The prod config draft says `-kas`, while arks's `KAS_PROXY_MODE` forwards `/kas.AccessService/Rewrap` to a co-located platform.
+2. **Build the composite** with `patreon`, `identity-core`, `device-class` and the agent gate, and **delete the `patreon` and `arkavo` modes** in the same change. Their reusable parts (claim parsing, the `.patreon` view, the agent gate) move behind the sources.
+   - **One Patreon derivation.** The platform no longer derives grants from memberships. authnz-rs has put every active membership's campaign and tier values in `arkavo_entitlements` since #95, so that array is the single source. The #96 id-shaped slug filter is moot on the platform; it stays in authnz-rs, where titles are slugified.
+   - **Tests:**
      - patrons: active, declined and former;
      - free followers (`infer_unknown_as_free`);
      - creators;
      - a cross-campaign deny, for example a tier of campaign A never satisfies campaign B;
-     - an id-shaped title slug;
-     - expired or forged tokens;
+     - expired, forged, unsigned (`alg=none`) and untrusted-issuer tokens;
      - a forged or expired `arkavo_evidence` seal;
      - agents;
-     - an unsealed claims chain from a PEP not on the allowlist.
-3. **Shadow in prod:** inside the ERS, compute both the legacy and the composite grant sets for licence, KAS and catalog traffic, and log every difference by class. *My call:* compare grant sets, not decisions, since decisions are computed outside the ERS. Expected classes:
-   - the creator's own campaign;
-   - the `_tier-<id>` forms every patron token has carried since authnz-rs #95;
-   - id-shaped slugs removed by the filter.
+     - an unsealed claims chain from a PEP not on the allowlist;
+     - what the deleted modes' tests covered: CBOR-native claim values, and the agent gate through the v2 PDP.
+3. **Deploy arks** (the catalog-route change) and confirm it is live. Under today's `patreon` mode it changes nothing.
+4. **Cut over the platform:** deploy with `sources:` configured. All three routes switch at once, so there is no window where Play works and the creator's rows stay Locked. Verify a creator's Play, download and catalog listing, a patron's Play and catalog listing, and a KAS rewrap. Rollback is redeploying the previous build and config.
 
-   Anything else blocks the switch.
-4. **Switch all three routes together.** They share one ERS, and the owner wants a creator to get one answer everywhere (§4), so there is no window where Play works and the creator's rows stay Locked. *My call.* The arks change must be live before step 3, so the shadow sees the forwarded entitlements on catalog traffic. `patreon` mode never reads `arkavo_entitlements`, so the change is inert until the switch. After the switch the creator can list, download and play their own content.
-5. **Retire `mode`.** Later, retire `legacy_membership_derivation` once telemetry shows that no tokens rely on memberships alone. authnz-rs's `campaign_entitlements` becomes the single Patreon derivation. Keep the `.patreon` properties for as long as subject mappings use them.
+**Not carried over:** the platform's RAR endpoint (`service/authorization/v2/rar.go`) hands the ERS an unsigned-JWT bridge for a CWT subject token. The composite accepts only verified CWTs, so RAR would get no grants. No config enables RAR; if it is enabled later, it must hand the ERS the original CWT.
 
 ## 9. How Stripe and blockchain plug in (interface level only)
 
@@ -325,6 +334,6 @@ Rejected alternatives:
 - Package layout for the composite and its sources.
 - How the existing `patreon` and `arkavo` resolvers are refactored into sources. Prefer reusing `passthroughResolution` (plus the #96 filter) and `directEntitlements` (minus the ceiling append).
 - The `arkavo_evidence` encoding, the HMAC construction and key rotation for `seal_key`, and its expiry, which is no later than the token's.
-- Logging and metrics: grants dropped by capability, source outcomes, shadow differences.
-- Test layout, including the parity matrix in §8 step 2.
+- Logging and metrics: grants dropped by capability, source outcomes, unsealed chains refused because the caller isn't allowlisted.
+- Test layout, including the test list in §8 step 2.
 - Exact config field names. The sketch in §7 is illustrative.
