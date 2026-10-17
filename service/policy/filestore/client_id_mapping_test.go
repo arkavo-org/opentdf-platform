@@ -11,11 +11,12 @@ import (
 	"github.com/opentdf/platform/service/policy/filestore"
 )
 
-// clientIDClaim is the claim the arkavo ERS copies arkavo_account_id into
-// (arkavo/v2 client_id_claim default) and that arkavo deployments configure as
-// server.auth.policy.client_id_claim. A subject mapping keyed on it would
-// grant the owner's attributes to every token carrying the owner's account
-// id, agent tokens included (identity-plane end state §2.2).
+// clientIDClaim is the account-id claim authnz-rs mints, which the composite
+// ERS reads as a subject's account and an agent's owner, and that arkavo
+// deployments configure as server.auth.policy.client_id_claim. A subject
+// mapping keyed on it would grant the owner's attributes to every token
+// carrying the owner's account id, agent tokens included (identity-plane end
+// state §2.2).
 const clientIDClaim = "arkavo_account_id"
 
 // subjectMappingsKeyedOn lists subject mappings with any condition whose
@@ -113,10 +114,10 @@ subject_mappings:
 }
 
 // TestArkavoSnapshot_HasNoSubjectMappings is load-bearing for the agent
-// quarantine: the arkavo resolver withholds a refused agent's entitlements
-// and claims, which denies only while no subject mapping can grant an
-// attribute on its own. Any mapping in this snapshot breaks that; add one
-// only together with a new denial design.
+// quarantine: the composite resolver's agent gate withholds a refused agent's
+// entitlements and properties, which denies only while no subject mapping can
+// grant an attribute on its own. Any mapping in this snapshot breaks that; add
+// one only together with a new denial design.
 func TestArkavoSnapshot_HasNoSubjectMappings(t *testing.T) {
 	if sms := loadMappings(t, "../../../examples/config/policy.arkavo.yaml"); len(sms) != 0 {
 		t.Fatalf("policy.arkavo.yaml must keep subject_mappings: [] (found %d)", len(sms))

@@ -20,9 +20,10 @@ const (
 	redacted       = "[REDACTED]"
 )
 
-// Config is services.entityresolution.agent_status (arkavo mode). Leaving
-// url, client_id and client_secret all unset leaves the checker
-// unconfigured, and every agent subject then resolves with no entitlements.
+// Config is services.entityresolution.constraints.agent_status (the
+// composite resolver). Leaving url, client_id and client_secret all unset
+// leaves the checker unconfigured, and every agent subject then resolves with
+// no entitlements.
 type Config struct {
 	// URL is the authnz-rs base URL, e.g. https://identity.arkavo.net.
 	URL string `mapstructure:"url" json:"url"`

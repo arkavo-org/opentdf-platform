@@ -14,18 +14,15 @@ import (
 	"testing"
 	"time"
 
-	"connectrpc.com/connect"
-	"github.com/opentdf/platform/protocol/go/entity"
-	entityresolutionV2 "github.com/opentdf/platform/protocol/go/entityresolution/v2"
 	"github.com/opentdf/platform/service/internal/agentstatus"
 	"github.com/opentdf/platform/service/logger"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"google.golang.org/protobuf/types/known/anypb"
-	"google.golang.org/protobuf/types/known/structpb"
 )
 
 const (
+	issuer           = "https://identity.arkavo.net"
+	ownerClaim       = "arkavo_account_id"
 	testAgentDID     = "did:key:z6Mkagent"
 	testOwner        = "00000000-0000-0000-0000-000000000001"
 	testStateVersion = 3
@@ -41,6 +38,28 @@ const (
 // testAgentJWK is the agent key as cnf.jwk.
 func testAgentJWK() map[string]interface{} {
 	return map[string]interface{}{"kty": "OKP", "crv": "Ed25519", "x": testAgentX}
+}
+
+// agentClaims is a contract v2 agent token's claims: state version, swarm and
+// a cnf that carries the agent key (cnf.jwk), as the CWT verifier renders the
+// COSE_Key cnf.
+func agentClaims() map[string]interface{} {
+	return map[string]interface{}{
+		"iss": issuer, "sub": testAgentDID,
+		"arkavo_account_id":    testOwner,
+		"arkavo_roles":         []interface{}{"agent"},
+		"arkavo_entitlements":  []interface{}{"https://arkavo.ai/attr/tdf/value/decrypt", "https://arkavo.ai/attr/action/value/read"},
+		"arkavo_npe":           map[string]interface{}{"type": "agent", "delegation_id": testAgentDID, "depth": 0},
+		"arkavo_state_version": testStateVersion,
+		"arkavo_swarm":         testSwarm,
+		"cnf":                  map[string]interface{}{"jwk": testAgentJWK()},
+	}
+}
+
+func agentClaimsWith(mutate func(map[string]interface{})) map[string]interface{} {
+	claims := agentClaims()
+	mutate(claims)
+	return claims
 }
 
 type fakeChecker struct {
@@ -64,12 +83,6 @@ func (f *fakeChecker) callCount() int {
 	return f.calls
 }
 
-func (f *fakeChecker) setErr(err error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.err = err
-}
-
 type checkerFunc func(context.Context, agentstatus.Subject) error
 
 func (f checkerFunc) Check(ctx context.Context, s agentstatus.Subject) error { return f(ctx, s) }
@@ -78,48 +91,17 @@ func wantSubject() agentstatus.Subject {
 	return agentstatus.Subject{DID: testAgentDID, Swarm: testSwarm, Owner: testOwner, StateVersion: testStateVersion}
 }
 
-func trustedCfg() Config { return Config{TrustMaterializedClaims: true, TrustedIssuer: issuer} }
-
-// gateSvc is a trusted-issuer resolver whose log is captured.
-func gateSvc(t *testing.T, cfg Config, checker agentstatus.Checker) (*EntityResolutionService, *bytes.Buffer) {
+// judge runs AgentDenial on claims and, as the composite does, logs a
+// refusal with LogAgentDenial; the log is captured in the returned buffer.
+func judge(t *testing.T, checker agentstatus.Checker, claims map[string]any) (*bytes.Buffer, error) {
 	t.Helper()
-	svc := newSvc(t, cfg)
 	buf := &bytes.Buffer{}
-	svc.logger = &logger.Logger{Logger: slog.New(slog.NewJSONHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug}))}
-	svc.agentStatus = checker
-	return svc, buf
-}
-
-func tokenWith(t *testing.T, mutate func(map[string]interface{})) string {
-	t.Helper()
-	claims := agentClaims(issuer)
-	mutate(claims)
-	return buildJWT(t, claims)
-}
-
-// resolveSubject resolves a chain and returns the SUBJECT's representation.
-func resolveSubject(t *testing.T, svc *EntityResolutionService, ents []*entity.Entity) *entityresolutionV2.EntityRepresentation {
-	t.Helper()
-	resp, err := svc.ResolveEntities(t.Context(), connect.NewRequest(&entityresolutionV2.ResolveEntitiesRequest{Entities: ents}))
-	require.NoError(t, err, "a withheld agent must never fail the resolution")
-	reps := resp.Msg.GetEntityRepresentations()
-	require.Len(t, reps, len(ents), "one representation per entity")
-	for i, e := range ents {
-		if e.GetCategory() == entity.Entity_CATEGORY_SUBJECT {
-			return reps[i]
-		}
+	log := &logger.Logger{Logger: slog.New(slog.NewJSONHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug}))}
+	subject, err := AgentDenial(t.Context(), checker, claims, ownerClaim)
+	if err != nil {
+		LogAgentDenial(t.Context(), log, subject, err)
 	}
-	t.Fatal("no subject entity")
-	return nil
-}
-
-// assertWithheld: no entitlements and no claims, so no subject mapping can
-// match either.
-func assertWithheld(t *testing.T, rep *entityresolutionV2.EntityRepresentation) {
-	t.Helper()
-	assert.Equal(t, "arkavo-subject", rep.GetOriginalId())
-	assert.Empty(t, rep.GetDirectEntitlements())
-	assert.Empty(t, rep.GetAdditionalProps())
+	return buf, err
 }
 
 func logRecords(t *testing.T, buf *bytes.Buffer) []map[string]any {
@@ -150,22 +132,46 @@ func withheldRecord(t *testing.T, buf *bytes.Buffer) map[string]any {
 	return found
 }
 
-func TestAgentGate_EligibleAgentKeepsDelegatedEntitlements(t *testing.T) {
+func TestAgentDenial_PersonIsNeverGated(t *testing.T) {
 	checker := &fakeChecker{}
-	svc, buf := gateSvc(t, trustedCfg(), checker)
-	rep := resolveSubject(t, svc, chainsFor(t, svc, agentToken(t, issuer)))
-	assert.Len(t, rep.GetDirectEntitlements(), 2)
-	assert.NotEmpty(t, rep.GetAdditionalProps())
-	assert.Equal(t, 1, checker.callCount())
-	assert.Equal(t, wantSubject(), checker.got)
-	assert.NotContains(t, buf.String(), agentWithheldMsg)
+	claims := map[string]any{"iss": issuer, "sub": "person", "arkavo_account_id": testOwner}
+	_, err := AgentDenial(t.Context(), checker, claims, "arkavo_account_id")
+	require.NoError(t, err)
+	assert.Zero(t, checker.callCount(), "a person never reaches the status service")
+
+	_, err = AgentDenial(t.Context(), nil, claims, "arkavo_account_id")
+	require.NoError(t, err, "a nil checker does not withhold a person")
 }
 
-func TestAgentGate_QuarantinedAgentResolvesWithNothing(t *testing.T) {
+func TestAgentDenial_UnconfiguredWithholdsAgent(t *testing.T) {
+	subject, err := AgentDenial(t.Context(), nil, agentClaims(), "arkavo_account_id")
+	var d *agentstatus.DenialError
+	require.ErrorAs(t, err, &d)
+	assert.Equal(t, agentstatus.ReasonUnconfigured, d.Reason)
+	assert.Equal(t, wantSubject(), subject)
+}
+
+func TestAgentDenial_EligibleAgentAsksTheChecker(t *testing.T) {
+	checker := &fakeChecker{}
+	subject, err := AgentDenial(t.Context(), checker, agentClaims(), "arkavo_account_id")
+	require.NoError(t, err)
+	assert.Equal(t, 1, checker.callCount())
+	assert.Equal(t, wantSubject(), checker.got)
+	assert.Equal(t, wantSubject(), subject)
+}
+
+func TestLogAgentDenial_UnconfiguredIsAnError(t *testing.T) {
+	buf, err := judge(t, nil, agentClaims())
+	require.Error(t, err)
+	rec := withheldRecord(t, buf)
+	assert.Equal(t, "ERROR", rec["level"])
+	assert.Equal(t, agentstatus.ReasonUnconfigured, rec["reason"])
+}
+
+func TestLogAgentDenial_NotEligibleRecordsTheStatus(t *testing.T) {
 	checker := &fakeChecker{err: &agentstatus.DenialError{Reason: agentstatus.ReasonNotEligible, Agent: testAgentDID, State: "quarantined", StateVersion: 4, Incident: "inc-9"}}
-	svc, buf := gateSvc(t, trustedCfg(), checker)
-	tok := agentToken(t, issuer)
-	assertWithheld(t, resolveSubject(t, svc, chainsFor(t, svc, tok)))
+	buf, err := judge(t, checker, agentClaims())
+	require.Error(t, err)
 	rec := withheldRecord(t, buf)
 	assert.Equal(t, "WARN", rec["level"])
 	assert.Equal(t, agentstatus.ReasonNotEligible, rec["reason"])
@@ -176,31 +182,9 @@ func TestAgentGate_QuarantinedAgentResolvesWithNothing(t *testing.T) {
 	assert.Equal(t, testAgentDID, rec["agent"])
 	assert.Equal(t, testOwner, rec["owner"])
 	assert.Equal(t, testSwarm, rec["swarm"])
-	assert.NotContains(t, buf.String(), tok)
 }
 
-// A PEP may create a chain once and resolve it later; the status in force at
-// resolution time decides.
-func TestAgentGate_ChainResolvedAfterQuarantineIsWithheld(t *testing.T) {
-	checker := &fakeChecker{}
-	svc, _ := gateSvc(t, trustedCfg(), checker)
-	ents := chainsFor(t, svc, agentToken(t, issuer))
-	require.Len(t, resolveSubject(t, svc, ents).GetDirectEntitlements(), 2)
-
-	checker.setErr(&agentstatus.DenialError{Reason: agentstatus.ReasonNotEligible, Agent: testAgentDID})
-	assertWithheld(t, resolveSubject(t, svc, ents))
-	assert.Equal(t, 2, checker.callCount(), "every resolution asks")
-}
-
-func TestAgentGate_UnconfiguredWithholdsEveryAgentAtError(t *testing.T) {
-	svc, buf := gateSvc(t, trustedCfg(), nil)
-	assertWithheld(t, resolveSubject(t, svc, chainsFor(t, svc, agentToken(t, issuer))))
-	rec := withheldRecord(t, buf)
-	assert.Equal(t, "ERROR", rec["level"])
-	assert.Equal(t, agentstatus.ReasonUnconfigured, rec["reason"])
-}
-
-func TestAgentGate_AgentWithoutKeyCnfIsWithheldWithoutAsking(t *testing.T) {
+func TestAgentDenial_AgentWithoutKeyCnfIsRefusedWithoutAsking(t *testing.T) {
 	jkt := map[string]interface{}{"jkt": "0ZcOCORZNYy-DWpqq30jZyJGHTN0d2HglBV3uiguA4I"}
 	for name, mutate := range map[string]func(map[string]interface{}){
 		"no cnf":             func(c map[string]interface{}) { delete(c, "cnf") },
@@ -223,8 +207,8 @@ func TestAgentGate_AgentWithoutKeyCnfIsWithheldWithoutAsking(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			checker := &fakeChecker{}
-			svc, buf := gateSvc(t, trustedCfg(), checker)
-			assertWithheld(t, resolveSubject(t, svc, chainsFor(t, svc, tokenWith(t, mutate))))
+			buf, err := judge(t, checker, agentClaimsWith(mutate))
+			require.Error(t, err)
 			assert.Equal(t, 0, checker.callCount())
 			assert.Equal(t, reasonNotKeyBound, withheldRecord(t, buf)["reason"])
 		})
@@ -232,44 +216,41 @@ func TestAgentGate_AgentWithoutKeyCnfIsWithheldWithoutAsking(t *testing.T) {
 }
 
 // A P-256 agent key (kty EC with x and y) is key-bound too.
-func TestAgentGate_ECKeyCnfIsKeyBound(t *testing.T) {
+func TestAgentDenial_ECKeyCnfIsKeyBound(t *testing.T) {
 	checker := &fakeChecker{}
-	svc, _ := gateSvc(t, trustedCfg(), checker)
-	tok := tokenWith(t, func(c map[string]interface{}) {
+	_, err := judge(t, checker, agentClaimsWith(func(c map[string]interface{}) {
 		c["cnf"] = map[string]interface{}{"jwk": map[string]interface{}{"kty": "EC", "crv": "P-256", "x": testAgentX, "y": testAgentX}}
-	})
-	assert.Len(t, resolveSubject(t, svc, chainsFor(t, svc, tok)).GetDirectEntitlements(), 2)
+	}))
+	require.NoError(t, err)
 	assert.Equal(t, 1, checker.callCount())
 }
 
-// A person or device token never reaches the status service: an identity
+// A person or device subject never reaches the status service: an identity
 // outage must not change their decisions.
-func TestAgentGate_PersonAndDeviceNeverAsk(t *testing.T) {
+func TestAgentDenial_PersonAndDeviceNeverAsk(t *testing.T) {
 	down := &fakeChecker{err: &agentstatus.DenialError{Reason: agentstatus.ReasonUnreachable}}
-	svc, buf := gateSvc(t, Config{
-		TrustMaterializedClaims: true, TrustedIssuer: issuer,
-		DeviceClassCeilings: map[string][]string{"unverified": {"https://arkavo.ai/attr/classification/value/internal"}},
-	}, down)
-	person := buildJWT(t, map[string]interface{}{
+	person := map[string]interface{}{
 		"iss": issuer, "sub": testOwner,
 		"arkavo_roles":        []interface{}{"user"},
 		"arkavo_entitlements": []interface{}{"https://arkavo.ai/attr/tdf/value/decrypt"},
-	})
-	device := buildJWT(t, map[string]interface{}{
+	}
+	device := map[string]interface{}{
 		"iss": issuer, "sub": testOwner,
 		"arkavo_npe": map[string]interface{}{"type": "device", "class": "unverified", "device_id": "K1"},
-	})
-	assert.Len(t, resolveSubject(t, svc, chainsFor(t, svc, person)).GetDirectEntitlements(), 1)
-	assert.Len(t, resolveSubject(t, svc, chainsFor(t, svc, device)).GetDirectEntitlements(), 1)
+	}
+	for _, claims := range []map[string]interface{}{person, device} {
+		buf, err := judge(t, down, claims)
+		require.NoError(t, err)
+		assert.NotContains(t, buf.String(), agentWithheldMsg)
+	}
 	assert.Equal(t, 0, down.callCount())
-	assert.NotContains(t, buf.String(), agentWithheldMsg)
 }
 
-// Any agent marker gates a token, and a gated token that is not an
-// arkavo_npe of type agent is withheld without asking identity (#45's
-// partial-shape fixtures). A token that looks partly like an agent's is
-// never resolved as a person.
-func TestAgentGate_PartialAgentShapesAreWithheld(t *testing.T) {
+// Any agent marker gates a subject, and a gated subject that is not an
+// arkavo_npe of type agent is refused without asking identity (#45's
+// partial-shape fixtures). A subject that looks partly like an agent is
+// never judged as a person.
+func TestAgentDenial_PartialAgentShapesAreRefused(t *testing.T) {
 	base := func() map[string]interface{} {
 		return map[string]interface{}{
 			"iss": issuer, "sub": testAgentDID,
@@ -288,9 +269,8 @@ func TestAgentGate_PartialAgentShapesAreWithheld(t *testing.T) {
 		"arkavo_npe with a non-string type":          {"arkavo_npe": map[string]interface{}{"type": 7}},
 		"arkavo_npe with an unknown type":            {"arkavo_npe": map[string]interface{}{"type": "service"}},
 		"swarm and state version without arkavo_npe": {"arkavo_state_version": testStateVersion, "arkavo_swarm": testSwarm},
-		// arkavo_state_version alone is a marker, whatever
-		// its value, so a person-shaped token carrying it is never resolved
-		// as a person.
+		// arkavo_state_version alone is a marker, whatever its value, so a
+		// person-shaped subject carrying it is never judged as a person.
 		"arkavo_state_version alone":              {"arkavo_state_version": testStateVersion},
 		"arkavo_state_version alone, null":        {"arkavo_state_version": nil},
 		"arkavo_state_version alone, zero":        {"arkavo_state_version": 0},
@@ -305,10 +285,27 @@ func TestAgentGate_PartialAgentShapesAreWithheld(t *testing.T) {
 				claims[k] = v
 			}
 			checker := &fakeChecker{}
-			svc, buf := gateSvc(t, trustedCfg(), checker)
-			assertWithheld(t, resolveSubject(t, svc, chainsFor(t, svc, buildJWT(t, claims))))
+			buf, err := judge(t, checker, claims)
+			require.Error(t, err)
 			assert.Equal(t, 0, checker.callCount())
 			assert.Equal(t, reasonNotAgentProfile, withheldRecord(t, buf)["reason"])
+		})
+	}
+}
+
+// The version reaches the checker from each number shape a subject's claims
+// can hold it in: an integer from the CWT verifier, a float64 from structpb.
+func TestAgentDenial_StateVersionReachesTheChecker(t *testing.T) {
+	for name, v := range map[string]any{
+		"int64":   int64(testStateVersion),
+		"uint64":  uint64(testStateVersion),
+		"float64": float64(testStateVersion),
+	} {
+		t.Run(name, func(t *testing.T) {
+			checker := &fakeChecker{}
+			_, err := judge(t, checker, agentClaimsWith(func(c map[string]interface{}) { c["arkavo_state_version"] = v }))
+			require.NoError(t, err)
+			assert.Equal(t, wantSubject(), checker.got)
 		})
 	}
 }
@@ -317,7 +314,7 @@ func TestAgentGate_PartialAgentShapesAreWithheld(t *testing.T) {
 // the checker with StateVersion 0 (the fake checker is still called once,
 // with that zero); checkSubject's own refusal of a zero state_version is
 // pinned separately by agentstatus.TestCheckSubject.
-func TestAgentGate_StateVersionThatIsNotOneReachesTheCheckerAsZero(t *testing.T) {
+func TestAgentDenial_StateVersionThatIsNotOneReachesTheCheckerAsZero(t *testing.T) {
 	for name, bad := range map[string]interface{}{
 		"a string":                   "3",
 		"a fraction":                 3.5,
@@ -332,179 +329,55 @@ func TestAgentGate_StateVersionThatIsNotOneReachesTheCheckerAsZero(t *testing.T)
 	} {
 		t.Run(name, func(t *testing.T) {
 			checker := &fakeChecker{}
-			svc, _ := gateSvc(t, trustedCfg(), checker)
-			tok := tokenWith(t, func(c map[string]interface{}) { c["arkavo_state_version"] = bad })
-			resolveSubject(t, svc, chainsFor(t, svc, tok))
+			_, _ = judge(t, checker, agentClaimsWith(func(c map[string]interface{}) { c["arkavo_state_version"] = bad }))
 			require.Equal(t, 1, checker.callCount())
 			assert.Zero(t, checker.got.StateVersion)
 		})
 	}
 }
 
-// The version survives both passes on both wire formats: an int64 from the
-// CWT decoder and an exact int64 read from the JWT payload text in the
-// first pass, a float64 from structpb in the second.
-func TestAgentGate_StateVersionReachesTheCheckerFromEitherFormat(t *testing.T) {
-	for name, tok := range map[string]func(t *testing.T) string{
-		"JWT": func(t *testing.T) string { return agentToken(t, issuer) },
-		"CWT": func(t *testing.T) string { return agentCWT(t, issuer) },
-	} {
-		t.Run(name, func(t *testing.T) {
-			checker := &fakeChecker{}
-			svc, _ := gateSvc(t, trustedCfg(), checker)
-			resolveSubject(t, svc, chainsFor(t, svc, tok(t)))
-			assert.Equal(t, wantSubject(), checker.got)
-		})
-	}
-}
-
-// The first pass reads arkavo_state_version from the JWT payload text, so a
-// number a float64 would round (2^53+1, a fraction past float64 precision)
-// is never taken for an integer; the second pass then withholds it.
-func TestAgentGate_StateVersionIsReadExactlyFromTheJWTPayload(t *testing.T) {
-	for raw, want := range map[string]uint64{
-		"9007199254740991":    9007199254740991,
-		"9007199254740992":    0,
-		"9007199254740993":    0,
-		"1.0000000001":        0,
-		"1.00000000000000001": 0,
-		"3.0":                 0,
-		"3e0":                 0,
-	} {
-		t.Run(raw, func(t *testing.T) {
-			checker := &fakeChecker{}
-			svc, _ := gateSvc(t, trustedCfg(), checker)
-			tok := tokenWith(t, func(c map[string]interface{}) { c["arkavo_state_version"] = json.Number(raw) })
-			resolveSubject(t, svc, chainsFor(t, svc, tok))
-			require.Equal(t, 1, checker.callCount())
-			assert.Equal(t, want, checker.got.StateVersion)
-		})
-	}
-}
-
-// On the CWT path the decoder renders a CBOR integer as int64; a CBOR float,
-// or an integer past 2^53-1, reads as malformed and reaches the checker as 0.
-func TestAgentGate_StateVersionFromACWT(t *testing.T) {
-	for name, tt := range map[string]struct {
-		v    any
-		want uint64
-	}{
-		"an integer":    {int64(3), 3},
-		"beyond 2^53-1": {uint64(1<<53 + 1), 0},
-		"a float":       {float64(3), 0},
-	} {
-		t.Run(name, func(t *testing.T) {
-			jwk := map[any]any{}
-			for k, v := range testAgentJWK() {
-				jwk[k] = v
-			}
-			tok := signCWT(t, issuer, testAgentDID, map[any]any{
-				"arkavo_account_id":    testOwner,
-				"arkavo_roles":         []any{"agent"},
-				"arkavo_entitlements":  []any{"https://arkavo.ai/attr/tdf/value/decrypt"},
-				"arkavo_npe":           map[any]any{"type": "agent", "delegation_id": testAgentDID, "depth": int64(0)},
-				"arkavo_state_version": tt.v,
-				"arkavo_swarm":         testSwarm,
-				"cnf":                  map[any]any{"jwk": jwk},
-			})
-			checker := &fakeChecker{}
-			svc, _ := gateSvc(t, trustedCfg(), checker)
-			resolveSubject(t, svc, chainsFor(t, svc, tok))
-			require.Equal(t, 1, checker.callCount())
-			assert.Equal(t, tt.want, checker.got.StateVersion)
-		})
-	}
-}
-
-// addTrustedClaims carries arkavo_state_version onto the SUBJECT for the
-// second pass: the integer when it reads as one, the sentinel when it does
-// not (so its presence still gates). It only ever widens gating: the claim
-// grants nothing by itself.
-func TestAddTrustedClaims_CarriesTheStateVersionOntoTheSubject(t *testing.T) {
-	svc := newAgentSvc(t, trustedCfg())
-	good := subjectClaimsMap(t, chainsFor(t, svc, agentToken(t, issuer)))
-	assert.InDelta(t, testStateVersion, good[claimStateVersion], 0)
-	bad := tokenWith(t, func(c map[string]interface{}) { c["arkavo_state_version"] = "3" })
-	assert.Equal(t, stateVersionMalformed, subjectClaimsMap(t, chainsFor(t, svc, bad))[claimStateVersion])
-	person := buildJWT(t, map[string]interface{}{
-		"iss": issuer, "sub": testOwner,
-		"arkavo_entitlements": []interface{}{"https://arkavo.ai/attr/tdf/value/decrypt"},
-	})
-	_, present := subjectClaimsMap(t, chainsFor(t, svc, person))[claimStateVersion]
-	assert.False(t, present)
-}
-
-// Scope boundary: a caller that supplies its own entity chain asserts its
-// claims. A SUBJECT with the trusted marker and no agent marker is not gated.
-// The KAS always sends the verified bearer, so its decisions cannot be
-// forged this way; only trusted PEPs may call GetDecision with entity chains
-// in arkavo deployments (documented; provenance-bound claims are a
-// follow-up).
-func TestAgentGate_SuppliedChainWithoutMarkersIsNotGated(t *testing.T) {
-	checker := &fakeChecker{err: &agentstatus.DenialError{Reason: agentstatus.ReasonNotEligible}}
-	svc, _ := gateSvc(t, trustedCfg(), checker)
-	st, err := structpb.NewStruct(map[string]interface{}{
-		"sub": testAgentDID, "iss": issuer, trustedMarker: true,
-		"arkavo_entitlements": []interface{}{"https://arkavo.ai/attr/tdf/value/decrypt"},
-	})
-	require.NoError(t, err)
-	claims, err := anypb.New(st)
-	require.NoError(t, err)
-	supplied := []*entity.Entity{{EntityType: &entity.Entity_Claims{Claims: claims}, EphemeralId: "arkavo-subject", Category: entity.Entity_CATEGORY_SUBJECT}}
-	assert.Len(t, resolveSubject(t, svc, supplied).GetDirectEntitlements(), 1)
-	assert.Equal(t, 0, checker.callCount())
-}
-
-func TestAgentGate_OwnerFromConfiguredClientIDClaim(t *testing.T) {
+func TestAgentDenial_OwnerFromTheOwnerClaim(t *testing.T) {
 	checker := &fakeChecker{}
-	cfg := trustedCfg()
-	cfg.ClientIDClaim = "acct"
-	svc, _ := gateSvc(t, cfg, checker)
-	resolveSubject(t, svc, chainsFor(t, svc, agentToken(t, issuer)))
+	claims := agentClaimsWith(func(c map[string]interface{}) {
+		delete(c, "arkavo_account_id")
+		c["acct"] = testOwner
+	})
+	_, err := AgentDenial(t.Context(), checker, claims, "acct")
+	require.NoError(t, err)
 	assert.Equal(t, testOwner, checker.got.Owner)
 }
 
-func TestAgentGate_UntrustedIssuerNeverAsks(t *testing.T) {
-	checker := &fakeChecker{}
-	svc, _ := gateSvc(t, trustedCfg(), checker)
-	rep := resolveSubject(t, svc, chainsFor(t, svc, agentToken(t, "https://evil.example.com")))
-	assert.Empty(t, rep.GetDirectEntitlements())
-	assert.Equal(t, 0, checker.callCount())
-}
-
-func TestAgentGate_CheckerFaults(t *testing.T) {
+func TestAgentDenial_CheckerFaults(t *testing.T) {
 	t.Run("a panicking checker withholds, logged as an error", func(t *testing.T) {
-		svc, buf := gateSvc(t, trustedCfg(), checkerFunc(func(context.Context, agentstatus.Subject) error {
-			panic("checker bug")
-		}))
-		var rep *entityresolutionV2.EntityRepresentation
-		require.NotPanics(t, func() { rep = resolveSubject(t, svc, chainsFor(t, svc, agentToken(t, issuer))) })
-		assertWithheld(t, rep)
+		panicky := checkerFunc(func(context.Context, agentstatus.Subject) error { panic("checker bug") })
+		var buf *bytes.Buffer
+		var err error
+		require.NotPanics(t, func() { buf, err = judge(t, panicky, agentClaims()) })
+		require.Error(t, err)
 		rec := withheldRecord(t, buf)
 		assert.Equal(t, "ERROR", rec["level"])
 		assert.Equal(t, reasonCheckerPanicked, rec["reason"])
 		assert.Contains(t, rec["cause"], "checker bug")
 	})
 	t.Run("an error that is not a DenialError still withholds", func(t *testing.T) {
-		svc, buf := gateSvc(t, trustedCfg(), &fakeChecker{err: errors.New("checker broke")})
-		assertWithheld(t, resolveSubject(t, svc, chainsFor(t, svc, agentToken(t, issuer))))
+		buf, err := judge(t, &fakeChecker{err: errors.New("checker broke")}, agentClaims())
+		require.Error(t, err)
 		assert.Equal(t, "checker broke", withheldRecord(t, buf)["reason"])
 	})
 	t.Run("misconfigured status client is logged as an error", func(t *testing.T) {
-		svc, buf := gateSvc(t, trustedCfg(), &fakeChecker{err: &agentstatus.DenialError{Reason: agentstatus.ReasonStatusForbidden}})
-		assertWithheld(t, resolveSubject(t, svc, chainsFor(t, svc, agentToken(t, issuer))))
+		buf, err := judge(t, &fakeChecker{err: &agentstatus.DenialError{Reason: agentstatus.ReasonStatusForbidden}}, agentClaims())
+		require.Error(t, err)
 		assert.Equal(t, "ERROR", withheldRecord(t, buf)["level"])
 	})
 	t.Run("Check gets the caller's context", func(t *testing.T) {
 		type probe struct{}
 		var got any
-		svc, _ := gateSvc(t, trustedCfg(), checkerFunc(func(ctx context.Context, _ agentstatus.Subject) error {
+		checker := checkerFunc(func(ctx context.Context, _ agentstatus.Subject) error {
 			got = ctx.Value(probe{})
 			return nil
-		}))
-		ents := chainsFor(t, svc, agentToken(t, issuer))
+		})
 		ctx := context.WithValue(t.Context(), probe{}, "caller")
-		_, err := svc.ResolveEntities(ctx, connect.NewRequest(&entityresolutionV2.ResolveEntitiesRequest{Entities: ents}))
+		_, err := AgentDenial(ctx, checker, agentClaims(), ownerClaim)
 		require.NoError(t, err)
 		assert.Equal(t, "caller", got)
 	})
@@ -554,14 +427,14 @@ func realClient(t *testing.T, h http.Handler, timeout time.Duration) (*agentstat
 	return c, srv
 }
 
-func TestAgentGate_RealStatusClient(t *testing.T) {
+func TestAgentDenial_RealStatusClient(t *testing.T) {
 	t.Run("eligible: one token and one status call, then the lease is reused", func(t *testing.T) {
 		f := &fakeIdentity{status: eligibleStatus()}
 		c, _ := realClient(t, f, time.Second)
-		svc, _ := gateSvc(t, trustedCfg(), c)
-		ents := chainsFor(t, svc, agentCWT(t, issuer))
-		assert.Len(t, resolveSubject(t, svc, ents).GetDirectEntitlements(), 2)
-		assert.Len(t, resolveSubject(t, svc, ents).GetDirectEntitlements(), 2)
+		_, err := judge(t, c, agentClaims())
+		require.NoError(t, err)
+		_, err = judge(t, c, agentClaims())
+		require.NoError(t, err)
 		assert.Equal(t, int32(2), f.calls.Load())
 	})
 	t.Run("quarantined: withheld with state version and incident, no secret logged", func(t *testing.T) {
@@ -569,28 +442,27 @@ func TestAgentGate_RealStatusClient(t *testing.T) {
 		st["state"], st["state_version"], st["incident"] = "quarantined", 4, "inc-9"
 		f := &fakeIdentity{status: st}
 		c, _ := realClient(t, f, time.Second)
-		svc, buf := gateSvc(t, trustedCfg(), c)
-		tok := agentCWT(t, issuer)
-		assertWithheld(t, resolveSubject(t, svc, chainsFor(t, svc, tok)))
+		buf, err := judge(t, c, agentClaims())
+		require.Error(t, err)
 		rec := withheldRecord(t, buf)
 		assert.Equal(t, agentstatus.ReasonNotEligible, rec["reason"])
 		assert.Equal(t, "inc-9", rec["incident"])
-		for _, secret := range []string{tok, statusClientSecret, statusServiceToken} {
+		for _, secret := range []string{statusClientSecret, statusServiceToken} {
 			assert.NotContains(t, buf.String(), secret)
 		}
 	})
-	t.Run("identity unreachable: withheld, and the resolution still succeeds", func(t *testing.T) {
+	t.Run("identity unreachable: withheld", func(t *testing.T) {
 		c, srv := realClient(t, &fakeIdentity{status: eligibleStatus()}, time.Second)
 		srv.Close()
-		svc, buf := gateSvc(t, trustedCfg(), c)
-		assertWithheld(t, resolveSubject(t, svc, chainsFor(t, svc, agentToken(t, issuer))))
+		buf, err := judge(t, c, agentClaims())
+		require.Error(t, err)
 		assert.Equal(t, agentstatus.ReasonUnreachable, withheldRecord(t, buf)["reason"])
 	})
 	t.Run("a hanging status endpoint is withheld within the client's bound", func(t *testing.T) {
 		c, _ := realClient(t, &fakeIdentity{status: eligibleStatus(), hang: true}, 50*time.Millisecond)
-		svc, buf := gateSvc(t, trustedCfg(), c)
 		start := time.Now()
-		assertWithheld(t, resolveSubject(t, svc, chainsFor(t, svc, agentToken(t, issuer))))
+		buf, err := judge(t, c, agentClaims())
+		require.Error(t, err)
 		assert.Less(t, time.Since(start), time.Second)
 		assert.Equal(t, agentstatus.ReasonUnreachable, withheldRecord(t, buf)["reason"])
 	})
@@ -605,38 +477,10 @@ func TestAgentGate_RealStatusClient(t *testing.T) {
 		t.Run(name+": withheld without calling identity", func(t *testing.T) {
 			f := &fakeIdentity{status: eligibleStatus()}
 			c, _ := realClient(t, f, time.Second)
-			svc, buf := gateSvc(t, trustedCfg(), c)
-			assertWithheld(t, resolveSubject(t, svc, chainsFor(t, svc, tokenWith(t, tc.mutate))))
+			buf, err := judge(t, c, agentClaimsWith(tc.mutate))
+			require.Error(t, err)
 			assert.Equal(t, int32(0), f.calls.Load())
 			assert.Equal(t, tc.reason, withheldRecord(t, buf)["reason"])
 		})
 	}
-}
-
-func TestAgentDenial_PersonIsNeverGated(t *testing.T) {
-	checker := &fakeChecker{}
-	claims := map[string]any{"iss": issuer, "sub": "person", "arkavo_account_id": testOwner}
-	_, err := AgentDenial(t.Context(), checker, claims, "arkavo_account_id")
-	require.NoError(t, err)
-	assert.Zero(t, checker.callCount(), "a person never reaches the status service")
-
-	_, err = AgentDenial(t.Context(), nil, claims, "arkavo_account_id")
-	require.NoError(t, err, "a nil checker does not withhold a person")
-}
-
-func TestAgentDenial_UnconfiguredWithholdsAgent(t *testing.T) {
-	subject, err := AgentDenial(t.Context(), nil, agentClaims(issuer), "arkavo_account_id")
-	var d *agentstatus.DenialError
-	require.ErrorAs(t, err, &d)
-	assert.Equal(t, agentstatus.ReasonUnconfigured, d.Reason)
-	assert.Equal(t, wantSubject(), subject)
-}
-
-func TestAgentDenial_EligibleAgentAsksTheChecker(t *testing.T) {
-	checker := &fakeChecker{}
-	subject, err := AgentDenial(t.Context(), checker, agentClaims(issuer), "arkavo_account_id")
-	require.NoError(t, err)
-	assert.Equal(t, 1, checker.callCount())
-	assert.Equal(t, wantSubject(), checker.got)
-	assert.Equal(t, wantSubject(), subject)
 }

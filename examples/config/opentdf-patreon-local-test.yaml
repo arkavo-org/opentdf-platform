@@ -1,4 +1,4 @@
-# Local integration test: Patreon ERS + policy snapshot, no Postgres, no IdP.
+# Local integration test: composite ERS + Patreon policy snapshot, no Postgres, no IdP.
 #
 #   go run ./service start --config-file ../examples/config/opentdf-patreon-local-test.yaml
 #

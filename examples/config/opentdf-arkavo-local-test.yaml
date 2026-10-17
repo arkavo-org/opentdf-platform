@@ -1,4 +1,4 @@
-# Local contract test: arkavo ERS + arkavo policy snapshot, no Postgres, no KAS.
+# Local contract test: composite ERS + arkavo policy snapshot, no Postgres, no KAS.
 #
 #   go run ./service start --config-file ../examples/config/opentdf-arkavo-local-test.yaml
 #
@@ -49,6 +49,9 @@ services:
         claim: arkavo_entitlements
         grants:
           - https://arkavo.ai/attr/tdf
+          # The agent delegation vocabulary in policy.arkavo.yaml.
+          - https://arkavo.ai/attr/action
+          - https://arkavo.ai/attr/mesh
 
       - id: device-class
         type: device-class

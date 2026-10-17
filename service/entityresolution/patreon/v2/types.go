@@ -1,9 +1,6 @@
 package patreon
 
-import (
-	"errors"
-	"strings"
-)
+import "strings"
 
 // Normalized claim values surfaced to the policy engine.
 const (
@@ -15,15 +12,11 @@ const (
 	patronStatusActive = "active_patron"
 )
 
-// ErrMemberNotFound is returned when a subject carries no usable Patreon
-// claim (and, with InferUnknownAsFree, is then treated as a free follower).
-var ErrMemberNotFound = errors.New("patreon member not found")
-
 // Membership is the flattened subject-claim view of Patreon state surfaced
-// to the policy engine under the .patreon.* selectors. In claims-passthrough
-// mode it is derived from the materialized arkavo_patreon claim; the
-// campaign-qualified entitlements (see passthrough.go) are the authoritative
-// gating signal, this view is for legacy/coarse selectors.
+// to the policy engine under the .patreon.* selectors. It is derived from the
+// materialized arkavo_patreon claim (see membership.go); the campaign-qualified
+// grants from arkavo_entitlements (see source.go) are the authoritative gating
+// signal, this view is for legacy/coarse selectors.
 type Membership struct {
 	UserID       string   `json:"user_id"`
 	Email        string   `json:"email"`

@@ -9,12 +9,10 @@ import (
 	"github.com/go-viper/mapstructure/v2"
 	ersV2 "github.com/opentdf/platform/protocol/go/entityresolution/v2"
 	"github.com/opentdf/platform/protocol/go/entityresolution/v2/entityresolutionv2connect"
-	arkavov2 "github.com/opentdf/platform/service/entityresolution/arkavo/v2"
 	claims "github.com/opentdf/platform/service/entityresolution/claims/v2"
 	composite "github.com/opentdf/platform/service/entityresolution/composite/v2"
 	keycloak "github.com/opentdf/platform/service/entityresolution/keycloak/v2"
 	multistrategyv2 "github.com/opentdf/platform/service/entityresolution/multi-strategy/v2"
-	patreonv2 "github.com/opentdf/platform/service/entityresolution/patreon/v2"
 	"github.com/opentdf/platform/service/pkg/cache"
 	"github.com/opentdf/platform/service/pkg/config"
 	"github.com/opentdf/platform/service/pkg/serviceregistry"
@@ -30,8 +28,6 @@ const (
 	KeycloakMode      = "keycloak"
 	ClaimsMode        = "claims"
 	MultiStrategyMode = "multi-strategy"
-	PatreonMode       = "patreon"
-	ArkavoMode        = "arkavo"
 )
 
 // selectResolver reports whether the service block selects the composite
@@ -113,14 +109,6 @@ func NewRegistration() *serviceregistry.Service[entityresolutionv2connect.Entity
 					multiSVC, multiHandler := multistrategyv2.RegisterMultiStrategyERSV2(srp.Config, srp.Logger)
 					multiSVC.Tracer = srp.Tracer
 					return EntityResolution{EntityResolutionServiceHandler: multiSVC}, multiHandler
-				case PatreonMode:
-					patreonSVC, patreonHandler := patreonv2.RegisterPatreonERS(srp.Config, srp.Logger)
-					patreonSVC.Tracer = srp.Tracer
-					return EntityResolution{EntityResolutionServiceHandler: patreonSVC, Tracer: srp.Tracer}, patreonHandler
-				case ArkavoMode:
-					arkavoSVC, arkavoHandler := arkavov2.RegisterArkavoERS(srp.Config, srp.Logger)
-					arkavoSVC.Tracer = srp.Tracer
-					return EntityResolution{EntityResolutionServiceHandler: arkavoSVC, Tracer: srp.Tracer}, arkavoHandler
 				default:
 					// Default to Keycloak ERS with cache support
 					kcSVC, kcHandler := keycloak.RegisterKeycloakERS(srp.Config, srp.Logger, ersCache)

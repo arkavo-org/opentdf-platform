@@ -169,7 +169,7 @@ func loadServiceConfig(t *testing.T, body string) config.ServiceConfig {
 func TestDecodeConfig_AbsentIsNotPresent(t *testing.T) {
 	for name, in := range map[string]config.ServiceConfig{
 		"nil":            nil,
-		"arkavo mode":    {"mode": "arkavo", "trust_materialized_claims": true},
+		"a mode block":   {"mode": "keycloak", "url": "http://localhost:8888/auth"},
 		"other settings": {"deadline": "250ms"},
 	} {
 		t.Run(name, func(t *testing.T) {

@@ -7,14 +7,16 @@ gateway) and the opentdf-platform Patreon Entity Resolution Service (ERS).
 It exists so the Rust-side implementation can move forward without the Go
 ERS having to know how OAuth, credential storage, or refresh are handled.
 
-The current opentdf-platform branch (`claude/attribute-authority-tagging-3gTrI`)
-ships:
+The RPC below is not built. opentdf-platform ships:
 
 - `examples/config/policy.patreon.yaml` — namespace, attributes, and subject
   mappings that consume the claim shape defined below.
-- `service/entityresolution/patreon/v2/` — a single-creator ERS mode that
-  reads a static creator token from config. **It will be refactored** to
-  call `authnz-rs` over RPC instead, once the contract below is implemented.
+- `service/entityresolution/patreon/v2/` — the composite ERS's
+  `patreon-token` source. It makes no RPC: authnz-rs materializes the
+  memberships into the token at mint, grants come from the token's
+  `arkavo_entitlements` claim, and the `.patreon` view from its
+  `arkavo_patreon` claim. The RPC would back a live source of the same
+  composite resolver (see the migration plan below).
 
 ## Architectural split
 
@@ -27,7 +29,7 @@ ships:
 | Patreon v2 API client (member search, identity)        | `authnz-rs`      |
 | `patreon.arkavo.com` namespace + attributes            | opentdf-platform |
 | Subject mappings keyed off `.patreon.connections[].*`  | opentdf-platform |
-| ERS mode emitting the claim block from RPC results     | opentdf-platform |
+| ERS source emitting the claim block from RPC results   | opentdf-platform |
 
 Credentials never enter opentdf-platform. The ERS holds only resolved
 membership data, transiently, for the duration of one
@@ -130,27 +132,38 @@ The ERS calls `authnz-rs` from inside the cluster. Three viable options:
 3. **Shared static bearer** — only acceptable for dev. Pass via
    `PATREON_AUTHNZ_BEARER` env var.
 
-The ERS-side config (when this lands) will look like:
+On the ERS side this would be one source of the composite resolver
+(`docs/Configuring.md`, "Composite resolver"). The source type does not
+exist yet; its config would look like:
 
 ```yaml
 services:
   entityresolution:
-    mode: patreon
-    patreon:
-      authnz_url: https://authnz.arkavo.internal
-      auth:
-        mode: mtls              # or "service_token" | "bearer"
-        client_cert: /etc/tls/ers.crt
-        client_key:  /etc/tls/ers.key
-        ca:          /etc/tls/ca.crt
-      # Optional: synthesize a "free" membership when authnz-rs returns
-      # an empty list, so non-backers still flow through subject mappings.
-      infer_unknown_as_free: true
-      # Timeout for the resolve RPC. ERS treats timeouts as
-      # ErrPatreonUnavailable (not NotFound) so KAS does not deny on a
-      # transient outage.
-      timeout: 750ms
+    sources:
+      - id: patreon
+        type: patreon-rpc         # hypothetical: the live source this contract needs
+        issuer: https://identity.arkavo.net
+        # One source owns a definition, so this one takes these two over
+        # from the patreon-token source.
+        grants:
+          - https://patreon.arkavo.com/attr/campaign
+          - https://patreon.arkavo.com/attr/campaign-tier
+        properties_key: patreon
+        authnz_url: https://authnz.arkavo.internal
+        auth:
+          mode: mtls              # or "service_token" | "bearer"
+          client_cert: /etc/tls/ers.crt
+          client_key:  /etc/tls/ers.key
+          ca:          /etc/tls/ca.crt
+        # Optional: synthesize a "free" membership when authnz-rs returns
+        # an empty list, so non-backers still flow through subject mappings.
+        infer_unknown_as_free: true
 ```
+
+The composite's `deadline` (default 300 ms) bounds the RPC. A timeout or
+error makes the source `unavailable`: it contributes no grants and nothing
+is served stale, so a transient outage denies the grants it would have
+given rather than allowing them.
 
 ## Connect / Admin surface on authnz-rs
 
@@ -207,25 +220,21 @@ identifies the key version so rotation is lazy.
 
 When `authnz-rs` is ready:
 
-1. Add a `patreon.authnz_url` and auth block to the platform config.
-2. Replace `service/entityresolution/patreon/v2/client.go`'s direct Patreon
-   API code with an `authnz-rs` RPC client (same `MembershipAPI` interface
-   the ERS already depends on).
-3. Refactor `ResolveEntities` / `CreateEntityChainsFromTokens` to call
-   `ResolveFanMemberships` once per request and emit
-   `.patreon.connections[]` (multi-creator) instead of the current
-   single-membership `.patreon.*` shape.
-4. Update `policy.patreon.yaml` subject mappings:
+1. Add a live source type to the composite resolver
+   (`service/entityresolution/composite/v2`) with an `authnz-rs` RPC
+   client: it calls `ResolveFanMemberships` once per subject and returns
+   `.patreon.connections[]` (multi-creator) as its properties instead of the
+   current single-membership `.patreon.*` shape.
+2. Configure it as above, with the service-to-service auth block, and move
+   the `campaign` and `campaign-tier` definitions to it.
+3. Update `policy.patreon.yaml` subject mappings:
    - `.patreon.tier_slug` → `.patreon.connections[].tier_slug` (subject
      mappings already use the `IN` operator over arrays).
-   - Add per-creator `campaign` value mappings keyed off
-     `.patreon.connections[].creator_id`.
-5. Delete the static `creator_access_token` / `campaign_ids` config
-   fields from the ERS — they become a property of each connection in
-   authnz-rs.
+   - `campaign` and `campaign-tier` values need no mappings: the source
+     grants them as direct entitlements.
 
-The policy YAML in this branch already uses array-flavored selectors
-(`.patreon.benefits[]`, `.patreon.campaign_ids[]`), so step 4 is a
+The policy YAML already uses array-flavored selectors
+(`.patreon.benefits[]`, `.patreon.campaign_ids[]`), so step 3 is a
 search-and-replace, not a redesign.
 
 ## Open questions

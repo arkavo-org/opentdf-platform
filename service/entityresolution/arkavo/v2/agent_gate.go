@@ -1,3 +1,9 @@
+// Package arkavo holds the agent gate the composite entity resolver applies
+// to authnz-rs (identity.arkavo.net) subjects: AgentDenial judges a subject's
+// claims against authnz-rs agent status, LogAgentDenial records a refusal, and
+// parseArkavoClaims reads the claims both depend on. The composite resolver
+// (service/entityresolution/composite/v2) is the only caller; its
+// constraints.agent_status block configures the status checker.
 package arkavo
 
 import (
@@ -18,8 +24,6 @@ const (
 	claimStateVersion = agentstatus.ClaimStateVersion
 	claimSwarm        = agentstatus.ClaimSwarm
 	claimCnf          = "cnf"
-	claimNpe          = agentstatus.ClaimNpe
-	claimRoles        = agentstatus.ClaimRoles
 	npeTypeAgent      = agentstatus.NpeTypeAgent
 
 	agentWithheldMsg = "arkavo: agent entitlements withheld"
@@ -74,30 +78,23 @@ func hasKeyCnf(cnf any) bool {
 }
 
 // agentSubject is the agent as its subject claims describe it. The owner is
-// read from ownerClaim, where entitiesFromToken copied arkavo_account_id.
+// read from ownerClaim (the composite passes arkavo_account_id).
 func agentSubject(claims map[string]any, c arkavoClaims, ownerClaim string) agentstatus.Subject {
 	owner, _ := claims[ownerClaim].(string)
 	return agentstatus.Subject{DID: c.Sub, Swarm: c.Swarm, Owner: owner, StateVersion: c.StateVersion}
-}
-
-func (s *EntityResolutionService) agentSubject(claims map[string]any, c arkavoClaims) agentstatus.Subject {
-	return agentSubject(claims, c, s.cfg.ClientIDClaim)
 }
 
 // AgentDenial judges a subject's claims and returns the subject it built
 // with nil when the subject is not gated or the agent is eligible, and why it
 // is refused otherwise. A nil checker refuses every gated subject
 // (ReasonUnconfigured). It never fails the resolution: a refused agent
-// resolves with no entitlements and no claims, so the PDP denies and the KAS
-// answers each KAO with "forbidden". The composite resolver shares it.
+// resolves with no entitlements and no properties, so the PDP denies and the
+// KAS answers each KAO with "forbidden". The composite resolver calls it for
+// every subject before running its sources.
 func AgentDenial(ctx context.Context, checker agentstatus.Checker, claims map[string]any, ownerClaim string) (agentstatus.Subject, error) {
 	c := parseArkavoClaims(claims)
 	subject := agentSubject(claims, c, ownerClaim)
 	return subject, agentDenial(ctx, checker, subject, c)
-}
-
-func (s *EntityResolutionService) agentDenial(ctx context.Context, subject agentstatus.Subject, c arkavoClaims) error {
-	return agentDenial(ctx, s.agentStatus, subject, c)
 }
 
 func agentDenial(ctx context.Context, checker agentstatus.Checker, subject agentstatus.Subject, c arkavoClaims) error {
@@ -123,10 +120,6 @@ func checkStatus(ctx context.Context, checker agentstatus.Checker, subject agent
 		}
 	}()
 	return checker.Check(ctx, subject)
-}
-
-func (s *EntityResolutionService) logAgentDenial(ctx context.Context, subject agentstatus.Subject, err error) {
-	LogAgentDenial(ctx, s.logger, subject, err)
 }
 
 // LogAgentDenial records who was refused and why. No token, proof or status
