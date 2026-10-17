@@ -7,6 +7,7 @@ import (
 	"log/slog"
 
 	"github.com/opentdf/platform/service/internal/agentstatus"
+	"github.com/opentdf/platform/service/logger"
 )
 
 // Claims the agent gate reads. authnz-rs contract v2 mints
@@ -73,18 +74,33 @@ func hasKeyCnf(cnf any) bool {
 }
 
 // agentSubject is the agent as its subject claims describe it. The owner is
-// read from the configured client-id claim, where entitiesFromToken copied
-// arkavo_account_id.
-func (s *EntityResolutionService) agentSubject(claims map[string]any, c arkavoClaims) agentstatus.Subject {
-	owner, _ := claims[s.cfg.ClientIDClaim].(string)
+// read from ownerClaim, where entitiesFromToken copied arkavo_account_id.
+func agentSubject(claims map[string]any, c arkavoClaims, ownerClaim string) agentstatus.Subject {
+	owner, _ := claims[ownerClaim].(string)
 	return agentstatus.Subject{DID: c.Sub, Swarm: c.Swarm, Owner: owner, StateVersion: c.StateVersion}
 }
 
-// agentDenial returns nil when the subject is not gated or the agent is
-// eligible, and why it is refused otherwise. It never fails the resolution:
-// a refused agent resolves with no entitlements and no claims, so the PDP
-// denies and the KAS answers each KAO with "forbidden".
+func (s *EntityResolutionService) agentSubject(claims map[string]any, c arkavoClaims) agentstatus.Subject {
+	return agentSubject(claims, c, s.cfg.ClientIDClaim)
+}
+
+// AgentDenial judges a subject's claims and returns the subject it built
+// with nil when the subject is not gated or the agent is eligible, and why it
+// is refused otherwise. A nil checker refuses every gated subject
+// (ReasonUnconfigured). It never fails the resolution: a refused agent
+// resolves with no entitlements and no claims, so the PDP denies and the KAS
+// answers each KAO with "forbidden". The composite resolver shares it.
+func AgentDenial(ctx context.Context, checker agentstatus.Checker, claims map[string]any, ownerClaim string) (agentstatus.Subject, error) {
+	c := parseArkavoClaims(claims)
+	subject := agentSubject(claims, c, ownerClaim)
+	return subject, agentDenial(ctx, checker, subject, c)
+}
+
 func (s *EntityResolutionService) agentDenial(ctx context.Context, subject agentstatus.Subject, c arkavoClaims) error {
+	return agentDenial(ctx, s.agentStatus, subject, c)
+}
+
+func agentDenial(ctx context.Context, checker agentstatus.Checker, subject agentstatus.Subject, c arkavoClaims) error {
 	switch {
 	case !gated(c):
 		return nil
@@ -92,26 +108,30 @@ func (s *EntityResolutionService) agentDenial(ctx context.Context, subject agent
 		return &agentstatus.DenialError{Reason: reasonNotAgentProfile, Agent: subject.DID}
 	case !c.KeyBound:
 		return &agentstatus.DenialError{Reason: reasonNotKeyBound, Agent: subject.DID}
-	case s.agentStatus == nil:
+	case checker == nil:
 		return &agentstatus.DenialError{Reason: agentstatus.ReasonUnconfigured, Agent: subject.DID}
 	}
-	return s.checkStatus(ctx, subject)
+	return checkStatus(ctx, checker, subject)
 }
 
 // checkStatus runs the checker, turning a panic into a denial so a faulty
 // checker withholds entitlements instead of failing the decision.
-func (s *EntityResolutionService) checkStatus(ctx context.Context, subject agentstatus.Subject) (err error) {
+func checkStatus(ctx context.Context, checker agentstatus.Checker, subject agentstatus.Subject) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			err = &agentstatus.DenialError{Reason: reasonCheckerPanicked, Agent: subject.DID, Cause: fmt.Errorf("%v", r)}
 		}
 	}()
-	return s.agentStatus.Check(ctx, subject)
+	return checker.Check(ctx, subject)
 }
 
-// logAgentDenial records who was refused and why. No token, proof or status
-// credential is ever among the attributes.
 func (s *EntityResolutionService) logAgentDenial(ctx context.Context, subject agentstatus.Subject, err error) {
+	LogAgentDenial(ctx, s.logger, subject, err)
+}
+
+// LogAgentDenial records who was refused and why. No token, proof or status
+// credential is ever among the attributes.
+func LogAgentDenial(ctx context.Context, log *logger.Logger, subject agentstatus.Subject, err error) {
 	attrs := []slog.Attr{
 		slog.String("agent", subject.DID),
 		slog.String("owner", subject.Owner),
@@ -139,5 +159,5 @@ func (s *EntityResolutionService) logAgentDenial(ctx context.Context, subject ag
 	} else {
 		attrs = append(attrs, slog.String("reason", err.Error()))
 	}
-	s.logger.LogAttrs(ctx, level, agentWithheldMsg, attrs...)
+	log.LogAttrs(ctx, level, agentWithheldMsg, attrs...)
 }

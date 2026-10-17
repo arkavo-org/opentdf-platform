@@ -612,3 +612,31 @@ func TestAgentGate_RealStatusClient(t *testing.T) {
 		})
 	}
 }
+
+func TestAgentDenial_PersonIsNeverGated(t *testing.T) {
+	checker := &fakeChecker{}
+	claims := map[string]any{"iss": issuer, "sub": "person", "arkavo_account_id": testOwner}
+	_, err := AgentDenial(t.Context(), checker, claims, "arkavo_account_id")
+	require.NoError(t, err)
+	assert.Zero(t, checker.callCount(), "a person never reaches the status service")
+
+	_, err = AgentDenial(t.Context(), nil, claims, "arkavo_account_id")
+	require.NoError(t, err, "a nil checker does not withhold a person")
+}
+
+func TestAgentDenial_UnconfiguredWithholdsAgent(t *testing.T) {
+	subject, err := AgentDenial(t.Context(), nil, agentClaims(issuer), "arkavo_account_id")
+	var d *agentstatus.DenialError
+	require.ErrorAs(t, err, &d)
+	assert.Equal(t, agentstatus.ReasonUnconfigured, d.Reason)
+	assert.Equal(t, wantSubject(), subject)
+}
+
+func TestAgentDenial_EligibleAgentAsksTheChecker(t *testing.T) {
+	checker := &fakeChecker{}
+	subject, err := AgentDenial(t.Context(), checker, agentClaims(issuer), "arkavo_account_id")
+	require.NoError(t, err)
+	assert.Equal(t, 1, checker.callCount())
+	assert.Equal(t, wantSubject(), checker.got)
+	assert.Equal(t, wantSubject(), subject)
+}
