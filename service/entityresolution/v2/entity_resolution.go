@@ -30,10 +30,18 @@ const (
 	MultiStrategyMode = "multi-strategy"
 )
 
+// removedModes were replaced by the composite resolver. A config still naming
+// one is refused rather than left to fall through to Keycloak.
+var removedModes = map[string]bool{"patreon": true, "arkavo": true}
+
 // selectResolver reports whether the service block selects the composite
 // resolver, which it does by having a sources key. Setting a mode as well is
-// an error: two resolvers cannot both own the service.
+// an error: two resolvers cannot both own the service. So is a removed mode.
 func selectResolver(cfg config.ServiceConfig) (bool, error) {
+	mode, _ := cfg["mode"].(string)
+	if removedModes[mode] {
+		return false, fmt.Errorf("entityresolution: mode %q was removed; configure sources instead (see docs/Configuring.md)", mode)
+	}
 	_, present, err := composite.DecodeConfig(cfg)
 	if err != nil {
 		return false, err
@@ -41,7 +49,7 @@ func selectResolver(cfg config.ServiceConfig) (bool, error) {
 	if !present {
 		return false, nil
 	}
-	if mode, _ := cfg["mode"].(string); mode != "" {
+	if mode != "" {
 		return false, fmt.Errorf("entityresolution: mode %q and sources are both set: sources selects the composite resolver, so remove mode", mode)
 	}
 	return true, nil

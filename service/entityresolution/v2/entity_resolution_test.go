@@ -19,10 +19,16 @@ func TestRegisterFunc_ModeAndSourcesIsFatal(t *testing.T) {
 		{"sources only", config.ServiceConfig{"sources": sources}, true, ""},
 		{"empty mode and sources", config.ServiceConfig{"mode": "", "sources": sources}, true, ""},
 		{"mode only", config.ServiceConfig{"mode": "keycloak"}, false, ""},
+		{"claims mode only", config.ServiceConfig{"mode": "claims"}, false, ""},
+		{"multi-strategy mode only", config.ServiceConfig{"mode": "multi-strategy"}, false, ""},
 		{"neither", config.ServiceConfig{}, false, ""},
 		{"nil", nil, false, ""},
-		{"mode and sources", config.ServiceConfig{"mode": "patreon", "sources": sources}, false, "mode"},
+		{"mode and sources", config.ServiceConfig{"mode": "claims", "sources": sources}, false, "mode"},
 		{"keycloak mode and sources", config.ServiceConfig{"mode": "keycloak", "sources": sources}, false, "sources"},
+		// The removed modes are refused, not left to fall through to Keycloak.
+		{"removed patreon mode", config.ServiceConfig{"mode": "patreon"}, false, `mode "patreon" was removed; configure sources`},
+		{"removed arkavo mode", config.ServiceConfig{"mode": "arkavo"}, false, `mode "arkavo" was removed; configure sources`},
+		{"removed mode and sources", config.ServiceConfig{"mode": "patreon", "sources": sources}, false, `mode "patreon" was removed`},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
