@@ -1,6 +1,7 @@
 package entityresolution
 
 import (
+	"fmt"
 	"log"
 	"log/slog"
 	"time"
@@ -10,10 +11,12 @@ import (
 	"github.com/opentdf/platform/protocol/go/entityresolution/v2/entityresolutionv2connect"
 	arkavov2 "github.com/opentdf/platform/service/entityresolution/arkavo/v2"
 	claims "github.com/opentdf/platform/service/entityresolution/claims/v2"
+	composite "github.com/opentdf/platform/service/entityresolution/composite/v2"
 	keycloak "github.com/opentdf/platform/service/entityresolution/keycloak/v2"
 	multistrategyv2 "github.com/opentdf/platform/service/entityresolution/multi-strategy/v2"
 	patreonv2 "github.com/opentdf/platform/service/entityresolution/patreon/v2"
 	"github.com/opentdf/platform/service/pkg/cache"
+	"github.com/opentdf/platform/service/pkg/config"
 	"github.com/opentdf/platform/service/pkg/serviceregistry"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -30,6 +33,23 @@ const (
 	PatreonMode       = "patreon"
 	ArkavoMode        = "arkavo"
 )
+
+// selectResolver reports whether the service block selects the composite
+// resolver, which it does by having a sources key. Setting a mode as well is
+// an error: two resolvers cannot both own the service.
+func selectResolver(cfg config.ServiceConfig) (bool, error) {
+	_, present, err := composite.DecodeConfig(cfg)
+	if err != nil {
+		return false, err
+	}
+	if !present {
+		return false, nil
+	}
+	if mode, _ := cfg["mode"].(string); mode != "" {
+		return false, fmt.Errorf("entityresolution: mode %q and sources are both set: sources selects the composite resolver, so remove mode", mode)
+	}
+	return true, nil
+}
 
 type EntityResolution struct {
 	entityresolutionv2connect.EntityResolutionServiceHandler
@@ -67,6 +87,21 @@ func NewRegistration() *serviceregistry.Service[entityresolutionv2connect.Entity
 						srp.Logger.Error("failed to create cache for Entity Resolution Service", slog.Any("error", err))
 						log.Fatalf("Failed to create cache client for Entity Resolution Service: %v", err)
 					}
+				}
+
+				useComposite, err := selectResolver(srp.Config)
+				if err != nil {
+					srp.Logger.Error("invalid entity resolution configuration", slog.Any("error", err))
+					log.Fatalf("Invalid entity resolution configuration: %v", err)
+				}
+				if useComposite {
+					compositeSVC, regErr := composite.Register(srp.Config, srp.Logger)
+					if regErr != nil {
+						srp.Logger.Error("failed to register the composite entity resolver", slog.Any("error", regErr))
+						log.Fatalf("Failed to register the composite entity resolver: %v", regErr)
+					}
+					compositeSVC.Tracer = srp.Tracer
+					return EntityResolution{EntityResolutionServiceHandler: compositeSVC, Tracer: srp.Tracer}, nil
 				}
 
 				switch inputConfig.Mode {

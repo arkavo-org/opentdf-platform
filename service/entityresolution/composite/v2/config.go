@@ -8,9 +8,12 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/go-viper/mapstructure/v2"
+	patreon "github.com/opentdf/platform/service/entityresolution/patreon/v2"
 	"github.com/opentdf/platform/service/entityresolution/source"
 	"github.com/opentdf/platform/service/internal/agentstatus"
 	"github.com/opentdf/platform/service/pkg/config"
@@ -269,11 +272,21 @@ func (sc SourceConfig) validate(issuers map[string]bool) error {
 		owned[def] = true
 	}
 	switch sc.Type {
+	case typePatreonToken:
+		if _, err := patreonOptions(sc.Options); err != nil {
+			return err
+		}
 	case typeTokenClaims:
+		if err := rejectUnknownOptions(sc.Options, optionClaim); err != nil {
+			return err
+		}
 		if claim, _ := sc.Options[optionClaim].(string); claim == "" {
 			return errors.New("a token-claims source needs a non-empty string claim")
 		}
 	case typeDeviceClass:
+		if err := rejectUnknownOptions(sc.Options, optionClasses); err != nil {
+			return err
+		}
 		classes, err := deviceClasses(sc.Options)
 		if err != nil {
 			return err
@@ -300,4 +313,29 @@ func definitionKey(s string) (string, bool) {
 		return "", false
 	}
 	return source.FQN{Namespace: ns, Definition: def}.DefinitionFQN(), true
+}
+
+// patreonOptions decodes a patreon-token source's options, refusing a key it
+// does not read: a misspelled option must not silently change what the source
+// grants.
+func patreonOptions(opts map[string]any) (patreon.SourceConfig, error) {
+	var cfg patreon.SourceConfig
+	dec, err := mapstructure.NewDecoder(&mapstructure.DecoderConfig{ErrorUnused: true, Result: &cfg})
+	if err != nil {
+		return cfg, err
+	}
+	if err = dec.Decode(opts); err != nil {
+		return cfg, fmt.Errorf("patreon-token options: %w", err)
+	}
+	return cfg, nil
+}
+
+// rejectUnknownOptions refuses every option key outside allowed.
+func rejectUnknownOptions(opts map[string]any, allowed ...string) error {
+	for key := range opts {
+		if !slices.Contains(allowed, key) {
+			return fmt.Errorf("unknown option %q (this source type reads only %s)", key, strings.Join(allowed, ", "))
+		}
+	}
+	return nil
 }

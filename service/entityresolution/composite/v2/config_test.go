@@ -96,6 +96,9 @@ func TestValidate(t *testing.T) {
 		{"two sources share a definition", func(c *Config) { c.Sources[1].Grants = []string{"https://Patreon.arkavo.com/attr/campaign"} }, []string{campaignDef, "patreon", "identity-core"}},
 		{"token-claims without a claim", func(c *Config) { delete(c.Sources[1].Options, "claim") }, []string{"identity-core", "claim"}},
 		{"token-claims with a non-string claim", func(c *Config) { c.Sources[1].Options["claim"] = 5 }, []string{"identity-core", "claim"}},
+		{"patreon-token with an unknown option", func(c *Config) { c.Sources[0].Options["claims"] = []any{"arkavo_patreon"} }, []string{"patreon", "claims"}},
+		{"token-claims with an unknown option", func(c *Config) { c.Sources[1].Options["claims"] = "x" }, []string{"identity-core", "claims"}},
+		{"device-class with an unknown option", func(c *Config) { c.Sources[2].Options["claim"] = "x" }, []string{"device-class", "claim"}},
 		{"device-class without classes", func(c *Config) { delete(c.Sources[2].Options, "classes") }, []string{"device-class", "classes"}},
 		{"device-class classes of the wrong shape", func(c *Config) { c.Sources[2].Options["classes"] = []any{"managed"} }, []string{"device-class", "classes"}},
 		{"device-class FQN outside the source's grants", func(c *Config) {
