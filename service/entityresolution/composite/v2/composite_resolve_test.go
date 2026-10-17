@@ -71,7 +71,7 @@ func TestResolve_SealedEvidenceBecomesRepresentation(t *testing.T) {
 	props := rep.GetAdditionalProps()[0].AsMap()
 	assert.Equal(t, []string{"patreon"}, slices.Sorted(maps.Keys(props)),
 		"only the sources' properties, under their keys; never the sealed claim")
-	assert.Equal(t, []any{"13167240"}, patreonView(t, rep)["campaign_ids"])
+	assert.Empty(t, patreonView(t, rep)["campaign_ids"], "the creator backs no campaign; role adds none")
 }
 
 // A sealed evidence is the whole answer. Claims a caller puts around it add
@@ -166,7 +166,7 @@ func TestResolve_PEPChainFromAllowlistedClient(t *testing.T) {
 	assert.Equal(t, "catalog-subject", rep.GetOriginalId())
 	assert.Equal(t, map[string][]string{creatorCampaign: {"read"}, creatorSupporter: {"read"}}, entitlements(rep),
 		"the Patreon grants; publish is absent because identity-core is not pep_assertable")
-	assert.Equal(t, []any{"13167240"}, patreonView(t, rep)["campaign_ids"])
+	assert.Empty(t, patreonView(t, rep)["campaign_ids"], "the creator backs no campaign; role adds none")
 }
 
 // An unsealed chain from any other caller is an anonymous subject: its

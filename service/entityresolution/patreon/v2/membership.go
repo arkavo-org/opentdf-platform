@@ -44,11 +44,10 @@ type materializedMembership struct {
 	tierSlugs  []string
 }
 
-// arkavoPatreonClaim is the parsed arkavo_patreon claim.
+// arkavoPatreonClaim is the parsed arkavo_patreon claim. Its role and a
+// creator's own campaign_id are not read: no source branches on role.
 type arkavoPatreonClaim struct {
-	role        string
 	userID      string
-	campaignID  string
 	memberships []materializedMembership
 }
 
@@ -60,9 +59,7 @@ func parseArkavoPatreon(claims map[string]interface{}) *arkavoPatreonClaim {
 		return nil
 	}
 	out := &arkavoPatreonClaim{}
-	out.role, _ = raw["role"].(string)
 	out.userID, _ = raw["patreon_user_id"].(string)
-	out.campaignID, _ = raw["campaign_id"].(string)
 
 	rawMemberships, _ := raw["memberships"].([]interface{})
 	for _, rm := range rawMemberships {
@@ -123,11 +120,6 @@ func membershipView(claim *arkavoPatreonClaim) *Membership {
 				mem.TierSlug = slug
 			}
 		}
-	}
-
-	// Creator role: surface the owned campaign.
-	if claim.role == "creator" && claim.campaignID != "" {
-		mem.CampaignIDs = append(mem.CampaignIDs, claim.campaignID)
 	}
 	return mem
 }

@@ -36,8 +36,10 @@ The `arkavo_patreon` claim (the consumer's memberships, materialized by
 identity.arkavo.net) feeds only the flattened `.patreon` view: `status`,
 `tier_slug`, `campaign_ids` and the rest of `Membership`, for coarse subject
 mappings. It grants nothing. Only active memberships with a numeric campaign
-id count towards `status: active` and `campaign_ids`; a creator's own
-`campaign_id` is listed too. The composite puts the view under the source's
+id count towards `status: active` and `campaign_ids`. The claim's `role`, and
+a creator's own `campaign_id`, are not read: no source branches on role, and a
+creator's access to their own campaign comes from `arkavo_entitlements` like
+everyone else's. The composite puts the view under the source's
 `properties_key`.
 
 A subject with no `arkavo_patreon` claim gets no view, or, with

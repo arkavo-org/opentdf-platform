@@ -43,7 +43,7 @@ func TestTokenRoute_CreatorGetsOwnCampaignTiers(t *testing.T) {
 	assert.Equal(t, "identity-core", publish.Source)
 
 	require.Contains(t, ev.Props, "patreon")
-	assert.Equal(t, []any{"13167240"}, ev.Props["patreon"]["campaign_ids"])
+	assert.Empty(t, ev.Props["patreon"]["campaign_ids"], "the creator backs no campaign; role adds none")
 	assert.Equal(t, map[string]source.Outcome{
 		"_token":        source.OutcomeComplete,
 		"patreon":       source.OutcomeComplete,

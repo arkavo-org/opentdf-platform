@@ -41,12 +41,15 @@ func TestMembershipView_ActiveCampaignsOnly(t *testing.T) {
 	assert.Equal(t, "gold-tier", mem.TierSlug, "the first active slug, slugified")
 }
 
-func TestMembershipView_CreatorSurfacesOwnedCampaign(t *testing.T) {
+// No source branches on role: a creator's own campaign_id is not a
+// membership, so the view does not list it.
+func TestMembershipView_RoleSurfacesNothing(t *testing.T) {
 	mem := membershipView(parseArkavoPatreon(map[string]any{
 		"arkavo_patreon": map[string]any{"role": "creator", "campaign_id": "13167240"},
 	}))
-	assert.Equal(t, []string{"13167240"}, mem.CampaignIDs)
+	assert.Empty(t, mem.CampaignIDs)
 	assert.Equal(t, tierFree, mem.TierSlug)
+	assert.NotEqual(t, statusActive, mem.Status)
 }
 
 // An ACTIVE membership whose only campaign is malformed must not leave the
