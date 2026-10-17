@@ -325,6 +325,7 @@ func (s *Service) resolveSubject(ctx context.Context, subj source.Subject, q sou
 	}
 
 	runs := s.runSources(ctx, subj, q)
+	now := s.now()
 	merged := map[string]*sealedGrant{}
 	// Configured order, not completion order: the first source to grant an
 	// FQN is its provenance.
@@ -340,7 +341,7 @@ func (s *Service) resolveSubject(ctx context.Context, subj source.Subject, q sou
 		if run.outcome != source.OutcomeComplete {
 			continue
 		}
-		s.mergeGrants(ctx, merged, cs, run.res.Grants)
+		s.mergeGrants(ctx, merged, cs, run.res.Grants, now, exp)
 		if cs.propsKey != "" && len(run.res.Properties) > 0 {
 			if ev.Props == nil {
 				ev.Props = map[string]map[string]any{}
@@ -353,10 +354,13 @@ func (s *Service) resolveSubject(ctx context.Context, subj source.Subject, q sou
 }
 
 // mergeGrants adds the grants cs's capability allows to merged, keyed by the
-// lowercased FQN. A grant with no actions takes the source's. A repeated FQN
-// merges its actions and keeps its first source and its earliest expiry, so
-// no action outlives a grant that carried it.
-func (s *Service) mergeGrants(ctx context.Context, merged map[string]*sealedGrant, cs configuredSource, grants []source.Grant) {
+// lowercased FQN. A grant with no actions takes the source's. A grant whose
+// own expiry is at or before now, to the second as openEvidence judges it, is
+// dropped: on the unsealed routes nothing else would. One that outlives the
+// evidence is clamped to expire with it at evExp; one with no expiry already
+// does. A repeated FQN merges its actions and keeps its first source and its
+// earliest expiry, so no action outlives a grant that carried it.
+func (s *Service) mergeGrants(ctx context.Context, merged map[string]*sealedGrant, cs configuredSource, grants []source.Grant, now, evExp time.Time) {
 	for _, g := range grants {
 		if len(g.Actions) == 0 {
 			g.Actions = cs.cap.actions
@@ -374,6 +378,15 @@ func (s *Service) mergeGrants(ctx context.Context, merged map[string]*sealedGran
 		var exp int64
 		if !g.ExpiresAt.IsZero() {
 			exp = g.ExpiresAt.Unix()
+			if exp <= now.Unix() {
+				s.logger.DebugContext(ctx, "composite: dropped an expired grant",
+					slog.String("source_id", cs.id),
+					slog.String("fqn", key),
+					slog.Time("expires_at", g.ExpiresAt),
+				)
+				continue
+			}
+			exp = min(exp, evExp.Unix())
 		}
 		prev, seen := merged[key]
 		if !seen {

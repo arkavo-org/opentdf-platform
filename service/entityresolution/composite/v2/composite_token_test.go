@@ -303,6 +303,46 @@ func TestTokenRoute_EvidenceExpiryIsTokenExpiry(t *testing.T) {
 	assert.Equal(t, grantExp.Unix(), leasedExpiry)
 }
 
+// Expiring grants, relative to a pinned now, and the FQNs of those still live.
+const (
+	expiredValue  = exampleDef + "/value/expired"
+	expiringNow   = exampleDef + "/value/expiring-now"
+	liveValue     = exampleDef + "/value/live"
+	outlivesValue = exampleDef + "/value/outlives-evidence"
+)
+
+func expiringGrants(now time.Time) source.Resolution {
+	return source.Resolution{
+		Outcome: source.OutcomeComplete,
+		Grants: []source.Grant{
+			{FQN: expiredValue, ExpiresAt: now.Add(-time.Hour)},
+			{FQN: expiringNow, ExpiresAt: now},
+			{FQN: liveValue, ExpiresAt: now.Add(time.Minute)},
+			{FQN: outlivesValue, ExpiresAt: now.Add(24 * time.Hour)},
+		},
+	}
+}
+
+// A source grant whose own expiry has passed is never sealed, and one that
+// outlives the token is sealed to expire with the evidence. resolveToken is
+// asserted directly: openEvidence drops expired grants as well, which would
+// hide what the seal carries.
+func TestTokenRoute_ExpiredSourceGrantIsNotSealed(t *testing.T) {
+	now := time.Now().Truncate(time.Second)
+	leased := fakeSourceOwning("leased", fakeSource{res: expiringGrants(now)}, exampleDef)
+	svc := newTestService(t, testConfig(), verifiersFor(&fakeVerifier{}), []configuredSource{leased}, nil)
+	svc.now = func() time.Time { return now }
+	exp := now.Add(10 * time.Minute)
+
+	ev := svc.resolveToken(t.Context(), signCWT(t, creatorClaims(exp)), source.Query{Action: "read"})
+
+	assert.ElementsMatch(t, []string{liveValue, outlivesValue}, grantFQNs(ev), "expired and expiring-now grants are dropped")
+	liveExpiry, outlivesExpiry := grantFor(t, ev, liveValue).Exp, grantFor(t, ev, outlivesValue).Exp
+	assert.Equal(t, now.Add(time.Minute).Unix(), liveExpiry)
+	assert.Equal(t, exp.Unix(), outlivesExpiry, "clamped to the evidence expiry")
+	assert.Equal(t, ev, tokenEvidence(t, svc, signCWT(t, creatorClaims(exp))), "the seal carries exactly this")
+}
+
 func TestTokenRoute_SourceOrderIsIrrelevant(t *testing.T) {
 	extra := fakeSourceOwning("extra", fakeSource{res: granting(exampleValue)}, exampleDef)
 	sources := []configuredSource{patreonSource(), identityCoreSource(), extra}

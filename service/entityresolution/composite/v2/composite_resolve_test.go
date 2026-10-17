@@ -259,6 +259,29 @@ func TestResolve_NonClaimsEntityGetsFreeView(t *testing.T) {
 	}
 }
 
+// The unsealed routes never grant what a source says has expired: neither on
+// an allowlisted PEP's chain nor for an anonymous subject.
+func TestResolve_ExpiredSourceGrantIsAbsent(t *testing.T) {
+	now := time.Now().Truncate(time.Second)
+	sc := SourceConfig{ID: "leased", Issuer: testIssuer, Grants: []string{exampleDef}, PEPAssertable: true}
+	svc := newTestService(t, pepConfig(), nil, []configuredSource{sourceOf(sc, fakeSource{res: expiringGrants(now)})}, nil)
+	svc.now = func() time.Time { return now }
+
+	for name, e := range map[string]*entity.Entity{
+		"allowlisted PEP chain": claimsEntity(t, "subject", map[string]any{"iss": testIssuer}),
+		"anonymous subject": {
+			EntityType: &entity.Entity_UserName{UserName: "viewer"}, EphemeralId: "subject", Category: entity.Entity_CATEGORY_SUBJECT,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			rep := resolveAs(callerContext(t.Context(), testPEP), t, svc, e)[0]
+
+			assert.Equal(t, map[string][]string{liveValue: {"read"}, outlivesValue: {"read"}}, entitlements(rep),
+				"the expired and expiring-now grants are absent")
+		})
+	}
+}
+
 // Claims that do not unpack are a malformed request, as in every other
 // resolver.
 func TestResolve_UnreadableClaimsAreInvalidArgument(t *testing.T) {
