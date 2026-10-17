@@ -195,18 +195,18 @@ func decodeSign1FromToken(tokenRaw string) (*cose.Sign1Message, error) {
 	return &msg, nil
 }
 
-// VerifyCWTSubjectToken verifies the base64url-encoded CWT and returns the
-// verified claims as both a jwt.Token (for direct use) and an unsigned-JWT
-// string (for the claims-mode ERS).
-func (v *CWTVerifier) VerifyCWTSubjectToken(ctx context.Context, subjectToken string) (jwt.Token, string, error) {
-	msg, err := decodeSign1FromToken(subjectToken)
+// VerifyCWTClaims verifies the base64url-encoded CWT (signature against the
+// cached COSE key set, then iss / aud / exp / nbf) and returns the verified
+// claims as a map, the shape DecodeClaimsFromToken gives.
+func (v *CWTVerifier) VerifyCWTClaims(ctx context.Context, token string) (map[string]any, error) {
+	msg, err := decodeSign1FromToken(token)
 	if err != nil {
-		return nil, "", err
+		return nil, err
 	}
 
 	keys, err := v.keys(ctx)
 	if err != nil {
-		return nil, "", fmt.Errorf("cwt: cannot fetch COSE Key Set: %w", err)
+		return nil, fmt.Errorf("cwt: cannot fetch COSE Key Set: %w", err)
 	}
 
 	kid, _ := msg.Headers.Protected[cose.HeaderLabelKeyID].([]byte)
@@ -234,15 +234,26 @@ func (v *CWTVerifier) VerifyCWTSubjectToken(ctx context.Context, subjectToken st
 		}
 	}
 	if !verifierFound {
-		return nil, "", errors.New("cwt: signature does not verify against any cached COSE key")
+		return nil, errors.New("cwt: signature does not verify against any cached COSE key")
 	}
 
 	claims, err := decodeCWTClaims(msg.Payload)
 	if err != nil {
-		return nil, "", fmt.Errorf("cwt: decode claims: %w", err)
+		return nil, fmt.Errorf("cwt: decode claims: %w", err)
 	}
 
 	if err := v.validateStandardClaims(claims); err != nil {
+		return nil, err
+	}
+	return claims, nil
+}
+
+// VerifyCWTSubjectToken verifies the base64url-encoded CWT and returns the
+// verified claims as both a jwt.Token (for direct use) and an unsigned-JWT
+// string (for the claims-mode ERS).
+func (v *CWTVerifier) VerifyCWTSubjectToken(ctx context.Context, subjectToken string) (jwt.Token, string, error) {
+	claims, err := v.VerifyCWTClaims(ctx, subjectToken)
+	if err != nil {
 		return nil, "", err
 	}
 
