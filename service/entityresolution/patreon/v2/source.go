@@ -26,6 +26,22 @@ type SourceConfig struct {
 	InferUnknownAsFree bool `mapstructure:"infer_unknown_as_free"`
 }
 
+// Definitions returns the attribute definition FQNs the source grants values
+// of: campaign and campaign-tier, in its namespace.
+func (c SourceConfig) Definitions() []string {
+	prefix := "https://" + c.namespace() + "/attr/"
+	return []string{prefix + campaignAttributeName, prefix + campaignTierAttributeName}
+}
+
+// namespace is the configured namespace, defaulted and lowercased.
+func (c SourceConfig) namespace() string {
+	ns := c.EntitlementsNamespace
+	if ns == "" {
+		ns = defaultEntitlementsNamespace
+	}
+	return strings.ToLower(ns)
+}
+
 type tokenSource struct {
 	namespace          string
 	inferUnknownAsFree bool
@@ -35,11 +51,7 @@ type tokenSource struct {
 // verified token's arkavo_entitlements claim and Patreon properties from its
 // arkavo_patreon claim.
 func NewTokenSource(cfg SourceConfig) source.Source {
-	ns := cfg.EntitlementsNamespace
-	if ns == "" {
-		ns = defaultEntitlementsNamespace
-	}
-	return &tokenSource{namespace: strings.ToLower(ns), inferUnknownAsFree: cfg.InferUnknownAsFree}
+	return &tokenSource{namespace: cfg.namespace(), inferUnknownAsFree: cfg.InferUnknownAsFree}
 }
 
 // Resolve never fails: there is no I/O, and malformed claim data is dropped.

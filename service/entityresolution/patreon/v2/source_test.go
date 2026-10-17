@@ -112,6 +112,14 @@ func TestTokenSource_ConfiguredNamespaceIsExact(t *testing.T) {
 	assert.Equal(t, []string{"https://creators.example/attr/campaign/value/7237273"}, grantFQNs(res))
 }
 
+// Definitions are what the composite checks a patreon-token source's grants
+// against: the namespace the source reads, defaulted and lowercased.
+func TestSourceConfig_Definitions(t *testing.T) {
+	assert.Equal(t, []string{sourceNS + "campaign", sourceNS + "campaign-tier"}, SourceConfig{}.Definitions())
+	assert.Equal(t, []string{"https://creators.example/attr/campaign", "https://creators.example/attr/campaign-tier"},
+		SourceConfig{EntitlementsNamespace: "Creators.Example"}.Definitions())
+}
+
 func TestTokenSource_NoClaimInfersFree(t *testing.T) {
 	res := resolveSource(t, SourceConfig{InferUnknownAsFree: true}, map[string]any{})
 	assert.Empty(t, res.Grants)

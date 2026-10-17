@@ -116,6 +116,26 @@ func TestValidate(t *testing.T) {
 		{"agent_status half filled", func(c *Config) {
 			c.Constraints.AgentStatus = agentstatus.Config{URL: "https://identity.example.com", ClientID: "c"}
 		}, []string{"agent_status"}},
+		// A bare YAML integer decodes as nanoseconds: every source would time
+		// out, which denies everything silently.
+		{"deadline under 1ms", func(c *Config) { c.Deadline = 300 }, []string{"deadline", "1ms", "300ms"}},
+		{"negative deadline", func(c *Config) { c.Deadline = -time.Second }, []string{"deadline", "1ms"}},
+		{"duplicate issuer", func(c *Config) {
+			c.Evidence.Issuers = append(c.Evidence.Issuers, IssuerConfig{
+				Issuer: testIssuer, COSEKeysURL: "https://elsewhere.example/.well-known/cose-keys", Audience: "https://platform.arkavo.net",
+			})
+		}, []string{"evidence.issuers[1]", "duplicate", testIssuer}},
+		{"two sources share a properties_key", func(c *Config) {
+			c.Sources[1].PropertiesKey = "shared"
+			c.Sources[2].PropertiesKey = "shared"
+		}, []string{"properties_key", `"shared"`, "identity-core", "device-class"}},
+		{"patreon-token missing campaign-tier", func(c *Config) { c.Sources[0].Grants = []string{campaignDef} }, []string{"patreon", campaignDef, tierDef}},
+		{"patreon-token with an extra definition", func(c *Config) {
+			c.Sources[0].Grants = []string{campaignDef, tierDef, "https://patreon.arkavo.com/attr/extra"}
+		}, []string{"patreon", campaignDef, tierDef}},
+		{"patreon-token grants outside its entitlements_namespace", func(c *Config) {
+			c.Sources[0].Options["entitlements_namespace"] = "creators.example"
+		}, []string{"patreon", "https://creators.example/attr/campaign", "https://creators.example/attr/campaign-tier"}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -131,6 +151,20 @@ func TestValidate(t *testing.T) {
 		})
 	}
 
+	t.Run("patreon-token grants match its namespace, case aside", func(t *testing.T) {
+		cfg := validConfig()
+		cfg.Sources[0].Grants = []string{"https://Patreon.arkavo.com/attr/campaign-tier", "https://patreon.arkavo.com/attr/Campaign"}
+		require.NoError(t, cfg.Validate())
+
+		cfg.Sources[0].Options["entitlements_namespace"] = "Creators.example"
+		cfg.Sources[0].Grants = []string{"https://creators.example/attr/campaign", "https://creators.example/attr/campaign-tier"}
+		require.NoError(t, cfg.Validate())
+	})
+	t.Run("a deadline of exactly 1ms is valid", func(t *testing.T) {
+		cfg := validConfig()
+		cfg.Deadline = time.Millisecond
+		assert.NoError(t, cfg.Validate())
+	})
 	t.Run("a complete agent_status block is valid", func(t *testing.T) {
 		cfg := validConfig()
 		cfg.Constraints.AgentStatus = agentstatus.Config{URL: "https://identity.example.com", ClientID: "c", ClientSecret: "s", Timeout: 2 * time.Second}
@@ -187,6 +221,19 @@ func TestDecodeConfig_DurationString(t *testing.T) {
 	assert.Equal(t, 250*time.Millisecond, cfg.Deadline)
 }
 
+// A bare integer in the YAML decodes to nanoseconds; Validate refuses it
+// rather than letting every source time out.
+func TestDecodeConfig_BareIntegerDeadlineFailsValidation(t *testing.T) {
+	cfg, present, err := DecodeConfig(loadServiceConfig(t, "    deadline: 300\n    sources: []\n"))
+	require.NoError(t, err)
+	require.True(t, present)
+	assert.Equal(t, 300*time.Nanosecond, cfg.Deadline)
+
+	err = cfg.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "deadline")
+}
+
 func TestDecodeConfig_DefaultDeadline(t *testing.T) {
 	cfg, present, err := DecodeConfig(config.ServiceConfig{"sources": []any{}})
 	require.NoError(t, err)
@@ -208,7 +255,7 @@ func TestDecodeConfig_SpecShape(t *testing.T) {
       - id: patreon
         type: patreon-token
         issuer: https://identity.arkavo.net
-        grants: [https://patreon.arkavo.com/attr/campaign]
+        grants: [https://patreon.arkavo.com/attr/campaign, https://patreon.arkavo.com/attr/campaign-tier]
         properties_key: patreon
         infer_unknown_as_free: true
         pep_assertable: true

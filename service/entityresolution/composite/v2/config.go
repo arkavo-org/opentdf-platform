@@ -22,6 +22,10 @@ import (
 const (
 	// defaultDeadline bounds each source's Resolve.
 	defaultDeadline = 300 * time.Millisecond
+	// minDeadline is the shortest deadline accepted. Anything shorter is a
+	// bare YAML number read as nanoseconds, under which every source times
+	// out.
+	minDeadline = time.Millisecond
 	// minSealKeyBytes is the shortest HMAC key accepted, decoded.
 	minSealKeyBytes = 32
 	redacted        = "[REDACTED]"
@@ -151,6 +155,9 @@ func DecodeConfig(in config.ServiceConfig) (Config, bool, error) {
 // Validate reports the first problem that would make the config unsafe or
 // meaningless. It never echoes a key.
 func (c Config) Validate() error {
+	if c.Deadline < minDeadline {
+		return fmt.Errorf("deadline must be at least %s, got %s: write a duration string such as 300ms (a bare number is nanoseconds)", minDeadline, c.Deadline)
+	}
 	issuers, err := c.Evidence.validate()
 	if err != nil {
 		return err
@@ -187,6 +194,10 @@ func (e EvidenceConfig) validate() (map[string]bool, error) {
 			return nil, fmt.Errorf("evidence.issuers[%d] (%s): cose_keys_url is required", i, is.Issuer)
 		case is.Audience == "":
 			return nil, fmt.Errorf("evidence.issuers[%d] (%s): audience is required", i, is.Issuer)
+		case issuers[is.Issuer]:
+			// One verifier per issuer: a second entry would silently replace
+			// the first's key set and audience.
+			return nil, fmt.Errorf("evidence.issuers[%d]: duplicate issuer %s", i, is.Issuer)
 		}
 		issuers[is.Issuer] = true
 	}
@@ -224,7 +235,8 @@ func decodeKey(s string) ([]byte, error) {
 
 func validateSources(sources []SourceConfig, issuers map[string]bool) error {
 	ids := map[string]bool{}
-	owners := map[string]string{} // definition FQN -> source ID
+	owners := map[string]string{}      // definition FQN -> source ID
+	propsOwners := map[string]string{} // properties_key -> source ID
 	for i, sc := range sources {
 		if sc.ID == "" {
 			return fmt.Errorf("sources[%d]: id is required", i)
@@ -235,6 +247,14 @@ func validateSources(sources []SourceConfig, issuers map[string]bool) error {
 		ids[sc.ID] = true
 		if err := sc.validate(issuers); err != nil {
 			return fmt.Errorf("source %q: %w", sc.ID, err)
+		}
+		// Properties are not bounded by a capability, so a second source under
+		// a key would replace the first's and drive its subject mappings.
+		if key := sc.PropertiesKey; key != "" {
+			if other, taken := propsOwners[key]; taken {
+				return fmt.Errorf("properties_key %q is set by sources %q and %q: one source owns a properties key", key, other, sc.ID)
+			}
+			propsOwners[key] = sc.ID
 		}
 		for _, g := range sc.Grants {
 			def, _ := definitionKey(g)
@@ -273,8 +293,15 @@ func (sc SourceConfig) validate(issuers map[string]bool) error {
 	}
 	switch sc.Type {
 	case typePatreonToken:
-		if _, err := patreonOptions(sc.Options); err != nil {
+		opts, err := patreonOptions(sc.Options)
+		if err != nil {
 			return err
+		}
+		// The source grants values of exactly these definitions. Owning
+		// anything else, or missing one, would drop its grants silently.
+		want := opts.Definitions()
+		if !ownsExactly(owned, want) {
+			return fmt.Errorf("a patreon-token source's grants must be exactly %s and %s, the definitions in its entitlements_namespace", want[0], want[1])
 		}
 	case typeTokenClaims:
 		if err := rejectUnknownOptions(sc.Options, optionClaim); err != nil {
@@ -313,6 +340,21 @@ func definitionKey(s string) (string, bool) {
 		return "", false
 	}
 	return source.FQN{Namespace: ns, Definition: def}.DefinitionFQN(), true
+}
+
+// ownsExactly reports whether owned, a set of normalized definition FQNs,
+// holds the definitions in want and nothing else.
+func ownsExactly(owned map[string]bool, want []string) bool {
+	if len(owned) != len(want) {
+		return false
+	}
+	for _, w := range want {
+		def, ok := definitionKey(w)
+		if !ok || !owned[def] {
+			return false
+		}
+	}
+	return true
 }
 
 // patreonOptions decodes a patreon-token source's options, refusing a key it

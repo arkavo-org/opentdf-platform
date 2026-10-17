@@ -570,19 +570,19 @@ On the token route (the KAS rewrap and licence decisions) it verifies each token
 
 | Field | Description | Default |
 | --- | --- | --- |
-| `deadline` | Time each source has to answer. A source that misses it, errors or panics contributes nothing. | `300ms` |
-| `evidence.issuers[]` | Token issuers: `issuer`, `cose_keys_url` and `audience`, all required. At least one. | |
+| `deadline` | Time each source has to answer, as a duration string (`300ms`). A source that misses it, errors or panics contributes nothing. At least `1ms`: a bare number is read as nanoseconds, so `deadline: 300` is a startup error. | `300ms` |
+| `evidence.issuers[]` | Token issuers: `issuer`, `cose_keys_url` and `audience`, all required. At least one; listing an issuer twice is a startup error. | |
 | `evidence.seal_key` | HMAC key that seals and opens `arkavo_evidence`: standard base64 with padding, at least 32 bytes decoded (`openssl rand -base64 32`). Required; see below for how to supply it. | |
 | `evidence.previous_seal_keys` | Keys that open but never seal, for rotating `seal_key`. Same format. | `[]` |
 | `evidence.claims_chain_peps` | Client IDs of the PEPs whose unsealed claims chains are accepted. Empty accepts none. | `[]` |
 | `sources[].id` | Unique source name, used in outcomes, provenance and logs. | |
 | `sources[].type` | `patreon-token`, `token-claims` or `device-class`. | |
 | `sources[].issuer` | The one issuer (from `evidence.issuers`) whose tokens the source reads. | |
-| `sources[].grants` | Attribute definition FQNs (`https://<namespace>/attr/<name>`) the source owns. A grant outside them is dropped, and two sources listing the same definition is a startup error. | |
+| `sources[].grants` | Attribute definition FQNs (`https://<namespace>/attr/<name>`) the source owns. A grant outside them is dropped, and two sources listing the same definition is a startup error. A `patreon-token` source must list exactly `https://<entitlements_namespace>/attr/campaign` and `https://<entitlements_namespace>/attr/campaign-tier`. | |
 | `sources[].actions` | Actions the source's grants may carry. | `[read]` |
 | `sources[].subjects` | Subject kinds the source serves: `person`, `agent`, `device`. | all three |
 | `sources[].pep_assertable` | Whether the source also reads an allowlisted PEP's claims chain. | `false` |
-| `sources[].properties_key` | Key under which the source's properties appear in the entity representation (`patreon` keeps `.patreon.*` subject mappings). Unset drops them. | |
+| `sources[].properties_key` | Key under which the source's properties appear in the entity representation (`patreon` keeps `.patreon.*` subject mappings). Unset drops them. Properties are not partitioned by capability: whatever a source puts under its key reaches every subject mapping that selects it, whatever definitions the source owns. So two sources sharing a key is a startup error. | |
 | `sources[].claim` | `token-claims` only: the claim holding attribute value FQNs. | |
 | `sources[].classes` | `device-class` only: `arkavo_npe.class` to the value FQNs a device of that class is granted (`unverified` when the token names no class). Every FQN must be within the source's `grants`. | |
 | `sources[].entitlements_namespace` | `patreon-token` only: namespace of the `campaign` and `campaign-tier` definitions. | `patreon.arkavo.com` |
