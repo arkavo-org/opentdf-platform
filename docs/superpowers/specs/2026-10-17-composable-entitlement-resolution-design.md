@@ -38,7 +38,7 @@ The FairPlay licence for the creator's own recording was still denied, and so wa
 2. Adding a source (Stripe, blockchain, or something not yet named) is new code behind one interface plus a config entry. It needs no change to the combiner, to other sources, or to existing TDF policies.
 3. A source can only grant within the attribute space it is authorised for, so a bug in one source cannot unlock another source's content.
 4. Sources whose evidence travels in the token and sources looked up at decision time use the same interface.
-5. Fix the creator case: a token carrying the owned campaign's entitlements is permitted for that campaign's content, on both the licence route and the catalog route.
+5. Fix the creator case: a creator is entitled to every tier of every campaign they own, on every route (licence, KAS rewrap and catalog). Their token carries those entitlements, and every route treats them exactly like a patron's.
 6. Keep every current patron permitted, and keep the `.patreon.*` subject-mapping behaviour, through the migration.
 
 **Non-goals (for this design)**
@@ -52,6 +52,7 @@ The FairPlay licence for the creator's own recording was still denied, and so wa
 - Precedence rules where one source silently shadows another's grants.
 - Representing each source as its own entity. The decision engine ANDs entity representations (§6), so a union would become an intersection.
 - Unbounded passthrough of every FQN in a token.
+- Branching on `role`, or on any notion of "creator", in a PEP or a source. The catalog node, arks and the platform can't tell a creator from a viewer, and must not need to. A creator's access arrives as entitlements in the token, in the same shape as a patron's.
 
 ## 3. Constraints
 
@@ -72,6 +73,9 @@ The FairPlay licence for the creator's own recording was still denied, and so wa
 - Stripe sketch: we define item IDs in Stripe, purchases reach our platform, the purchase becomes an entitlement in the CWT, and at Play the token is matched against the item ID in the TDF's policy and allowed. If tokens grow large, entitlements may need to be scoped or looked up remotely.
 - The shape comes before the quick creator fix.
 - "Creator" means the account owns a Patreon campaign, as Patreon reports it (authnz-rs #100). It does not mean a role a client asserted.
+- "A Creator should have all their campaigns entitled." The catalog can't tell a viewer from a creator, so a creator's own content must get the same answer on the catalog route as at Play. The fix belongs in what reaches the platform, not in creator-specific handling anywhere.
+  - *My call, following from that:* the catalog route is part of phase 1, not deferred.
+  - authnz-rs reads the owned campaign from Patreon's `/identity` `campaign` relationship, which is to-one (`find_campaign_id`, `src/patreon.rs`). The composite takes whatever set of grants the token carries, so it doesn't depend on that count.
 
 ## 5. The design
 
@@ -251,8 +255,9 @@ The creator case fails on every route. The composite alone fixes the token route
 | KAS rewrap (standard TDF) | arks Connect proxy → platform KAS → `GetDecisionMultiResource`, bearer as the token entity (`accessPdp.go`) | The same as the licence |
 | Catalog `entitled` | tdf-iroh-s3 → AuthZEN (the default) → arks `translate.rs` → platform as `arks-media` | The composite, **and** a catalog-route change, because arks's `pe_claims` (`src/modules/authzen/translate.rs`) forwards only `sub`, `iss`, `email` and a sanitised `arkavo_patreon`, and drops `arkavo_entitlements`. Its own comment flags this |
 
-**The catalog-route change (pending the owner's answer, §11.5).** Recommended: arks's `pe_claims` also forwards `arkavo_entitlements`, sanitised the way `sanitize_patreon` already treats `arkavo_patreon`:
-- it keeps only FQNs within an allowlist of attribute definitions, at most a fixed count;
+**The catalog-route change (phase 1, per the owner's decision in §4).** *My call on the mechanism:* arks's `pe_claims` also forwards `arkavo_entitlements`, sanitised the way `sanitize_patreon` already treats `arkavo_patreon`:
+- it keeps only FQNs in the definitions the `patreon` source owns (`campaign`, `campaign-tier`), at most a fixed count;
+- it forwards them for every viewer, with no role check;
 - the composite then accepts them only from `arks-media`, and only into `pep_assertable` sources (§5.3).
 
 This keeps the AuthZEN facade, its device and environment entities, and the rule that CWTs are never sent as `EntityIdentifier.token` (arkavo-rs `docs/platform-proxy.md`; draft-arkavo-authzen-cwt-00). It does add a subject property to that draft. The trust is the same arks already extends to `arkavo_patreon` from the catalog node, which verifies the CWT before asking.
@@ -284,9 +289,8 @@ Rejected alternatives:
    - id-shaped slugs removed by the filter.
 
    Anything else blocks the switch.
-4. **Switch the token routes** (licence and KAS rewrap). The creator's Play now works.
-5. **Make the catalog-route change** (above, §11.5), then switch it. Creator rows unlock.
-6. **Retire `mode`.** Later, retire `legacy_membership_derivation` once telemetry shows that no tokens rely on memberships alone. authnz-rs's `campaign_entitlements` becomes the single Patreon derivation. Keep the `.patreon` properties for as long as subject mappings use them.
+4. **Switch all three routes together.** They share one ERS, and the owner wants a creator to get one answer everywhere (§4), so there is no window where Play works and the creator's rows stay Locked. *My call.* The arks change must be live before step 3, so the shadow sees the forwarded entitlements on catalog traffic. `patreon` mode never reads `arkavo_entitlements`, so the change is inert until the switch. After the switch the creator can list, download and play their own content.
+5. **Retire `mode`.** Later, retire `legacy_membership_derivation` once telemetry shows that no tokens rely on memberships alone. authnz-rs's `campaign_entitlements` becomes the single Patreon derivation. Keep the `.patreon` properties for as long as subject mappings use them.
 
 ## 9. How Stripe and blockchain plug in (interface level only)
 
@@ -314,7 +318,7 @@ Rejected alternatives:
 2. **The shared item and offer model for "membership or purchase"** (§9). **The owner's call**, before Stripe ships, as part of the Stripe research.
 3. **The Play latency budget.** The peers suggested about 300 ms for the whole resolution, with token-only sources local. arks's own HTTP timeout to the platform is 10 s. **Builder:** measure and set it.
 4. **What each device class should be capped to,** if anything. Phase 1 configures no caps, and device tokens keep the person's grants. **The owner's call**, when there's a product requirement.
-5. **The catalog-route change** (§8): sanitised `arkavo_entitlements` in arks's AuthZEN `pe_claims` (recommended; adds a subject property to draft-arkavo-authzen-cwt-00), or tdf-iroh-s3's token entity mode (no arks change, but the catalog route loses device entities). **The owner's call.**
+5. **Settled: the catalog route.** The owner decided that a creator gets the same answer on every route, with no creator-specific handling (§4). The mechanism, arks forwarding the filtered `arkavo_entitlements` (which adds a subject property to draft-arkavo-authzen-cwt-00), is my call (§8).
 
 ## 12. What's left to the builder
 
