@@ -104,18 +104,17 @@ func parseArkavoPatreon(claims map[string]interface{}) *arkavoPatreonClaim {
 	return out
 }
 
-// passthroughResolution converts a materialized claim into the flattened
-// membership view plus campaign-qualified direct entitlements. Only ACTIVE
-// memberships grant anything — declined/former patrons emit no entitlements
-// for that campaign.
-func passthroughResolution(claim *arkavoPatreonClaim, namespace string) *resolution {
+// membershipView flattens a materialized claim into the Membership view
+// backing the .patreon.* selectors: status, tier_slug and campaign_ids. It
+// grants nothing. Only ACTIVE memberships with a valid campaign id count;
+// declined/former patrons surface their status and nothing else.
+func membershipView(claim *arkavoPatreonClaim) *Membership {
 	mem := &Membership{
 		UserID:   claim.userID,
 		TierSlug: tierFree,
 		Status:   normalizeStatus(""),
 	}
 
-	var entitlements []string
 	for _, m := range claim.memberships {
 		status := normalizeStatus(m.status)
 		if status != statusActive {
@@ -129,14 +128,37 @@ func passthroughResolution(claim *arkavoPatreonClaim, namespace string) *resolut
 		if !numericCampaignID.MatchString(m.campaignID) {
 			// Active but malformed campaign id would break the
 			// <campaign_id>_<tier_slug> split. Skip it AND don't let it
-			// alone promote the flattened view to active — status and the
-			// entitlement set must stay consistent.
+			// alone promote the flattened view to active.
 			continue
 		}
-		// Active and valid: this campaign justifies both the active status
-		// and its entitlements.
 		mem.Status = statusActive
 		mem.CampaignIDs = append(mem.CampaignIDs, m.campaignID)
+		for _, rawSlug := range m.tierSlugs {
+			// Flattened tier_slug is informational only in multi-creator
+			// mode; gating uses the campaign-qualified entitlements.
+			if slug := slugify(rawSlug); slug != "" && mem.TierSlug == tierFree {
+				mem.TierSlug = slug
+			}
+		}
+	}
+
+	// Creator role: surface the owned campaign like the live path does.
+	if claim.role == "creator" && claim.campaignID != "" {
+		mem.CampaignIDs = append(mem.CampaignIDs, claim.campaignID)
+	}
+	return mem
+}
+
+// passthroughResolution converts a materialized claim into the flattened
+// membership view plus campaign-qualified direct entitlements. Only ACTIVE
+// memberships grant anything — declined/former patrons emit no entitlements
+// for that campaign.
+func passthroughResolution(claim *arkavoPatreonClaim, namespace string) *resolution {
+	var entitlements []string
+	for _, m := range claim.memberships {
+		if normalizeStatus(m.status) != statusActive || !numericCampaignID.MatchString(m.campaignID) {
+			continue
+		}
 		entitlements = append(entitlements, fmt.Sprintf(
 			"https://%s/attr/%s/value/%s", namespace, campaignAttributeName, m.campaignID,
 		))
@@ -149,11 +171,6 @@ func passthroughResolution(claim *arkavoPatreonClaim, namespace string) *resolut
 			if slug == "" {
 				continue
 			}
-			// Flattened tier_slug is informational only in multi-creator
-			// mode; gating uses the campaign-qualified entitlements below.
-			if mem.TierSlug == tierFree {
-				mem.TierSlug = slug
-			}
 			entitlements = append(entitlements, fmt.Sprintf(
 				"https://%s/attr/%s/value/%s%s%s",
 				namespace, campaignTierAttributeName, m.campaignID, campaignTierSeparator, slug,
@@ -161,12 +178,7 @@ func passthroughResolution(claim *arkavoPatreonClaim, namespace string) *resolut
 		}
 	}
 
-	// Creator role: surface the owned campaign like the live path does.
-	if claim.role == "creator" && claim.campaignID != "" {
-		mem.CampaignIDs = append(mem.CampaignIDs, claim.campaignID)
-	}
-
-	return &resolution{mem: mem, entitlements: entitlements}
+	return &resolution{mem: membershipView(claim), entitlements: entitlements}
 }
 
 // entitlementsNamespace returns the configured namespace for emitted
