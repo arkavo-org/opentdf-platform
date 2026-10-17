@@ -6,8 +6,11 @@
 # discovery advertises access_token_format: application/cwt + cose_keys_uri,
 # which this build's CWT verifier consumes (unprefixed names, post-#33).
 #
-# Fill in: PATREON_* env (real campaign + creator credentials), bind/port,
-# TLS/network specifics for your infra.
+# Fill in: services.entityresolution.evidence.seal_key (a secret, through
+# OPENTDF_SERVICES_ENTITYRESOLUTION_EVIDENCE_SEAL_KEY), evidence.claims_chain_peps
+# (the catalog node's client ID), bind/port, TLS/network specifics for your
+# infra. No Patreon credentials: identity.arkavo.net materializes memberships
+# and entitlements into the CWT, and the ERS makes no Patreon call.
 
 mode: core,entityresolution,-policy,-kas
 
@@ -65,6 +68,11 @@ services:
       # Set this to the catalog node's client ID, from the platform plan's
       # Task 1 pre-check (measured on a catalog AuthZEN decision), before the
       # cutover. Empty accepts no PEP chain, so the second call finds no claims.
+      # Each entry is the exact value the platform derives through
+      # server.auth.policy.client_id_claim (arkavo_account_id above), which
+      # for the catalog node's client_credentials service token is
+      # "client:<id>". Never an account UUID: every token of that account,
+      # its agents' tokens included, carries it and would be admitted.
       claims_chain_peps: []
 
     sources:

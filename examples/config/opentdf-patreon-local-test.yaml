@@ -1,9 +1,12 @@
-# Local integration test: composite ERS + Patreon policy snapshot, no Postgres, no IdP.
+# Local integration test: composite ERS + Patreon policy snapshot, no Postgres.
 #
 #   go run ./service start --config-file ../examples/config/opentdf-patreon-local-test.yaml
 #
-# Pairs with integration-tests/mock_patreon.py on :9876. Auth is disabled —
-# this configuration is for contract testing only, never deployment.
+# Auth is enabled and pinned to a local CWT issuer at http://127.0.0.1:9999,
+# which must serve its COSE keys at /.well-known/cose-keys (for example a
+# local authnz-rs). No Patreon API is called: the issuer's CWTs carry
+# arkavo_patreon and arkavo_entitlements. Set evidence.seal_key below before
+# starting. This configuration is for contract testing only, never deployment.
 mode: core,entityresolution,-policy,-kas
 
 logger:

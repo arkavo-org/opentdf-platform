@@ -574,7 +574,7 @@ On the token route (the KAS rewrap and licence decisions) it verifies each token
 | `evidence.issuers[]` | Token issuers: `issuer`, `cose_keys_url` and `audience`, all required. At least one; listing an issuer twice is a startup error. | |
 | `evidence.seal_key` | HMAC key that seals and opens `arkavo_evidence`: standard base64 with padding, at least 32 bytes decoded (`openssl rand -base64 32`). Required; see below for how to supply it. | |
 | `evidence.previous_seal_keys` | Keys that open but never seal, for rotating `seal_key`. Same format. | `[]` |
-| `evidence.claims_chain_peps` | Client IDs of the PEPs whose unsealed claims chains are accepted. Empty accepts none. | `[]` |
+| `evidence.claims_chain_peps` | Client IDs of the PEPs whose unsealed claims chains are accepted. Empty accepts none. Each entry is the exact value the platform derives for the caller through `server.auth.policy.client_id_claim`; see below. | `[]` |
 | `sources[].id` | Unique source name, used in outcomes, provenance and logs. | |
 | `sources[].type` | `patreon-token`, `token-claims` or `device-class`. | |
 | `sources[].issuer` | The one issuer (from `evidence.issuers`) whose tokens the source reads. | |
@@ -592,6 +592,8 @@ On the token route (the KAS rewrap and licence decisions) it verifies each token
 
 **Supplying `seal_key`.** With the default config loader, `OPENTDF_SERVICES_ENTITYRESOLUTION_EVIDENCE_SEAL_KEY` sets `evidence.seal_key`, but only when the key is present in the YAML file (an empty value is enough: `seal_key: ""`), as for every environment variable in this section. Otherwise set it in the config file or a mounted config. Keep it secret: `ResolveEntities` honours whatever a valid seal holds, so anyone with the key can forge evidence that grants any entitlement.
 
+**Setting `claims_chain_peps`.** The resolver compares each entry with the client ID the platform derived for the caller through `server.auth.policy.client_id_claim`, so an entry must be exactly that value, not the PEP's name or account. In production the claim is `arkavo_account_id`, which for a PEP's `client_credentials` service token is `client:<id>`: record the catalog node's value in that form. Never list an account UUID: every token of that account carries it in `arkavo_account_id`, its agents' tokens included, so every one of them would be accepted as the PEP. A refused chain logs the client ID it saw, so a wrong entry shows in one line.
+
 ```yaml
 services:
   entityresolution:
@@ -601,7 +603,7 @@ services:
           cose_keys_url: https://identity.arkavo.net/.well-known/cose-keys
           audience: https://platform.arkavo.net
       seal_key: ""   # set via OPENTDF_SERVICES_ENTITYRESOLUTION_EVIDENCE_SEAL_KEY
-      claims_chain_peps: [<catalog node client ID>]
+      claims_chain_peps: ["client:<catalog node client ID>"]
     sources:
       - id: patreon
         type: patreon-token

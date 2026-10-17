@@ -227,15 +227,16 @@ When `authnz-rs` is ready:
    current single-membership `.patreon.*` shape.
 2. Configure it as above, with the service-to-service auth block, and move
    the `campaign` and `campaign-tier` definitions to it.
-3. Update `policy.patreon.yaml` subject mappings:
-   - `.patreon.tier_slug` → `.patreon.connections[].tier_slug` (subject
+3. Update `policy.patreon.yaml` subject mappings, which select
+   `.patreon.status` and `.patreon.benefits[]`:
+   - `.patreon.status` → `.patreon.connections[].status` and
+     `.patreon.benefits[]` → `.patreon.connections[].benefits[]` (subject
      mappings already use the `IN` operator over arrays).
    - `campaign` and `campaign-tier` values need no mappings: the source
      grants them as direct entitlements.
 
-The policy YAML already uses array-flavored selectors
-(`.patreon.benefits[]`, `.patreon.campaign_ids[]`), so step 3 is a
-search-and-replace, not a redesign.
+The policy YAML already uses an array-flavored selector
+(`.patreon.benefits[]`), so step 3 is a search-and-replace, not a redesign.
 
 ## Open questions
 
