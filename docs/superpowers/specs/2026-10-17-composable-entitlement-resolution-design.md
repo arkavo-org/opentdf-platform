@@ -10,7 +10,7 @@
 | opentdf-platform fork | `origin/main` `425af373` |
 | arkavo-rs | `origin/main` `82821d0` |
 | tdf-iroh-s3 | `origin/main` `15d9c28` |
-| authnz-rs | PR #100 (`f6dda42`), deployed 2026-10-17 |
+| authnz-rs | PR #100, merged as `a07cae2` and deployed 2026-10-17 |
 
 ## 1. Why this exists
 
@@ -58,9 +58,11 @@ The FairPlay licence for the creator's own recording was still denied, and so wa
 - **Policy semantics are fixed:** OR within an attribute definition (`anyOf`), AND across definitions (`service/internal/access/v2/evaluate.go`). Patreon content needs `campaign/<cid>` AND one of its listed `campaign-tier/<cid>_<slug>` values.
 - **Synthetic values:** dynamic values such as campaign IDs and tier slugs need `allow_direct_entitlements: true`. The PDP then synthesises the value under an existing definition (`service/internal/access/v2/helpers.go`, `getResourceDecisionableAttributes`).
 - **One representation per subject:** `JustInTimePDP.GetDecision` (`service/internal/access/v2/just_in_time_pdp.go`) requires every entity representation it evaluates to be permitted. Environment entities are skipped (`skipEnvironmentEntities`).
-- **Two routes reach the platform:**
+- **Three routes reach the same ERS:**
   - *Licence:* arks calls `GetDecision` with the viewer's CWT as `entityIdentifier.token.jwt` (`arkavo-rs src/modules/license/pdp.rs`).
   - *Catalog:* tdf-iroh-s3's `GET /catalog/<campaign>` calls either `GetDecisionMultiResource` with a claims chain, or AuthZEN through arks (`tdf-iroh-s3 src/authz.rs`; AuthZEN is the default).
+  - *KAS rewrap:* `service/kas/access/accessPdp.go` calls `GetDecisionMultiResource` with the request's bearer as the token entity. Standard TDF rewraps reach the platform through arks's Connect proxy (`/kas.AccessService/*`). It is the one route where the bearer *is* the subject token, so it's the only one where an agent's proof of possession is checked (`ipcReauthRoutes`, `service/internal/auth/authn.go`). **In scope:** it joins the parity, shadow and switch steps in §8.
+- **The token route makes two ERS calls:** `JustInTimePDP` calls `CreateEntityChainsFromTokens` with the token and the requested resources, then `ResolveEntities` on the claims chain that comes back (`just_in_time_pdp.go`). The token, and the resources, exist only in the first call. The `EntityRepresentation` is built in the second. Both calls arrive with the calling service's client ID (`IPCMetadataClientInterceptor`, `authn.go`), so on the licence route the second call looks like `arks-media` sending a claims chain of its own.
 - **Tokens:** CWT, ES256, issuer `https://identity.arkavo.net`, one-hour lifetime. Patreon data is materialised at mint and cached for 5 minutes.
 - **Revocation baseline:** the token's lifetime. *My call, pending the Stripe research*, agreed in conversation as the default; sources that need faster revocation are looked up live.
 
@@ -111,15 +113,22 @@ Isolation from the signer needs per-source signed evidence, or authenticated liv
 
 ### 5.3 Verified evidence
 
-Two inputs exist today:
+There are two kinds of input, and the token route spans two calls (§3).
 
-- **Token entities**, on the licence route. `DecodeClaimsFromToken` (`service/internal/auth/cwt_verifier.go`) decodes and explicitly does **not** verify. It relies on an upstream check that, on this route, covers arks's service credential, not the viewer token inside `entityIdentifier`.
+**Token entities** (licence and KAS rewrap routes). `DecodeClaimsFromToken` (`service/internal/auth/cwt_verifier.go`) decodes and explicitly does **not** verify. It relies on an upstream check. On the licence route that check covers arks's service credential, not the viewer token inside `entityIdentifier`.
 
-  **My call:** the composite verifies every entity token itself against the configured issuer's COSE key set. That covers signature, issuer, expiry, and the audience `https://platform.arkavo.net`. Only verified claims reach sources. The platform already has a CWT verifier in the same file.
+**My call: sources run in the first call, and their result is sealed for the second.**
+- In `CreateEntityChainsFromTokens`, the composite verifies the entity token against the configured issuer's COSE key set: signature, issuer, expiry, and the audience `https://platform.arkavo.net`. The platform already has a CWT verifier in the same file. Then it runs the sources, which receive the requested resources this call carries (§5.4), and the constraints.
+- It writes the result into the returned chain's claims as an `arkavo_evidence` object: the unioned grants, per-source properties, outcomes, subject and expiry. This is sealed with an HMAC under a key only the ERS holds, configured as `evidence.seal_key`.
+- In `ResolveEntities`, a claims entity with a valid, unexpired seal becomes its `EntityRepresentation` directly, without re-running sources.
 
-- **Claims chains**, on the catalog route through `GetDecisionMultiResource`: the claims were verified by the calling node (tdf-iroh-s3 `catalog_api.rs`, `build_chain`), not by the platform.
+This replaces the `arkavo_trusted` boolean (`arkavo/v2/entity_resolution.go`), which any caller can forge. It needs no proto change. The rejected alternatives:
+- allowlisting `arks-media` would let arks assert arbitrary chains;
+- carrying the raw token into the second call would put the bearer in claims and verify it twice.
 
-  **My call:** accept claims chains only from allowlisted PEP client IDs, and feed them only to sources marked `pep_assertable`. The `arkavo_trusted` marker is never proof on its own. The preferred end state is for PEPs to pass the original token, so §5.3's first rule covers them too.
+**Claims chains without a seal.** These come from PEPs that verified the token themselves: the catalog route, as `opentdf-v2` claims chains or AuthZEN through arks, which then calls the platform as `arks-media`.
+- **My call:** accept them only from allowlisted PEP client IDs (`claims_chain_peps`), and feed them only to sources marked `pep_assertable`.
+- A sealed chain is never treated as PEP-asserted, and an unsealed one never as verified.
 
 ### 5.4 The source interface
 
@@ -136,19 +145,22 @@ outcome    = complete | not_applicable | unavailable | invalid
 - **Live sources** call a configured, authenticated endpoint, never a URL taken from the token. They pass the stable account ID and the requested items.
   - **Cache:** keyed by (source, account, query, evidence version), with single-flight and a bounded size. The TTL is the smallest of the source's lease, the token's remaining life and the configured maximum.
   - **Failure:** fails closed. If a live source relevant to the request is `unavailable`, that request gets no ALLOW from it, and stale results are never served after an error. Sources not relevant to the requested definitions are not called.
-- **Requested scope:** `CreateEntityChainsFromTokensRequest` already carries the requested `resources` (`entity_resolution.proto`, marked experimental), and the PDP passes them on the token route. Sources may use them to answer only for the definitions in play. `ResolveEntitiesRequest` doesn't carry them (§6).
+- **Requested scope:** `CreateEntityChainsFromTokensRequest` already carries the requested `resources` (`entity_resolution.proto`, marked experimental), and the PDP passes them on the token route. Because sources run in that call (§5.3), they can use the resources to answer only for the definitions in play. Unsealed claims chains reach only `ResolveEntities`, which carries no resources (§6), so sources answer subject-wide there.
 
 ### 5.5 Constraints (subtractive, applied after the union)
 
 - **Agent gate:** a subject carrying the agent marker is checked live against authnz-rs agent status (`service/entityresolution/arkavo/v2/agent_gate.go`, `service/internal/agentstatus`). If it is withheld or unavailable, the subject gets no grants. *Open question:* the timeout (§11.1).
-- **Device ceilings:** a device class caps what the subject may hold; it never adds. Today `arkavo` mode's `directEntitlements` *appends* ceiling FQNs as grants (`service/entityresolution/arkavo/v2/entity_resolution.go`), so the composite must not copy that.
-  - **Phase 1:** applies when the device token is itself the subject.
-  - **Phase 2:** applies when a device token comes with a person in the catalog chain. This needs an authorization change (§6), because environment entities are skipped.
+- **Device caps:** a device class may cap what the subject holds; it never adds. Today `arkavo` mode's `directEntitlements` *appends* `device_class_ceilings` FQNs as grants (`service/entityresolution/arkavo/v2/entity_resolution.go`), so the composite must not copy that.
+  - **Naming:** the composite uses a new key, `device_class_caps`, so no existing `device_class_ceilings` config silently inverts. A class missing from the map means **no cap**.
+  - **Phase 1:** configures no caps. Device-subject tokens keep the person's grants, as today. authnz-rs mints only the `attested` and `managed` classes (`src/device_check.rs`), and device tokens carry the full user claims.
+  - **Later:** what each class should be capped to is the owner's decision (§11.4). Caps on a device that comes with a person in the catalog chain need an authorization change (§6), because environment entities are skipped.
 
 ### 5.6 Token size
 
-1. **Now:** keep the flat `arkavo_entitlements` array, and have authnz-rs mint it per audience, so the platform audience gets only platform-relevant FQNs.
-2. **When a defined byte cap is reached:** scope by namespace, or replace part of the array with an `entitlements_ref` (account, snapshot version, digest), resolved by a live source of the same name. Never truncate silently. A digest proves consistency, not current non-revocation.
+1. **Phase 1:** keep the flat `arkavo_entitlements` array as it is. No authnz-rs or client change.
+2. **Later, not part of this build:**
+   - **Per-audience minting:** the viewer token is one CWT with `aud = ["arkavo", <platform>]`, and arks requires both (`arkavo-rs src/modules/license/person_token.rs`). So per-audience minting means a second token, or claims that depend on the audience. Either way it changes authnz-rs and the client apps.
+   - **Beyond a defined byte cap:** scope by namespace, or replace part of the array with an `entitlements_ref` (account, snapshot version, digest), resolved by a live source of the same name. Never truncate silently. A digest proves consistency, not current non-revocation.
 
 ## 6. What fits the existing APIs, and what doesn't
 
@@ -156,8 +168,8 @@ outcome    = complete | not_applicable | unavailable | invalid
 - the composite as a new registration in `NewRegistration`;
 - `DirectEntitlement{attribute_value_fqn, actions}`;
 - `AdditionalProps` for subject mappings;
-- token verification;
-- token-carried and subject-wide live sources;
+- token verification and the sealed evidence that carries it to `ResolveEntities` (§5.3);
+- token-carried and live sources;
 - the agent gate as "no grants".
 
 **Needs an authorization change (phase 2, not needed for the creator fix):**
@@ -165,7 +177,10 @@ outcome    = complete | not_applicable | unavailable | invalid
 - **True person-plus-device constraints.** Environment entities are skipped in `JustInTimePDP`, and constraints must apply after subject mappings and direct grants are merged, not only to direct grants.
 - **Per-resource `UNAVAILABLE`,** so a live-source outage can be told apart from a deny. Today an ERS error becomes "could not decide", which arks maps to 503.
 
-**Also turn on:** `enforce_namespaced_entitlements: true` (`service/authorization/v2/config.go`), as the Patreon README already recommends.
+**Leave `enforce_namespaced_entitlements` off in phase 1.**
+- **Why:** in strict mode the PDP skips every subject mapping that has no namespace (`service/internal/access/v2/pdp.go`), logging it only at trace level. The policy-file loader builds subject mappings without a `Namespace` (`service/policy/filestore/store.go`). Turning it on would silently drop the `.patreon.status` and benefit mappings, against Goal 6.
+- **What covers it instead:** the composite's capability check does the namespace isolation for direct grants.
+- **To enable it later:** the loader must first set namespaces on policy-file mappings.
 
 ## 7. Config sketch (illustrative, not deployable)
 
@@ -176,7 +191,7 @@ services:
   authorization:
     policy_file: /etc/opentdf/policy.patreon.yaml
     allow_direct_entitlements: true
-    enforce_namespaced_entitlements: true
+    # enforce_namespaced_entitlements stays off in phase 1 (§6)
 
   entityresolution:
     # presence of `sources` selects the composite; `mode` remains only until migration ends
@@ -187,7 +202,8 @@ services:
           cose_keys_url: https://identity.arkavo.net/.well-known/cose-keys
           audience: https://platform.arkavo.net
       verify_entity_tokens: true
-      claims_chain_peps: [client:catalog-node]      # allowlisted PEP client IDs
+      seal_key: ${ERS_EVIDENCE_SEAL_KEY}            # HMAC key for arkavo_evidence (§5.3)
+      claims_chain_peps: [client:arks-media, client:catalog-node]   # PEPs whose unsealed chains are accepted
 
     sources:
       - id: patreon
@@ -222,36 +238,54 @@ services:
         url: https://identity.arkavo.net
         timeout: <open question §11.1>
         on_failure: withhold
-      device_class_ceilings:
-        unverified: []      # ceilings intersect, never add
+      device_class_caps: {}   # phase 1: no caps; a missing class means no cap; caps intersect, never add (§5.5)
 ```
 
 ## 8. Migration, and how the creator case gets fixed
 
-The creator case fails on **two routes**. The composite alone fixes only one of them.
+The creator case fails on every route. The composite alone fixes the token routes, but not the catalog.
 
 | Decision | Route | What it needs |
 |---|---|---|
-| FairPlay licence (Play) | arks → `GetDecision`, token entity (`pdp.rs`) | The composite with the `patreon` source reading the Patreon entries of `arkavo_entitlements` |
-| Catalog `entitled` | tdf-iroh-s3 → AuthZEN (the default) → arks `translate.rs` → platform | The composite, **and** a change to arks `pe_claims` (`src/modules/authzen/translate.rs`), which forwards only `sub`, `iss`, `email` and a sanitised `arkavo_patreon`, and drops `arkavo_entitlements`. Its own comment flags this |
+| FairPlay licence (Play) | arks → `GetDecision`, token entity (`pdp.rs`) | The composite, with the `patreon` source reading the Patreon entries of `arkavo_entitlements` |
+| KAS rewrap (standard TDF) | arks Connect proxy → platform KAS → `GetDecisionMultiResource`, bearer as the token entity (`accessPdp.go`) | The same as the licence |
+| Catalog `entitled` | tdf-iroh-s3 → AuthZEN (the default) → arks `translate.rs` → platform as `arks-media` | The composite, **and** a catalog-route change, because arks's `pe_claims` (`src/modules/authzen/translate.rs`) forwards only `sub`, `iss`, `email` and a sanitised `arkavo_patreon`, and drops `arkavo_entitlements`. Its own comment flags this |
 
-Arks's AuthZEN translation is PEP-supplied and unsigned. So the fix is either to carry the viewer token through to the platform, which the composite then verifies (preferred), or to forward `arkavo_entitlements` only for allowlisted PEPs and only to `pep_assertable` sources. Otherwise switch the catalog node to `protocol = "opentdf-v2"` (`tdf-iroh-s3 src/config.rs`), whose claims chain already forwards `arkavo_entitlements`.
+**The catalog-route change (pending the owner's answer, §11.5).** Recommended: arks's `pe_claims` also forwards `arkavo_entitlements`, sanitised the way `sanitize_patreon` already treats `arkavo_patreon`:
+- it keeps only FQNs within an allowlist of attribute definitions, at most a fixed count;
+- the composite then accepts them only from `arks-media`, and only into `pep_assertable` sources (§5.3).
+
+This keeps the AuthZEN facade, its device and environment entities, and the rule that CWTs are never sent as `EntityIdentifier.token` (arkavo-rs `docs/platform-proxy.md`; draft-arkavo-authzen-cwt-00). It does add a subject property to that draft. The trust is the same arks already extends to `arkavo_patreon` from the catalog node, which verifies the CWT before asking.
+
+Rejected alternatives:
+- **tdf-iroh-s3 `ConnectAuthzClient` in `entity_mode = token`** (`src/authz.rs`) needs no arks change, and its comment that CWTs fail the ERS parse is stale. But it drops the device entities. Also, tdf-iroh-s3 checks the person token's issuer, not its audience (`src/auth.rs`), so the composite's audience check could reject tokens the catalog accepts today.
+- **`protocol = "opentdf-v2"`** is labelled rollback-only in tdf-iroh-s3 (`src/config.rs`).
 
 **Steps:**
 1. **Pre-checks, read-only:**
    - Confirm prod's ERS `mode` and the catalog node's `protocol`.
    - Confirm that arks verifies the viewer CWT before calling `GetDecision`, and that the identity token's audience includes the platform.
-2. **Build the composite** behind `sources:`, with `patreon`, `identity-core` and the agent gate. Run parity tests against today's `patreon` mode:
-   - patrons: active, declined and former;
-   - free followers (`infer_unknown_as_free`);
-   - creators;
-   - a cross-campaign deny, for example a tier of campaign A never satisfies campaign B;
-   - expired or forged tokens;
-   - agents;
-   - a claims chain from a PEP not on the allowlist.
-3. **Shadow in prod:** evaluate both and log the differences on licence and catalog traffic. Expected difference: creators only.
-4. **Switch the licence route.** The creator's Play now works.
-5. **Fix the catalog route** (arks `pe_claims`, or the node's protocol), then switch it. Creator rows unlock.
+   - Confirm that standard TDF rewraps reach this platform's KAS and ERS. The prod config draft says `-kas`, while arks's `KAS_PROXY_MODE` forwards `/kas.AccessService/Rewrap` to a co-located platform.
+2. **Build the composite** behind `sources:`, with `patreon`, `identity-core` and the agent gate.
+   - **Parity reference:** today's `patreon` mode, with one deliberate change. The legacy membership derivation (`passthroughResolution`, `passthrough.go`) gets the same id-shaped-slug filter that authnz-rs #96 (`7b282ee`) applies in `campaign_entitlements`. Without it, a title slug shaped like `tier-<digits>` passes straight through. Inside one source, the capability check can't catch that, so the cross-tier escalation #96 closed would come back. *My call:* security over byte-for-byte parity.
+   - **Parity tests:**
+     - patrons: active, declined and former;
+     - free followers (`infer_unknown_as_free`);
+     - creators;
+     - a cross-campaign deny, for example a tier of campaign A never satisfies campaign B;
+     - an id-shaped title slug;
+     - expired or forged tokens;
+     - a forged or expired `arkavo_evidence` seal;
+     - agents;
+     - an unsealed claims chain from a PEP not on the allowlist.
+3. **Shadow in prod:** inside the ERS, compute both the legacy and the composite grant sets for licence, KAS and catalog traffic, and log every difference by class. *My call:* compare grant sets, not decisions, since decisions are computed outside the ERS. Expected classes:
+   - the creator's own campaign;
+   - the `_tier-<id>` forms every patron token has carried since authnz-rs #95;
+   - id-shaped slugs removed by the filter.
+
+   Anything else blocks the switch.
+4. **Switch the token routes** (licence and KAS rewrap). The creator's Play now works.
+5. **Make the catalog-route change** (above, §11.5), then switch it. Creator rows unlock.
 6. **Retire `mode`.** Later, retire `legacy_membership_derivation` once telemetry shows that no tokens rely on memberships alone. authnz-rs's `campaign_entitlements` becomes the single Patreon derivation. Keep the `.patreon` properties for as long as subject mappings use them.
 
 ## 9. How Stripe and blockchain plug in (interface level only)
@@ -279,12 +313,14 @@ Arks's AuthZEN translation is PEP-supplied and unsigned. So the fix is either to
 1. **Agent-status timeout and lease.** The peers proposed different numbers: a 5 s lease ceiling (codex, citing `service/internal/agentstatus/client.go`), a 250 ms timeout (grok) and a 3 s timeout (kimi). The builder should measure, and pick a timeout that fits the Play budget below. **Builder's call.**
 2. **The shared item and offer model for "membership or purchase"** (§9). **The owner's call**, before Stripe ships, as part of the Stripe research.
 3. **The Play latency budget.** The peers suggested about 300 ms for the whole resolution, with token-only sources local. arks's own HTTP timeout to the platform is 10 s. **Builder:** measure and set it.
-4. **Whether phase 1 needs device ceilings with a person in the catalog chain,** or whether subject-device ceilings suffice. **Owner**, when there's a product requirement.
+4. **What each device class should be capped to,** if anything. Phase 1 configures no caps, and device tokens keep the person's grants. **The owner's call**, when there's a product requirement.
+5. **The catalog-route change** (§8): sanitised `arkavo_entitlements` in arks's AuthZEN `pe_claims` (recommended; adds a subject property to draft-arkavo-authzen-cwt-00), or tdf-iroh-s3's token entity mode (no arks change, but the catalog route loses device entities). **The owner's call.**
 
 ## 12. What's left to the builder
 
 - Package layout for the composite and its sources.
-- How the existing `patreon` and `arkavo` resolvers are refactored into sources. Prefer reusing `passthroughResolution` and `directEntitlements`, minus the ceiling append.
+- How the existing `patreon` and `arkavo` resolvers are refactored into sources. Prefer reusing `passthroughResolution` (plus the #96 filter) and `directEntitlements` (minus the ceiling append).
+- The `arkavo_evidence` encoding, the HMAC construction and key rotation for `seal_key`, and its expiry, which is no later than the token's.
 - Logging and metrics: grants dropped by capability, source outcomes, shadow differences.
 - Test layout, including the parity matrix in §8 step 2.
 - Exact config field names. The sketch in §7 is illustrative.
