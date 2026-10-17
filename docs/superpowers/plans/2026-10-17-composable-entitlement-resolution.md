@@ -357,7 +357,7 @@ The owner said "do hard cutovers, we are pre-release". What follows from it (rec
   4. Union the rest by FQN: merge actions, and keep the first source as provenance.
   5. Apply `capGrants`.
   6. Put each source's props under its `PropertiesKey` when non-empty.
-- **The returned chain** has one entity per token: an `Entity_Claims` subject entity `{arkavo_evidence: <sealed>}`, `EphemeralId` `composite-subject`.
+- **The returned chain** has one entity per token: an `Entity_Claims` subject entity `{arkavo_evidence: <sealed>}`, `EphemeralId` `composite-subject-<sub>` (`composite-subject-anonymous` when `sub` is empty), so decision audits name the viewer.
 
 - [ ] **Step 1: Write the failing tests.** Each opens the sealed claim from the returned chain to assert.
   - `TestTokenRoute_CreatorGetsOwnCampaignTiers`: real `patreon.NewTokenSource` (`properties_key: patreon`) plus identity-core, with the creator claims from Task 4. Expected: grants include `campaign/13167240`, `campaign-tier/13167240_supporter` and `13167240_free`, and `Props["patreon"]` is present.
