@@ -132,7 +132,7 @@ This replaces the `arkavo_trusted` boolean (`arkavo/v2/entity_resolution.go`), w
 - allowlisting `arks-media` would let arks assert arbitrary chains;
 - carrying the raw token into the second call would put the bearer in claims and verify it twice.
 
-**Claims chains without a seal.** These come from PEPs that verified the token themselves: the catalog route, as `opentdf-v2` claims chains or AuthZEN through arks, which then calls the platform as `arks-media`.
+**Claims chains without a seal.** These come from PEPs that verified the token themselves: the catalog route, as `opentdf-v2` claims chains or AuthZEN through arks. On the AuthZEN route arks forwards the PEP's own service CWT upstream (`facade.rs`; `AUTHZEN_UPSTREAM_BEARER` is a test override only, `docs/platform-proxy.md`), so the platform sees the **catalog node's** client ID, not `arks-media`'s.
 - **My call:** accept them only from allowlisted PEP client IDs (`claims_chain_peps`), and feed them only to sources marked `pep_assertable`.
 - A sealed chain is never treated as PEP-asserted, and an unsealed one never as verified.
 
@@ -210,7 +210,7 @@ services:
           audience: https://platform.arkavo.net
       verify_entity_tokens: true
       seal_key: ${ERS_EVIDENCE_SEAL_KEY}            # HMAC key for arkavo_evidence (§5.3)
-      claims_chain_peps: [<arks's client ID, from the pre-check>]   # PEPs whose unsealed chains are accepted
+      claims_chain_peps: [<the catalog node's client ID, from the pre-check>]   # PEPs whose unsealed chains are accepted
 
     sources:
       - id: patreon
@@ -265,12 +265,13 @@ The creator case fails on every route. The composite alone fixes the token route
 |---|---|---|
 | FairPlay licence (Play) | arks → `GetDecision`, token entity (`pdp.rs`) | The composite, with the `patreon` source reading the Patreon entries of `arkavo_entitlements` |
 | KAS rewrap (standard TDF) | arks Connect proxy → platform KAS → `GetDecisionMultiResource`, bearer as the token entity (`accessPdp.go`) | The same as the licence |
-| Catalog `entitled` | tdf-iroh-s3 → AuthZEN (the default) → arks `translate.rs` → platform as `arks-media` | The composite, **and** a catalog-route change, because arks's `pe_claims` (`src/modules/authzen/translate.rs`) forwards only `sub`, `iss`, `email` and a sanitised `arkavo_patreon`, and drops `arkavo_entitlements`. Its own comment flags this |
+| Catalog `entitled` | tdf-iroh-s3 → AuthZEN (the default) → arks `translate.rs` → platform, called with the catalog node's own service CWT | The composite, **and** a catalog-route change, because arks's `pe_claims` (`src/modules/authzen/translate.rs`) forwards only `sub`, `iss`, `email` and a sanitised `arkavo_patreon`, and drops `arkavo_entitlements`. Its own comment flags this |
 
 **The catalog-route change (phase 1, per the owner's decision in §4).** *My call on the mechanism:* arks's `pe_claims` also forwards `arkavo_entitlements`, sanitised the way `sanitize_patreon` already treats `arkavo_patreon`:
 - it keeps only FQNs in the definitions the `patreon` source owns (`campaign`, `campaign-tier`), at most a fixed count;
 - it forwards them for every viewer, with no role check;
-- the composite then accepts them only from `arks-media`, and only into `pep_assertable` sources (§5.3).
+- the composite then accepts them only from the catalog node's client ID, and only into `pep_assertable` sources (§5.3). Because that client could also call `GetDecision` directly with unfiltered claims chains, the composite's capability check is the binding guard and arks's filter is defence in depth.
+- arks forwards at most 256 entries; a token with more Patreon entries than that gets Play and KAS but a Locked catalog. That fails closed and is rare; authnz-rs may enforce the same bound at mint later.
 
 This keeps the AuthZEN facade, its device and environment entities, and the rule that CWTs are never sent as `EntityIdentifier.token` (arkavo-rs `docs/platform-proxy.md`; draft-arkavo-authzen-cwt-00). It does add a subject property to that draft. The trust is the same arks already extends to `arkavo_patreon` from the catalog node, which verifies the CWT before asking. With the membership derivation gone (step 2 below), patrons on the catalog route depend on this change too, so arks must be live before the platform cuts over.
 
@@ -281,7 +282,7 @@ Rejected alternatives:
 **Steps (hard cutover, §4):**
 1. **Pre-checks, read-only.** They block the cutover, since no shadow period will catch a mistake:
    - the catalog node's `protocol`;
-   - arks's client ID as the platform sees it, which becomes `claims_chain_peps`;
+   - the catalog node's client ID as the platform sees it on a catalog AuthZEN decision, which becomes `claims_chain_peps`;
    - that the identity token's audience includes the platform;
    - that standard TDF rewraps reach this platform's KAS and ERS. The prod config draft says `-kas`, while arks's `KAS_PROXY_MODE` forwards `/kas.AccessService/Rewrap` to a co-located platform.
 2. **Build the composite** with `patreon`, `identity-core`, `device-class` and the agent gate, and **delete the `patreon` and `arkavo` modes** in the same change. Their reusable parts (claim parsing, the `.patreon` view, the agent gate) move behind the sources.

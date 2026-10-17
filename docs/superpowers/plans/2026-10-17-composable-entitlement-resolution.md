@@ -73,7 +73,7 @@ The owner said "do hard cutovers, we are pre-release". What follows from it (rec
 - **An invalid token on the token route** seals an evidence with no grants (outcome `_token: invalid`, expiry now + 60 s), rather than failing the RPC. That gives a deny, not a 503.
 - **The agent gate runs before the sources** for a gated subject. Withholding everything before or after the union gives the same answer, and running it first skips the source work.
 - **identity-core is inert in phase 1.** `arkavo-creator` isn't a definition in `examples/config/policy.patreon.yaml`, so its `publish` grant can't synthesize and changes no decision. It is configured to prove the partition.
-- **The PEP allowlist** holds the exact string `ctxAuth.GetClientIDFromContext(ctx, true)` returns for arks inside the ERS. Prod derives client IDs from `arkavo_account_id`, so the value comes from Task 1. A missing or conflicting client ID is not allowlisted, and every refusal logs the ID it saw, so a mismatch shows in one line.
+- **The PEP allowlist** holds the exact string `ctxAuth.GetClientIDFromContext(ctx, true)` returns inside the ERS for the catalog node: on the AuthZEN route arks forwards the PEP's own service CWT upstream, so the platform sees the catalog node, not arks. Prod derives client IDs from `arkavo_account_id`, so the value comes from Task 1. A missing or conflicting client ID is not allowlisted, and every refusal logs the ID it saw, so a mismatch shows in one line.
 - **A failed COSE key fetch at startup only warns,** as `NewCWTVerifier` does today; the keys refresh on first use. This avoids making a platform restart depend on identity being up. The cutover check in Rollout catches a wrong URL.
 
 ---
@@ -83,7 +83,7 @@ The owner said "do hard cutovers, we are pre-release". What follows from it (rec
 **Files:** none changed. Record each answer in the Rollout table.
 
 - [ ] **Step 1:** Read the deployed tdf-iroh-s3 config on iroh.arkavo.net. Record the authz `protocol` (expected: AuthZEN through arks).
-- [ ] **Step 2:** Find arks's client ID as the platform sees it: the `client_id` attribute on the platform's log lines for a FairPlay licence decision. Record the exact string. It becomes `claims_chain_peps`.
+- [ ] **Step 2:** Find the catalog node's client ID as the platform sees it: the `client_id` attribute on the platform's log lines for a catalog AuthZEN decision (`GET /catalog/<campaign>` with a viewer token). Confirm the platform derives a non-empty client ID from the catalog node's service CWT (prod reads `arkavo_account_id`). Record the exact string. It becomes `claims_chain_peps`. Do not take it from a licence decision: that route carries arks's own credential.
 - [ ] **Step 3:** Confirm the viewer token's `aud` includes `https://platform.arkavo.net`. A recent KAS rewrap that succeeded through the platform proves it. Record the log line and time. Never paste tokens into chat or logs.
 - [ ] **Step 4:** Confirm that standard-TDF rewraps reach this platform's KAS and ERS: arks `KAS_PROXY_MODE`, and the platform log for `/kas.AccessService/Rewrap`.
 - [ ] **Step 5:** Confirm the deployed `allow_direct_entitlements: true`, and that `enforce_namespaced_entitlements` is unset or false.
@@ -501,7 +501,7 @@ The owner said "do hard cutovers, we are pre-release". What follows from it (rec
 | Pre-check (Task 1) | Expected | Found |
 |---|---|---|
 | Catalog node authz protocol | AuthZEN via arks | |
-| arks client ID at the platform | (exact string) | |
+| Catalog node client ID at the platform (catalog AuthZEN decision) | (exact string) | |
 | Viewer token `aud` has `https://platform.arkavo.net` | yes | |
 | Standard-TDF rewrap reaches this platform | yes | |
 | `allow_direct_entitlements` / `enforce_namespaced_entitlements` | `true` / off | |
