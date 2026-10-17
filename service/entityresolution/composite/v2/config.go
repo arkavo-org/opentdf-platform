@@ -121,13 +121,14 @@ func (c Config) LogValue() slog.Value {
 	)
 }
 
-// DecodeConfig reads the service config. present reports whether it has a
+// DecodeConfig reads the service config. The bool reports whether it has a
 // "sources" key, which is what selects the composite. A zero deadline becomes
 // 300ms; durations arrive as strings ("250ms").
-func DecodeConfig(in config.ServiceConfig) (cfg Config, present bool, err error) {
-	if _, present = in["sources"]; !present {
+func DecodeConfig(in config.ServiceConfig) (Config, bool, error) {
+	if _, present := in["sources"]; !present {
 		return Config{}, false, nil
 	}
+	var cfg Config
 	dec, err := mapstructure.NewDecoder(&mapstructure.DecoderConfig{
 		DecodeHook: mapstructure.StringToTimeDurationHookFunc(),
 		Result:     &cfg,
@@ -135,7 +136,7 @@ func DecodeConfig(in config.ServiceConfig) (cfg Config, present bool, err error)
 	if err != nil {
 		return Config{}, true, err
 	}
-	if err := dec.Decode(in); err != nil {
+	if err = dec.Decode(in); err != nil {
 		return Config{}, true, err
 	}
 	if cfg.Deadline == 0 {
