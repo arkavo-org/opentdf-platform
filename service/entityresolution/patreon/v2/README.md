@@ -1,99 +1,86 @@
-# Patreon Entity Resolution Provider (v2)
+# Patreon token source (v2)
 
-A Patreon-backed Entity Resolution Service (ERS) for the multi-creator SaaS
-model. It makes **no Patreon API calls**: identity.arkavo.net materializes
-every consumer's memberships into the `arkavo_patreon` CWT claim at token
-mint (using the consumer's own OAuth token, which sees every campaign they
-back), and this provider translates that trusted claim into entitlements.
-Pairs with
+This package is no longer an entity resolver of its own. It provides the
+composite entity resolver's `patreon-token` source
+([`../../composite/v2`](../../composite/v2)): `NewTokenSource(SourceConfig)`
+returns a `source.Source` that reads Patreon grants and the `.patreon`
+membership view from a verified authnz-rs token. It makes no Patreon API
+calls and does no I/O. Pairs with
 [`examples/config/policy.patreon.yaml`](../../../../examples/config/policy.patreon.yaml).
 
-## What it does
+## What it grants
 
-When a subject's claims carry the materialized `arkavo_patreon` claim, the
-provider emits **campaign-qualified direct entitlements** per ACTIVE
-membership — in the creator's own tier vocabulary, with no per-creator
-config:
+Grants come only from the token's `arkavo_entitlements` claim, which
+identity.arkavo.net fills at mint. The source keeps each entry that is a
+well-formed value of the two Patreon definitions in its namespace, and drops
+everything else:
 
 ```
-https://patreon.arkavo.com/attr/campaign/value/<campaign_id>
-https://patreon.arkavo.com/attr/campaign-tier/value/<campaign_id>_<tier_slug>
+https://patreon.arkavo.com/attr/campaign/value/<campaign digits>
+https://patreon.arkavo.com/attr/campaign-tier/value/<campaign digits>_<slug>
 ```
+
+The slug is `[a-z0-9-]+`, so the first `_` splits a tier value
+unambiguously. Tiers are campaign-qualified, in each creator's own tier
+vocabulary, so a tier at one creator never satisfies another's gate. Every
+grant carries the action `read`. The composite still drops any grant outside
+the definitions the source is configured to own.
 
 Attribute *values* are dynamic (resolved as synthetic values when
-`allow_direct_entitlements` is on), so onboarding a creator requires zero
-policy changes. Declined/former memberships grant nothing, and tiers are
-campaign-qualified so a tier at one creator never satisfies another's gate.
+`allow_direct_entitlements` is on), so onboarding a creator needs no policy
+change; only the definitions must exist.
 
-It also surfaces a flattened `.patreon.*` view (`status`, `tier_slug`,
-`campaign_ids`) for coarse legacy subject mappings, derived from the same
-claim.
+## What it surfaces
+
+The `arkavo_patreon` claim (the consumer's memberships, materialized by
+identity.arkavo.net) feeds only the flattened `.patreon` view: `status`,
+`tier_slug`, `campaign_ids` and the rest of `Membership`, for coarse subject
+mappings. It grants nothing. Only active memberships with a numeric campaign
+id count towards `status: active` and `campaign_ids`. The claim's `role`, and
+a creator's own `campaign_id`, are not read: no source branches on role, and a
+creator's access to their own campaign comes from `arkavo_entitlements` like
+everyone else's. The composite puts the view under the source's
+`properties_key`.
+
+A subject with no `arkavo_patreon` claim gets no view, or, with
+`infer_unknown_as_free`, the free view (`tier_slug: free`,
+`status: former`). The outcome is `complete` when there is a grant or a
+view, and `not_applicable` otherwise.
 
 ## Configuration
+
+One entry under the composite's `sources`
+([`docs/Configuring.md`](../../../../docs/Configuring.md#composite-resolver)):
 
 ```yaml
 services:
   entityresolution:
-    mode: patreon
-
-    # SECURITY: the materialized arkavo_patreon claim is authoritative.
-    # Off by default; enable only when every decision caller reaches the ERS
-    # through a trusted channel (the platform's verified-token path, or a
-    # role:standard PEP that verified the subject token — e.g. the catalog
-    # node). Pin the materializer with trusted_issuer.
-    trust_materialized_claims: true
-    trusted_issuer: https://identity.arkavo.net
-
-    # Namespace for emitted entitlement FQNs (default patreon.arkavo.com).
-    entitlements_namespace: patreon.arkavo.com
-
-    # A subject with no usable Patreon claim resolves as a free follower
-    # instead of NotFound, so non-Patreon traffic still flows through subject
-    # mappings.
-    infer_unknown_as_free: true
-
-    # JWT claim overrides (defaults shown).
-    jwt:
-      patreon_user_id_claim: patreon_user_id
-      username_claim: preferred_username
-      client_id_claim: azp
+    sources:
+      - id: patreon
+        type: patreon-token
+        issuer: https://identity.arkavo.net
+        grants:
+          - https://patreon.arkavo.com/attr/campaign
+          - https://patreon.arkavo.com/attr/campaign-tier
+        properties_key: patreon      # keeps .patreon.* subject mappings
+        pep_assertable: true         # also reads the catalog node's claims chains
+        # Options read by this source:
+        entitlements_namespace: patreon.arkavo.com   # the default
+        infer_unknown_as_free: true
 ```
 
-The authorization service must also set `allow_direct_entitlements: true`
-(and typically `enforce_namespaced_entitlements: true`) for the dynamic
-campaign-tier values to be honored.
+Any other option key is a startup error. The authorization service must set
+`allow_direct_entitlements: true` for the dynamic values to be honoured.
 
-## Resolution
+## Agents
 
-Only a **claims** entity carrying `arkavo_patreon` resolves to a membership.
-Other entity types (username/email/client id) have no Patreon source — live
-lookups were removed — so they resolve as not-found (→ free when
-`infer_unknown_as_free`). `CreateEntityChainsFromTokens` parses each bearer
-token — JOSE JWT or base64url CWT, the format the KAS rewrap path forwards
-(signature verified upstream by the platform authn layer) — emits an
-`ENVIRONMENT` entity for the `azp` client id, and a trust-gated `SUBJECT`
-entity carrying the `patreon` block plus the preserved claim for the decision
-flow's second pass.
-
-## Agents are never entitled
-
-This provider cannot ask authnz-rs whether an agent is eligible — that is the
-arkavo resolver's `agent_status` check — so it withholds every agent. A
-subject carrying any agent marker (`arkavo_npe` of any type but `device`,
-`arkavo_swarm`, `arkavo_state_version`, or the `agent` role; the same test the
-arkavo resolver gates on) resolves to a single `SUBJECT` entity with no
-`patreon` block, no preserved `arkavo_patreon`, no `azp` environment entity
-and no direct entitlements. `infer_unknown_as_free` never applies to it, so it
-cannot match the free/former subject mappings either. The KAS answers such an
-agent's rewrap with a per-KAO `forbidden` (a policy with no data attributes
-is still released without a decision, as for any caller), and the log reads
-`patreon: agent entitlements withheld`. Person and device subjects are
-unaffected. To give agents gated access, run the arkavo resolver.
+The source does not judge agents. The composite's agent gate
+(`constraints.agent_status`, see
+[`../../arkavo/v2/README.md`](../../arkavo/v2/README.md#agent-status)) runs
+before any source, and withholds every agent subject while it is unset.
 
 ## Testing
 
 ```bash
 cd service && go test ./entityresolution/patreon/...
 ```
-
-No outbound Patreon calls — tests exercise the claims-passthrough directly.

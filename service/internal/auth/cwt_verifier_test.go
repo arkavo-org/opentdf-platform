@@ -306,6 +306,77 @@ func TestCWTVerifier_CustomClaimsRoundTrip(t *testing.T) {
 	assert.Equal(t, "webauthn", idp)
 }
 
+func TestCWTVerifier_VerifyCWTClaims_ReturnsClaimsMap(t *testing.T) {
+	priv, kid := newP256(t)
+	srv := keySetServer(t, coseKeySetFromPub(t, &priv.PublicKey, kid))
+	defer srv.Close()
+	v, err := NewCWTVerifier(context.Background(), CWTVerifierConfig{
+		COSEKeysURL: srv.URL,
+		Issuer:      "https://idp.example",
+		Audience:    "opentdf-platform",
+		CacheTTL:    time.Minute,
+	}, nil)
+	require.NoError(t, err)
+	token := signCWT(
+		t, priv, kid,
+		standardClaims("https://idp.example", "opentdf-platform", "user-1", time.Hour),
+		map[string]any{
+			"arkavo_entitlements": []any{"https://patreon.arkavo.com/attr/campaign/value/13167240"},
+		},
+	)
+	m, err := v.VerifyCWTClaims(context.Background(), token)
+	require.NoError(t, err)
+	assert.Equal(t, "https://idp.example", m["iss"])
+	assert.NotEmpty(t, m["sub"])
+	ents, ok := m["arkavo_entitlements"].([]any)
+	require.True(t, ok)
+	assert.Equal(t, []any{"https://patreon.arkavo.com/attr/campaign/value/13167240"}, ents)
+}
+
+func TestCWTVerifier_VerifyCWTClaims_RejectsWrongAudience(t *testing.T) {
+	priv, kid := newP256(t)
+	srv := keySetServer(t, coseKeySetFromPub(t, &priv.PublicKey, kid))
+	defer srv.Close()
+	v, err := NewCWTVerifier(context.Background(), CWTVerifierConfig{
+		COSEKeysURL: srv.URL,
+		Issuer:      "https://idp.example",
+		Audience:    "opentdf-platform",
+		CacheTTL:    time.Minute,
+	}, nil)
+	require.NoError(t, err)
+	token := signCWT(
+		t, priv, kid,
+		standardClaims("https://idp.example", "some-other-rs", "user-1", time.Hour),
+		nil,
+	)
+	m, err := v.VerifyCWTClaims(context.Background(), token)
+	require.Error(t, err)
+	assert.Nil(t, m)
+}
+
+func TestCWTVerifier_VerifyCWTClaims_RejectsBadSignature(t *testing.T) {
+	priv1, kid1 := newP256(t)
+	priv2, _ := newP256(t)
+	srv := keySetServer(t, coseKeySetFromPub(t, &priv1.PublicKey, kid1))
+	defer srv.Close()
+	v, err := NewCWTVerifier(context.Background(), CWTVerifierConfig{
+		COSEKeysURL: srv.URL,
+		Issuer:      "https://idp.example",
+		Audience:    "opentdf-platform",
+		CacheTTL:    time.Minute,
+	}, nil)
+	require.NoError(t, err)
+	// Signed by a key outside the set, but claiming the published kid.
+	token := signCWT(
+		t, priv2, kid1,
+		standardClaims("https://idp.example", "opentdf-platform", "user-1", time.Hour),
+		nil,
+	)
+	m, err := v.VerifyCWTClaims(context.Background(), token)
+	require.Error(t, err)
+	assert.Nil(t, m)
+}
+
 func TestCWTVerifier_AudienceArrayMatches(t *testing.T) {
 	priv, kid := newP256(t)
 	srv := keySetServer(t, coseKeySetFromPub(t, &priv.PublicKey, kid))

@@ -34,19 +34,13 @@ ERS enables the OpenTDF platform to:
 - **Failure Strategies**: `fail-fast` (default) for strict error handling, `continue` for resilient failover
 - **Use Case**: Organizations with heterogeneous identity systems, complex authorization requirements
 
-### Arkavo Entity Resolution Service (STABLE)
-- **Status**: ✅ **Stable**
-- **Location**: [`./arkavo/`](./arkavo/)
-- **Backends**: authnz-rs CWT/JWT claims passthrough with NPE entities and direct entitlements
-- **Features**: Token validation, direct entitlements, device class ceilings, no external dependencies
-- **Use Case**: Arkavo ecosystem identity resolution with distributed authorization
-
-### Patreon Entity Resolution Service (STABLE)
-- **Status**: ✅ **Stable**
-- **Location**: [`./patreon/`](./patreon/)
-- **Backends**: Patreon membership materialized via authnz-rs claims
-- **Features**: Campaign-qualified entitlements, tier-based access, no per-creator config
-- **Use Case**: Creator economy platforms with Patreon integrations
+### Composite Entity Resolution Service
+- **Status**: V2 only; selected by a `sources` list instead of `mode`
+- **Location**: [`./composite/`](./composite/), with the Patreon source in [`./patreon/`](./patreon/), the agent gate in [`./arkavo/`](./arkavo/) and the source contract in [`./source/`](./source/)
+- **Backends**: authnz-rs CWTs, verified against each issuer's COSE key set
+- **Features**: Per-source capabilities (one source owns each attribute definition), direct entitlements sealed between the two ERS calls, constraints that only remove grants (agent status, device-class caps)
+- **Use Case**: Arkavo identity plane and Patreon creator memberships
+- **Configuration**: [`docs/Configuring.md`](../../docs/Configuring.md#composite-resolver)
 
 ## Quick Start
 
@@ -55,8 +49,7 @@ Select the ERS implementation that matches your identity backend:
 - Use **Claims ERS** for JWT-based authentication systems
 - Use **Keycloak ERS** for Keycloak identity provider integration
 - Use **Multi-Strategy ERS** for LDAP, SQL databases, and multiple backends with intelligent routing
-- Use **Arkavo ERS** for authnz-rs CWT/JWT claims passthrough with direct entitlements
-- Use **Patreon ERS** for Patreon membership materialized via authnz-rs claims
+- Use **Composite ERS** for authnz-rs CWTs, with Patreon memberships and other sources unioned under per-source capabilities
 
 ### 2. Configure Your Service
 ```yaml
@@ -67,11 +60,23 @@ services:
     mode: keycloak  # Keycloak identity provider
     # OR (V2 only)
     mode: multi-strategy  # LDAP, SQL, and JWT Claims with intelligent routing
-    # OR
-    mode: arkavo    # Arkavo identity-plane with direct entitlements
-    # OR
-    mode: patreon   # Patreon membership materialized via authnz-rs claims
     # Implementation-specific configuration
+```
+
+The composite resolver (V2 only) takes no `mode`: a `sources` list selects it,
+and setting `mode` as well is a startup error.
+
+```yaml
+services:
+  entityresolution:
+    evidence:       # token issuers, seal_key, claims_chain_peps
+      ...
+    sources:        # each source owns the attribute definitions it lists
+      - id: patreon
+        type: patreon-token
+        ...
+    constraints:    # agent_status, device_class_caps: only remove grants
+      ...
 ```
 
 ### 3. Test Your Setup

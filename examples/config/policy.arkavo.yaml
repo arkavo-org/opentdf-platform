@@ -1,13 +1,17 @@
 # arkavo identity-plane policy snapshot: vocabulary only. Entitlements are
-# carried in authnz-rs CWTs (arkavo_entitlements) and asserted by the
-# `arkavo` ERS mode as direct entitlements — there are no subject mappings.
+# carried in authnz-rs CWTs (arkavo_entitlements) and granted as direct
+# entitlements by the composite ERS's sources, each owning the definitions it
+# lists: a token-claims source owns tdf, action and mesh, and a device-class
+# source owns classification. There are no subject mappings. The full config
+# is examples/config/opentdf-arkavo-local-test.yaml:
 #
 #   services:
 #     authorization:
 #       policy_file: ./examples/config/policy.arkavo.yaml
 #       allow_direct_entitlements: true
 #     entityresolution:
-#       mode: arkavo
+#       evidence: ...
+#       sources: ...
 
 namespaces:
   - name: arkavo.ai
@@ -41,7 +45,7 @@ attributes:
       - value: worker
 
   # Data classification. HIERARCHY: the PDP ranks by index, LOWEST INDEX IS
-  # HIGHEST RANK — keep this order. Device class ceilings grant one of these.
+  # HIGHEST RANK — keep this order. The device-class source grants one of these.
   - namespace: arkavo.ai
     name: classification
     rule: hierarchy

@@ -6,8 +6,11 @@
 # discovery advertises access_token_format: application/cwt + cose_keys_uri,
 # which this build's CWT verifier consumes (unprefixed names, post-#33).
 #
-# Fill in: PATREON_* env (real campaign + creator credentials), bind/port,
-# TLS/network specifics for your infra.
+# Fill in: services.entityresolution.evidence.seal_key (a secret, through
+# OPENTDF_SERVICES_ENTITYRESOLUTION_EVIDENCE_SEAL_KEY), evidence.claims_chain_peps
+# (the catalog node's client ID), bind/port, TLS/network specifics for your
+# infra. No Patreon credentials: identity.arkavo.net materializes memberships
+# and entitlements into the CWT, and the ERS makes no Patreon call.
 
 mode: core,entityresolution,-policy,-kas
 
@@ -48,14 +51,53 @@ services:
     # ERS emits as direct entitlements.
     allow_direct_entitlements: true
   entityresolution:
-    mode: patreon
-    # Claims-passthrough: no Patreon API, no per-creator credentials, no
-    # campaign list. identity.arkavo.net materialized the consumer's
-    # memberships into the arkavo_patreon CWT claim; this provider trusts
-    # that claim (default off) and emits campaign-qualified entitlements.
-    trust_materialized_claims: true
-    trusted_issuer: https://identity.arkavo.net
+    # Composite entity resolver: the presence of `sources` selects it (setting
+    # `mode` as well is a startup error). Each source owns the attribute
+    # definitions it is listed for; constraints only remove grants.
+    deadline: 300ms
+    evidence:
+      issuers:
+        - issuer: https://identity.arkavo.net
+          cose_keys_url: https://identity.arkavo.net/.well-known/cose-keys
+          audience: https://platform.arkavo.net
+      # HMAC key sealing arkavo_evidence between the two ERS calls: standard
+      # base64 with padding, at least 32 bytes decoded. The deployment supplies
+      # it as a secret (this file is committed); startup fails while it is empty.
+      seal_key: ""
+      # Client IDs of the PEPs whose unsealed claims chains are accepted.
+      # Set this to the catalog node's client ID, from the platform plan's
+      # Task 1 pre-check (measured on a catalog AuthZEN decision), before the
+      # cutover. Empty accepts no PEP chain, so the second call finds no claims.
+      # Each entry is the exact value the platform derives through
+      # server.auth.policy.client_id_claim (arkavo_account_id above), which
+      # for the catalog node's client_credentials service token is
+      # "client:<id>". Never an account UUID: every token of that account,
+      # its agents' tokens included, carries it and would be admitted.
+      claims_chain_peps: []
 
-    # Non-Patreon traffic resolves as a free follower so it still flows
-    # through subject mappings instead of erroring NotFound.
-    infer_unknown_as_free: true
+    sources:
+      - id: patreon
+        type: patreon-token
+        issuer: https://identity.arkavo.net
+        # Grants come from the arkavo_entitlements claim; arkavo_patreon feeds
+        # only the .patreon properties.
+        grants:
+          - https://patreon.arkavo.com/attr/campaign
+          - https://patreon.arkavo.com/attr/campaign-tier
+        properties_key: patreon                     # keeps .patreon.* subject mappings
+        pep_assertable: true
+        # Non-Patreon traffic resolves as a free follower so it still flows
+        # through subject mappings instead of erroring NotFound.
+        infer_unknown_as_free: true
+
+      - id: identity-core
+        type: token-claims
+        issuer: https://identity.arkavo.net
+        claim: arkavo_entitlements
+        grants:
+          - https://patreon.arkavo.com/attr/arkavo-creator   # the publish entitlement
+        pep_assertable: false
+
+    constraints:
+      # agent_status is unset, so every agent subject is withheld.
+      device_class_caps: {}

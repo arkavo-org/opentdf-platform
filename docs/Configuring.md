@@ -33,7 +33,8 @@ The platform leverages [viper](https://github.com/spf13/viper) to help load conf
       - [Entity Resolution v2 Only](#entity-resolution-v2-only)
       - [Example: Entity Resolution v1](#example-entity-resolution-v1)
       - [Example: Entity Resolution v2](#example-entity-resolution-v2)
-      - [Arkavo mode: agent status](#arkavo-mode-agent-status)
+      - [Composite resolver](#composite-resolver)
+      - [Composite resolver: agent status](#composite-resolver-agent-status)
     - [Policy](#policy)
     - [Casbin Endpoint Authorization](#casbin-endpoint-authorization)
       - [Key Aspects of Authorization Configuration](#key-aspects-of-authorization-configuration)
@@ -505,7 +506,7 @@ Root level key `entityresolution`
 
 | Field                   | Description                                                                                    | Default    | Environment Variable                                    |
 | ----------------------- | ---------------------------------------------------------------------------------------------- | ---------- | ------------------------------------------------------- |
-| `mode`                  | The mode in which to run ERS (`keycloak` or `claims`)                                          | `keycloak` | OPENTDF_SERVICES_ENTITYRESOLUTION_MODE                  |
+| `mode`                  | The mode in which to run ERS (`keycloak` or `claims`). Leave it unset when `sources` selects the [composite resolver](#composite-resolver); setting both is a startup error | `keycloak` | OPENTDF_SERVICES_ENTITYRESOLUTION_MODE                  |
 | `url`                   | Endpoint URL for the entity resolution service (specific to `keycloak` mode)                   | `""`       | OPENTDF_SERVICES_ENTITYRESOLUTION_URL                   |
 | `clientid`              | Keycloak client ID for authentication (specific to `keycloak` mode)                            | `""`       | OPENTDF_SERVICES_ENTITYRESOLUTION_CLIENTID              |
 | `clientsecret`          | Keycloak client secret for authentication(specific to `keycloak` mode)                         | `""`       | OPENTDF_SERVICES_ENTITYRESOLUTION_CLIENTSECRET          |
@@ -561,16 +562,87 @@ services:
 ```
 
 
-#### Arkavo mode: agent status
+#### Composite resolver
 
-In `mode: arkavo`, `agent_status` tells the resolver where to ask authnz-rs whether an agent identity (its `did:key`) is eligible and its token current. An agent subject resolves with no entitlements while it is not, and whenever `agent_status` is unset. This applies to v2 decisions; v1 authorization is not supported in arkavo mode. Details, including the requirement that every sealed Arkavo TDF carry a data attribute, the scope of the check and the deployment order: [`service/entityresolution/arkavo/v2/README.md`](../service/entityresolution/arkavo/v2/README.md#agent-status-agent_status).
+The composite entity resolver (`service/entityresolution/composite/v2`) unions the direct entitlements of independently configured sources, each limited to the attribute definitions it owns, then applies constraints that only remove grants. A `sources` key under `entityresolution` selects it, for v2 only; setting `mode` as well is a startup error, and so is a config that fails validation. v1 authorization has no composite resolver.
+
+On the token route (the KAS rewrap and licence decisions) it verifies each token as a CWT against its issuer's COSE key set (signature, issuer, audience, `exp`), runs the sources and constraints, and seals the result into the chain as `arkavo_evidence` (HMAC-SHA256 under `evidence.seal_key`). `ResolveEntities` turns a sealed entity into its representation without running the sources again. A token that is not a verified CWT, an unsigned JWT included, gets no grants. An unsealed claims chain counts only from a PEP on `evidence.claims_chain_peps`, and only `pep_assertable` sources read it. The authorization service must set `allow_direct_entitlements: true`.
+
+| Field | Description | Default |
+| --- | --- | --- |
+| `deadline` | Time each source has to answer, as a duration string (`300ms`). A source that misses it, errors or panics contributes nothing. At least `1ms`: a bare number is read as nanoseconds, so `deadline: 300` is a startup error. | `300ms` |
+| `evidence.issuers[]` | Token issuers: `issuer`, `cose_keys_url` and `audience`, all required. At least one; listing an issuer twice is a startup error. | |
+| `evidence.seal_key` | HMAC key that seals and opens `arkavo_evidence`: standard base64 with padding, at least 32 bytes decoded (`openssl rand -base64 32`). Required; see below for how to supply it. | |
+| `evidence.previous_seal_keys` | Keys that open but never seal, for rotating `seal_key`. Same format. | `[]` |
+| `evidence.claims_chain_peps` | Client IDs of the PEPs whose unsealed claims chains are accepted. Empty accepts none. Each entry is the exact value the platform derives for the caller through `server.auth.policy.client_id_claim`; see below. | `[]` |
+| `sources[].id` | Unique source name, used in outcomes, provenance and logs. | |
+| `sources[].type` | `patreon-token`, `token-claims` or `device-class`. | |
+| `sources[].issuer` | The one issuer (from `evidence.issuers`) whose tokens the source reads. | |
+| `sources[].grants` | Attribute definition FQNs (`https://<namespace>/attr/<name>`) the source owns. A grant outside them is dropped, and two sources listing the same definition is a startup error. A `patreon-token` source must list exactly `https://<entitlements_namespace>/attr/campaign` and `https://<entitlements_namespace>/attr/campaign-tier`. | |
+| `sources[].actions` | Actions the source's grants may carry. | `[read]` |
+| `sources[].subjects` | Subject kinds the source serves: `person`, `agent`, `device`. | all three |
+| `sources[].pep_assertable` | Whether the source also reads an allowlisted PEP's claims chain. | `false` |
+| `sources[].properties_key` | Key under which the source's properties appear in the entity representation (`patreon` keeps `.patreon.*` subject mappings). Unset drops them. Properties are not partitioned by capability: whatever a source puts under its key reaches every subject mapping that selects it, whatever definitions the source owns. So two sources sharing a key is a startup error. | |
+| `sources[].claim` | `token-claims` only: the claim holding attribute value FQNs. | |
+| `sources[].classes` | `device-class` only: `arkavo_npe.class` to the value FQNs a device of that class is granted (`unverified` when the token names no class). Every FQN must be within the source's `grants`. | |
+| `sources[].entitlements_namespace` | `patreon-token` only: namespace of the `campaign` and `campaign-tier` definitions. | `patreon.arkavo.com` |
+| `sources[].infer_unknown_as_free` | `patreon-token` only: give a subject with no `arkavo_patreon` claim the free `.patreon` view. | `false` |
+| `constraints.agent_status` | Where to ask authnz-rs whether an agent is eligible; see [agent status](#composite-resolver-agent-status). Unset withholds every agent subject. | |
+| `constraints.device_class_caps` | `arkavo_npe.class` to the value FQNs a device of that class is capped to. A cap only removes grants; a class missing from the map has no cap. | `{}` |
+
+**Supplying `seal_key`.** With the default config loader, `OPENTDF_SERVICES_ENTITYRESOLUTION_EVIDENCE_SEAL_KEY` sets `evidence.seal_key`, but only when the key is present in the YAML file (an empty value is enough: `seal_key: ""`), as for every environment variable in this section. Otherwise set it in the config file or a mounted config. Keep it secret: `ResolveEntities` honours whatever a valid seal holds, so anyone with the key can forge evidence that grants any entitlement.
+
+**Setting `claims_chain_peps`.** The resolver compares each entry with the client ID the platform derived for the caller through `server.auth.policy.client_id_claim`, so an entry must be exactly that value, not the PEP's name or account. In production the claim is `arkavo_account_id`, which for a PEP's `client_credentials` service token is `client:<id>`: record the catalog node's value in that form. Never list an account UUID: every token of that account carries it in `arkavo_account_id`, its agents' tokens included, so every one of them would be accepted as the PEP. A refused chain logs the client ID it saw, so a wrong entry shows in one line.
+
+```yaml
+services:
+  entityresolution:
+    evidence:
+      issuers:
+        - issuer: https://identity.arkavo.net
+          cose_keys_url: https://identity.arkavo.net/.well-known/cose-keys
+          audience: https://platform.arkavo.net
+      seal_key: ""   # set via OPENTDF_SERVICES_ENTITYRESOLUTION_EVIDENCE_SEAL_KEY
+      claims_chain_peps: ["client:<catalog node client ID>"]
+    sources:
+      - id: patreon
+        type: patreon-token
+        issuer: https://identity.arkavo.net
+        grants:
+          - https://patreon.arkavo.com/attr/campaign
+          - https://patreon.arkavo.com/attr/campaign-tier
+        properties_key: patreon
+        pep_assertable: true
+        infer_unknown_as_free: true
+    constraints:
+      device_class_caps: {}
+```
+
+Complete configs: [`examples/config/opentdf-patreon-prod.yaml`](../examples/config/opentdf-patreon-prod.yaml) and [`examples/config/opentdf-arkavo-local-test.yaml`](../examples/config/opentdf-arkavo-local-test.yaml). What the `patreon-token` source grants: [`service/entityresolution/patreon/v2/README.md`](../service/entityresolution/patreon/v2/README.md).
+
+**Converting a `patreon` or `arkavo` mode config.** Those modes are gone: `mode: patreon` or `mode: arkavo`, in any case, is a startup error. So is any of their top-level keys below, with or without `sources`, and an `evidence` or `constraints` block without `sources` (it would otherwise start Keycloak). `cache_expiration` stays where it is.
+
+| Old top-level key | In the composite |
+| --- | --- |
+| `trust_materialized_claims` | Removed. A source reads claims only from a verified CWT or, when `pep_assertable`, from a PEP on `evidence.claims_chain_peps`. |
+| `trusted_issuer` | `evidence.issuers[].issuer` (with its `cose_keys_url` and `audience`), named by each source's `sources[].issuer`. |
+| `infer_unknown_as_free` | `sources[].infer_unknown_as_free` on the `patreon-token` source. |
+| `entitlements_namespace` | `sources[].entitlements_namespace` on the `patreon-token` source. |
+| `agent_status` | `constraints.agent_status`. |
+| `device_class_ceilings` | Split: what a device class is granted goes to a `device-class` source's `sources[].classes`; what it is capped to goes to `constraints.device_class_caps`. |
+| `client_id_claim` | Removed. The subject's account is always `arkavo_account_id`; a PEP's client ID is what the platform derives through `server.auth.policy.client_id_claim`. |
+| `direct_entitlement_actions` | `sources[].actions`. |
+
+#### Composite resolver: agent status
+
+`constraints.agent_status` tells the composite resolver where to ask authnz-rs whether an agent identity (its `did:key`) is eligible and its token current. An agent subject gets no grants while it is not, and whenever `agent_status` is unset. Details, including the requirement that every sealed Arkavo TDF carry a data attribute, when the check runs and its scope: [`service/entityresolution/arkavo/v2/README.md`](../service/entityresolution/arkavo/v2/README.md#agent-status).
 
 | Field | Description | Default | Environment Variable |
 | --- | --- | --- | --- |
-| `agent_status.url` | authnz-rs base URL (`https`; plain `http` only on loopback) | | OPENTDF_SERVICES_ENTITYRESOLUTION_AGENT_STATUS_URL |
-| `agent_status.client_id` | `client_credentials` client listed in authnz-rs `AGENT_STATUS_CLIENT_IDS` | | OPENTDF_SERVICES_ENTITYRESOLUTION_AGENT_STATUS_CLIENT_ID |
-| `agent_status.client_secret` | Secret for `client_id` | | OPENTDF_SERVICES_ENTITYRESOLUTION_AGENT_STATUS_CLIENT_SECRET |
-| `agent_status.timeout` | Per-call timeout, at most `5s` | `3s` | OPENTDF_SERVICES_ENTITYRESOLUTION_AGENT_STATUS_TIMEOUT |
+| `constraints.agent_status.url` | authnz-rs base URL (`https`; plain `http` only on loopback) | | OPENTDF_SERVICES_ENTITYRESOLUTION_CONSTRAINTS_AGENT_STATUS_URL |
+| `constraints.agent_status.client_id` | `client_credentials` client listed in authnz-rs `AGENT_STATUS_CLIENT_IDS` | | OPENTDF_SERVICES_ENTITYRESOLUTION_CONSTRAINTS_AGENT_STATUS_CLIENT_ID |
+| `constraints.agent_status.client_secret` | Secret for `client_id` | | OPENTDF_SERVICES_ENTITYRESOLUTION_CONSTRAINTS_AGENT_STATUS_CLIENT_SECRET |
+| `constraints.agent_status.timeout` | Per-call timeout, at most `5s` | `3s` | OPENTDF_SERVICES_ENTITYRESOLUTION_CONSTRAINTS_AGENT_STATUS_TIMEOUT |
 
 The environment variables only take effect when the same key is present in the YAML file (an empty value is enough).
 

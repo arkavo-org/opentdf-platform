@@ -56,10 +56,11 @@ attributes:
 
   # ---- Patreon-sourced subject attributes ----
   # campaign and campaign-tier carry the per-creator gating. Both have
-  # DYNAMIC values: the Patreon ERS claims-passthrough emits them as direct
-  # entitlements (campaign/value/<id>, campaign-tier/value/<id>_<slug>) and
-  # the PDP resolves them as synthetic values (allow_direct_entitlements),
-  # so onboarding a creator needs no policy change — only these definitions.
+  # DYNAMIC values: the composite ERS's patreon source grants them as direct
+  # entitlements (campaign/value/<id>, campaign-tier/value/<id>_<slug>) from
+  # the token's arkavo_entitlements claim, and the PDP resolves them as
+  # synthetic values (allow_direct_entitlements), so onboarding a creator
+  # needs no policy change — only these definitions.
   # No global tier ladder: tiers are campaign-qualified in the creator's own
   # vocabulary, so a tier at one creator never satisfies another's gate.
   - namespace: patreon.arkavo.com
@@ -79,8 +80,8 @@ attributes:
 
   # campaign-tier gates content on a tier WITHIN a campaign, in the
   # creator's own tier vocabulary: value format <campaign_id>_<tier_slug>
-  # (e.g. 12345678_gold-tier). Values are DYNAMIC — emitted as direct
-  # entitlements by the Patreon ERS claims-passthrough path and resolved as
+  # (e.g. 12345678_gold-tier). Values are DYNAMIC — granted as direct
+  # entitlements by the composite ERS's patreon source and resolved as
   # synthetic values (allow_direct_entitlements), so onboarding a creator
   # needs no policy change; only this definition must exist. Content tagged
   # "this tier and up" carries the explicit value list (anyOf) — the
@@ -92,8 +93,8 @@ attributes:
 
 subject_mappings:
   # Campaign and campaign-tier gating is NOT done with subject mappings —
-  # the Patreon ERS emits those as direct entitlements per active
-  # membership, so there are no per-creator entries here. The mappings below
+  # the composite ERS's patreon source grants those as direct entitlements
+  # from arkavo_entitlements, so there are no per-creator entries here. The mappings below
   # are creator-agnostic vocabularies (status, benefit-derived entitlements).
 
   # status: surface the Patreon membership lifecycle so policies can revoke

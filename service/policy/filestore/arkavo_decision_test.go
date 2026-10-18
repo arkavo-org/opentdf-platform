@@ -12,8 +12,8 @@ import (
 	"github.com/opentdf/platform/service/policy/filestore"
 )
 
-// TestArkavoSnapshot_DirectEntitlementDecisions proves that the arkavo ERS
-// provider's direct-entitlement shape (attribute-value FQNs on
+// TestArkavoSnapshot_DirectEntitlementDecisions proves that the composite
+// ERS's direct-entitlement shape (attribute-value FQNs on
 // EntityRepresentation.DirectEntitlements) and the file-backed arkavo.ai
 // policy snapshot (examples/config/policy.arkavo.yaml) compose correctly
 // through the real v2 PolicyDecisionPoint: no subject mappings are involved,

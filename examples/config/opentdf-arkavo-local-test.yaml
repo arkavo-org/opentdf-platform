@@ -1,4 +1,4 @@
-# Local contract test: arkavo ERS + arkavo policy snapshot, no Postgres, no KAS.
+# Local contract test: composite ERS + arkavo policy snapshot, no Postgres, no KAS.
 #
 #   go run ./service start --config-file ../examples/config/opentdf-arkavo-local-test.yaml
 #
@@ -28,11 +28,47 @@ services:
     policy_file: ./examples/config/policy.arkavo.yaml
     allow_direct_entitlements: true
   entityresolution:
-    mode: arkavo
-    trust_materialized_claims: true
-    trusted_issuer: http://127.0.0.1:8081
-    direct_entitlement_actions: [read]
-    device_class_ceilings:
-      unverified: ["https://arkavo.ai/attr/classification/value/internal"]
-      managed:    ["https://arkavo.ai/attr/classification/value/confidential"]
-      attested:   ["https://arkavo.ai/attr/classification/value/restricted"]
+    # Composite entity resolver (the presence of `sources` selects it).
+    deadline: 300ms
+    evidence:
+      issuers:
+        - issuer: http://127.0.0.1:8081
+          cose_keys_url: http://127.0.0.1:8081/.well-known/cose-keys
+          audience: https://platform.test
+      # Standard base64 with padding, at least 32 bytes decoded. Fill in a
+      # local value (for example `openssl rand -base64 32`); startup fails
+      # while it is empty.
+      seal_key: ""
+      # Local placeholder for the test PEP's client ID (arkavo_account_id).
+      claims_chain_peps: [local-test-pep]
+
+    sources:
+      - id: tdf
+        type: token-claims
+        issuer: http://127.0.0.1:8081
+        claim: arkavo_entitlements
+        grants:
+          - https://arkavo.ai/attr/tdf
+          # The agent delegation vocabulary in policy.arkavo.yaml.
+          - https://arkavo.ai/attr/action
+          - https://arkavo.ai/attr/mesh
+
+      - id: device-class
+        type: device-class
+        issuer: http://127.0.0.1:8081
+        grants:
+          - https://arkavo.ai/attr/classification
+        classes:
+          unverified: ["https://arkavo.ai/attr/classification/value/internal"]
+          managed:    ["https://arkavo.ai/attr/classification/value/confidential"]
+          attested:   ["https://arkavo.ai/attr/classification/value/restricted"]
+
+    constraints:
+      # Uncomment to let agent subjects through when identity says they are
+      # live; unset withholds every agent subject.
+      # agent_status:
+      #   url: http://127.0.0.1:8081
+      #   client_id: <service client>
+      #   client_secret: <service secret>
+      #   timeout: 3s
+      device_class_caps: {}

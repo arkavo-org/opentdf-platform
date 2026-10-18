@@ -1,9 +1,12 @@
-# Local integration test: Patreon ERS + policy snapshot, no Postgres, no IdP.
+# Local integration test: composite ERS + Patreon policy snapshot, no Postgres.
 #
 #   go run ./service start --config-file ../examples/config/opentdf-patreon-local-test.yaml
 #
-# Pairs with integration-tests/mock_patreon.py on :9876. Auth is disabled —
-# this configuration is for contract testing only, never deployment.
+# Auth is enabled and pinned to a local CWT issuer at http://127.0.0.1:9999,
+# which must serve its COSE keys at /.well-known/cose-keys (for example a
+# local authnz-rs). No Patreon API is called: the issuer's CWTs carry
+# arkavo_patreon and arkavo_entitlements. Set evidence.seal_key below before
+# starting. This configuration is for contract testing only, never deployment.
 mode: core,entityresolution,-policy,-kas
 
 logger:
@@ -29,9 +32,48 @@ services:
     # multi-creator SaaS path.
     allow_direct_entitlements: true
   entityresolution:
-    mode: patreon
-    # Multi-creator passthrough: trust the materialized arkavo_patreon claim
-    # and emit campaign-qualified direct entitlements. No Patreon creds needed.
-    trust_materialized_claims: true
-    trusted_issuer: http://127.0.0.1:9999
-    infer_unknown_as_free: true
+    # Multi-creator passthrough through the composite resolver: it verifies the
+    # CWT from the local issuer and reads its arkavo_patreon and
+    # arkavo_entitlements claims. No Patreon creds needed. The presence of
+    # `sources` selects it (setting `mode` as well is a startup error); each
+    # source owns the attribute definitions it is listed for.
+    deadline: 300ms
+    evidence:
+      issuers:
+        - issuer: http://127.0.0.1:9999
+          cose_keys_url: http://127.0.0.1:9999/.well-known/cose-keys
+          audience: http://localhost:8080
+      # HMAC key sealing arkavo_evidence between the two ERS calls: standard
+      # base64 with padding, at least 32 bytes decoded. Fill in a local value
+      # (for example `openssl rand -base64 32`); startup fails while it is empty.
+      seal_key: ""
+      # Client IDs of the PEPs whose unsealed claims chains are accepted: a
+      # local placeholder for the test PEP's azp (client_id_claim above).
+      claims_chain_peps: [local-test-pep]
+
+    sources:
+      - id: patreon
+        type: patreon-token
+        issuer: http://127.0.0.1:9999
+        # Grants come from the arkavo_entitlements claim; arkavo_patreon feeds
+        # only the .patreon properties.
+        grants:
+          - https://patreon.arkavo.com/attr/campaign
+          - https://patreon.arkavo.com/attr/campaign-tier
+        properties_key: patreon                     # keeps .patreon.* subject mappings
+        pep_assertable: true
+        # Non-Patreon traffic resolves as a free follower so it still flows
+        # through subject mappings instead of erroring NotFound.
+        infer_unknown_as_free: true
+
+      - id: identity-core
+        type: token-claims
+        issuer: http://127.0.0.1:9999
+        claim: arkavo_entitlements
+        grants:
+          - https://patreon.arkavo.com/attr/arkavo-creator   # the publish entitlement
+        pep_assertable: false
+
+    constraints:
+      # agent_status is unset, so every agent subject is withheld.
+      device_class_caps: {}
