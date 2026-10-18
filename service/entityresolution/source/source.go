@@ -100,7 +100,7 @@ func ParseFQN(s string) (FQN, bool) {
 }
 
 // ParseDefinition parses https://<ns>/attr/<def>.
-func ParseDefinition(s string) (namespace, definition string, ok bool) {
+func ParseDefinition(s string) (string, string, bool) {
 	parts, ok := splitFQN(s)
 	if !ok || len(parts) != 3 {
 		return "", "", false

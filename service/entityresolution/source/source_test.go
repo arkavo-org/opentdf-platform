@@ -57,8 +57,8 @@ func TestParseDefinition(t *testing.T) {
 		"https://patreon.arkavo.com/attrs/campaign",
 		"",
 	} {
-		_, _, ok := ParseDefinition(in)
-		assert.False(t, ok, in)
+		_, _, valid := ParseDefinition(in)
+		assert.False(t, valid, in)
 	}
 }
 
