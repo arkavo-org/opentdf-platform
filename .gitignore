@@ -91,3 +91,8 @@ otdfctl/*.tdf
 # Ignore go.cache
 otdfctl/.gocache
 # =========================
+
+# Local secrets: never commit. Holds OPENROUTER_API_KEY for live Jev tests.
+.env
+.env.*
+!.env.example

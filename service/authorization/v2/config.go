@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log/slog"
 	"time"
+
+	"github.com/opentdf/platform/service/internal/access/v2/obligations/jevtrigger"
 )
 
 // algorithmES256 is the only COSE signing algorithm the CWT verifier supports
@@ -42,6 +44,12 @@ type Config struct {
 
 	// enforce strict namespaced entitlement evaluation behavior in access decisioning
 	EnforceNamespacedEntitlements bool `mapstructure:"enforce_namespaced_entitlements" json:"enforce_namespaced_entitlements" default:"false"`
+
+	// Jev optionally consults a TypeSafe Jev decision model for obligations
+	// that policy alone did not trigger. Disabled by default, and shadow-mode
+	// by default once enabled. It may only add obligations; it can never grant
+	// access that policy denies.
+	Jev jevtrigger.Config `mapstructure:"jev" json:"jev"`
 }
 
 // RARConfig controls the RFC 9396 access-token issuance endpoint.
@@ -101,6 +109,10 @@ func (c *Config) Validate() error {
 		}
 	}
 
+	if err := c.Jev.Client.Validate(); err != nil {
+		return err
+	}
+
 	return validateCWTVerifier(&c.RAR.CWTVerifier)
 }
 
@@ -158,6 +170,7 @@ func (c *Config) LogValue() slog.Value {
 				),
 			),
 		),
+		slog.Any("jev", c.Jev.Client.LogValue()),
 		slog.Bool("allow_direct_entitlements", c.AllowDirectEntitlements),
 		slog.Bool("enforce_namespaced_entitlements", c.EnforceNamespacedEntitlements),
 	)
