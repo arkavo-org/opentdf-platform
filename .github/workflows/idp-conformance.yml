@@ -1,0 +1,37 @@
+# Runs the black-box IdP conformance suite (arkavo-org/opentdf-tests) on PRs
+# that touch the platform's auth surface: token verification and JWKS
+# handling, DPoP, entity resolution, KAS rewrap, well-known configuration,
+# and the SDK auth client. The suite itself is provider-agnostic; this caller
+# runs the always-available keycloak tier against the PR's platform code.
+# External-provider tiers (auth0, okta, ...) run nightly in the tests repo.
+name: IdP Conformance
+
+on:
+  pull_request:
+    paths:
+      - "service/internal/auth/**"
+      - "service/pkg/auth/**"
+      - "service/entityresolution/**"
+      - "service/kas/**"
+      - "service/wellknownconfiguration/**"
+      - "sdk/auth/**"
+      - "protocol/go/**"
+      - ".github/workflows/idp-conformance.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  idp-conformance:
+    name: IdP conformance (keycloak tier)
+    uses: arkavo-org/opentdf-tests/.github/workflows/idp-conformance.yml@main
+    with:
+      providers: keycloak
+      # Exercise the PR's platform code: the reusable workflow checks the
+      # platform out at this ref and runs the suite against it.
+      platform-ref: ${{ github.event_name == 'pull_request' && format('refs/pull/{0}/head', github.event.pull_request.number) || github.ref_name }}
