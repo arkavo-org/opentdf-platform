@@ -142,7 +142,7 @@ YAML decoding is lenient, so a binary without this change silently ignores `devi
 1. Deploy the platform binary.
 2. Deploy authnz-rs minting `app_id_hash` and `app_env`.
 3. Deploy arks forwarding the device token.
-4. Add `device_rules` to the policy file.
+4. Add `device_rules` to the policy file. `policy.patreon.yaml` doesn't declare `patreon.arkavo.com/attr/arkavo-creator` today (only the ERS config's source grants name it), so the publish rule fails load validation until the attribute and its `publish` value are declared in the same change.
 5. tdf-iroh-s3 sends the device token. Until then its devices read as `unverified` and its direct claims route has none, so step 4 must not add the publish requirement before steps 2 and 5 ship, or publishing is denied.
 
 Deploying the binary alone changes these things, before any rule is written:
