@@ -19,6 +19,7 @@ import (
 	"github.com/opentdf/platform/service/entityresolution/source"
 	"github.com/opentdf/platform/service/internal/agentstatus"
 	"github.com/opentdf/platform/service/internal/auth"
+	"github.com/opentdf/platform/service/internal/entityconstraint"
 	"github.com/opentdf/platform/service/logger"
 	ctxAuth "github.com/opentdf/platform/service/pkg/auth"
 	"go.opentelemetry.io/otel/trace"
@@ -174,17 +175,19 @@ func (s *Service) ResolveEntities(
 		if id == "" {
 			id = ent.EntityIDPrefix + strconv.Itoa(i)
 		}
-		ev, err := s.resolveEntity(ctx, id, e, q)
+		ev, device, err := s.resolveEntity(ctx, id, e, q)
 		if err != nil {
-			s.logger.WarnContext(ctx, "composite: cannot read claims entity",
+			s.logger.WarnContext(
+				ctx, "composite: cannot read claims entity",
 				slog.String("entity_id", id),
 				slog.Any("error", err),
 			)
 			return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("composite: unpack claims: %w", err))
 		}
-		rep, err := representation(id, ev)
+		rep, err := s.representation(id, ev, device)
 		if err != nil {
-			s.logger.ErrorContext(ctx, "composite: cannot build entity representation",
+			s.logger.ErrorContext(
+				ctx, "composite: cannot build entity representation",
 				slog.String("entity_id", id),
 				slog.Any("error", err),
 			)
@@ -278,30 +281,38 @@ func (s *Service) verifyToken(ctx context.Context, raw string) (map[string]any, 
 }
 
 // resolveEntity resolves one entity of a ResolveEntities request (see
-// there); id names it in logs. Only claims that do not unpack are an error.
-func (s *Service) resolveEntity(ctx context.Context, id string, e *entity.Entity, q source.Query) (evidence, error) {
+// there); id names it in logs. It also returns the class of a device, judged
+// as resolveSubject judges the kind, or "" for any other entity: only a PEP's
+// claims can make an entity a device. Only claims that do not unpack are an
+// error.
+func (s *Service) resolveEntity(ctx context.Context, id string, e *entity.Entity, q source.Query) (evidence, string, error) {
 	anonymous := source.Subject{Trust: source.TrustNone}
 	if _, isClaims := e.GetEntityType().(*entity.Entity_Claims); !isClaims {
-		return s.resolveSubject(ctx, anonymous, q, s.now()), nil
+		return s.resolveSubject(ctx, anonymous, q, s.now()), "", nil
 	}
 	var st structpb.Struct
 	if err := e.GetClaims().UnmarshalTo(&st); err != nil {
-		return evidence{}, err
+		return evidence{}, "", err
 	}
 	claims := st.AsMap()
 	if sealed, carried := claims[evidenceClaim]; carried {
-		return s.openSealed(ctx, id, sealed), nil
+		return s.openSealed(ctx, id, sealed), "", nil
 	}
 	clientID, allowlisted := callerClientID(ctx, s.peps)
 	if !allowlisted {
-		s.logger.WarnContext(ctx, "composite: unsealed claims chain from a caller not on claims_chain_peps",
+		s.logger.WarnContext(
+			ctx, "composite: unsealed claims chain from a caller not on claims_chain_peps",
 			slog.String("entity_id", id),
 			slog.String("client_id", clientID),
 		)
-		return s.resolveSubject(ctx, anonymous, q, s.now()), nil
+		return s.resolveSubject(ctx, anonymous, q, s.now()), "", nil
+	}
+	var class string
+	if source.KindOf(claims) == source.KindDevice {
+		class = deviceClass(claims)
 	}
 	accountID, _ := claims[claimAccountID].(string)
-	return s.resolveSubject(ctx, source.Subject{Claims: claims, AccountID: accountID, Trust: source.TrustPEP}, q, s.now()), nil
+	return s.resolveSubject(ctx, source.Subject{Claims: claims, AccountID: accountID, Trust: source.TrustPEP}, q, s.now()), class, nil
 }
 
 // openSealed opens the arkavo_evidence of the claims entity id. Whatever does
@@ -359,7 +370,8 @@ func (s *Service) resolveSubject(ctx context.Context, subj source.Subject, q sou
 		run := runs[i]
 		ev.Outcomes[cs.id] = run.outcome
 		if run.err != nil {
-			s.logger.WarnContext(ctx, "composite: source unavailable; it contributes nothing",
+			s.logger.WarnContext(
+				ctx, "composite: source unavailable; it contributes nothing",
 				slog.String("source_id", cs.id),
 				slog.Any("error", run.err),
 			)
@@ -392,7 +404,8 @@ func (s *Service) mergeGrants(ctx context.Context, merged map[string]*sealedGran
 			g.Actions = cs.cap.actions
 		}
 		if !cs.cap.allows(g) {
-			s.logger.WarnContext(ctx, "composite: dropped a grant outside its capability",
+			s.logger.WarnContext(
+				ctx, "composite: dropped a grant outside its capability",
 				slog.String("source_id", cs.id),
 				slog.String("fqn", g.FQN),
 				slog.Any("actions", g.Actions),
@@ -405,7 +418,8 @@ func (s *Service) mergeGrants(ctx context.Context, merged map[string]*sealedGran
 		if !g.ExpiresAt.IsZero() {
 			exp = g.ExpiresAt.Unix()
 			if exp <= now.Unix() {
-				s.logger.DebugContext(ctx, "composite: dropped an expired grant",
+				s.logger.DebugContext(
+					ctx, "composite: dropped an expired grant",
 					slog.String("source_id", cs.id),
 					slog.String("fqn", key),
 					slog.Time("expires_at", g.ExpiresAt),
@@ -499,8 +513,11 @@ func callerClientID(ctx context.Context, peps map[string]bool) (string, bool) {
 
 // representation is the EntityRepresentation of ev: its grants as direct
 // entitlements and its properties, each under its properties key, in one
-// struct, omitted when there are none. Nothing else of the entity counts.
-func representation(id string, ev evidence) (*entityresolutionV2.EntityRepresentation, error) {
+// struct, omitted when there are none. A device, one whose class is set,
+// also carries under entityconstraint.PropKey the cap its class puts on the
+// subjects of its chain, so the PDP can narrow them when the device comes
+// with a person. Nothing else of the entity counts.
+func (s *Service) representation(id string, ev evidence, class string) (*entityresolutionV2.EntityRepresentation, error) {
 	rep := &entityresolutionV2.EntityRepresentation{OriginalId: id}
 	for _, g := range ev.Grants {
 		rep.DirectEntitlements = append(rep.DirectEntitlements, &entityresolutionV2.DirectEntitlement{
@@ -508,12 +525,15 @@ func representation(id string, ev evidence) (*entityresolutionV2.EntityRepresent
 			Actions:           slices.Clone(g.Actions),
 		})
 	}
-	if len(ev.Props) == 0 {
-		return rep, nil
-	}
-	props := make(map[string]any, len(ev.Props))
+	props := make(map[string]any, len(ev.Props)+1)
 	for key, p := range ev.Props {
 		props[key] = p
+	}
+	if class != "" {
+		props[entityconstraint.PropKey] = s.deviceConstraint(class)
+	}
+	if len(props) == 0 {
+		return rep, nil
 	}
 	st, err := structpb.NewStruct(props)
 	if err != nil {

@@ -17,6 +17,7 @@ import (
 	patreon "github.com/opentdf/platform/service/entityresolution/patreon/v2"
 	"github.com/opentdf/platform/service/entityresolution/source"
 	"github.com/opentdf/platform/service/internal/agentstatus"
+	"github.com/opentdf/platform/service/internal/entityconstraint"
 	"github.com/opentdf/platform/service/pkg/config"
 )
 
@@ -267,6 +268,9 @@ func validateSources(sources []SourceConfig, issuers map[string]bool) error {
 		// Properties are not bounded by a capability, so a second source under
 		// a key would replace the first's and drive its subject mappings.
 		if key := sc.PropertiesKey; key != "" {
+			if key == entityconstraint.PropKey {
+				return fmt.Errorf("source %q: properties_key %q is reserved for device constraints", sc.ID, key)
+			}
 			if other, taken := propsOwners[key]; taken {
 				return fmt.Errorf("properties_key %q is set by sources %q and %q: one source owns a properties key", key, other, sc.ID)
 			}

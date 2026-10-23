@@ -68,4 +68,11 @@ func TestKindOf(t *testing.T) {
 	assert.Equal(t, KindDevice, KindOf(map[string]any{"arkavo_npe": map[string]any{"type": "device"}}))
 	assert.Equal(t, KindAgent, KindOf(map[string]any{"arkavo_npe": map[string]any{"type": "agent"}}))
 	assert.Equal(t, KindAgent, KindOf(map[string]any{"arkavo_swarm": "s"}))
+	assert.Equal(t, KindDevice, KindOf(map[string]any{"aud": "arkavo:devicecheck"}))
+	assert.Equal(t, KindDevice, KindOf(map[string]any{"aud": []any{"arkavo", "arkavo:devicecheck"}}))
+	assert.Equal(t, KindDevice, KindOf(map[string]any{"aud": []string{"arkavo:devicecheck"}}))
+	assert.Equal(t, KindPerson, KindOf(map[string]any{"aud": []any{"arkavo", "https://platform.arkavo.net"}}))
+	assert.Equal(t, KindPerson, KindOf(map[string]any{"aud": "arkavo"}))
+	// An agent marker wins over a DeviceCheck audience.
+	assert.Equal(t, KindAgent, KindOf(map[string]any{"aud": "arkavo:devicecheck", "arkavo_swarm": "s"}))
 }

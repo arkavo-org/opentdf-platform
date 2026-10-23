@@ -133,8 +133,12 @@ func (f FQN) String() string {
 	return f.DefinitionFQN() + "/" + valueSegment + "/" + f.Value
 }
 
+// DeviceCheckAudience is the audience authnz-rs mints on DeviceCheck CWTs.
+const DeviceCheckAudience = "arkavo:devicecheck"
+
 // KindOf classifies claims: an agent marker wins, then an arkavo_npe of type
-// device, and everything else is a person.
+// device or an aud naming DeviceCheckAudience, and everything else is a
+// person.
 func KindOf(claims map[string]any) Kind {
 	if agentstatus.HasAgentMarker(claims) {
 		return KindAgent
@@ -144,5 +148,29 @@ func KindOf(claims map[string]any) Kind {
 			return KindDevice
 		}
 	}
+	if hasAudience(claims["aud"], DeviceCheckAudience) {
+		return KindDevice
+	}
 	return KindPerson
+}
+
+// hasAudience reports whether aud, a string or a list of them, names want.
+func hasAudience(aud any, want string) bool {
+	switch v := aud.(type) {
+	case string:
+		return v == want
+	case []any:
+		for _, a := range v {
+			if s, _ := a.(string); s == want {
+				return true
+			}
+		}
+	case []string:
+		for _, s := range v {
+			if s == want {
+				return true
+			}
+		}
+	}
+	return false
 }

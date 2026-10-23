@@ -130,6 +130,9 @@ func TestValidate(t *testing.T) {
 			c.Sources[1].PropertiesKey = "shared"
 			c.Sources[2].PropertiesKey = "shared"
 		}, []string{"properties_key", `"shared"`, "identity-core", "device-class"}},
+		{"properties_key reserved for device constraints", func(c *Config) {
+			c.Sources[1].PropertiesKey = "arkavo_constraint"
+		}, []string{"properties_key", `"arkavo_constraint"`, "reserved"}},
 		{"patreon-token missing campaign-tier", func(c *Config) { c.Sources[0].Grants = []string{campaignDef} }, []string{"patreon", campaignDef, tierDef}},
 		{"patreon-token with an extra definition", func(c *Config) {
 			c.Sources[0].Grants = []string{campaignDef, tierDef, "https://patreon.arkavo.com/attr/extra"}

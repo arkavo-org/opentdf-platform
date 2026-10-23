@@ -14,6 +14,7 @@ import (
 	entityresolutionV2 "github.com/opentdf/platform/protocol/go/entityresolution/v2"
 	"github.com/opentdf/platform/protocol/go/policy"
 	attrs "github.com/opentdf/platform/protocol/go/policy/attributes"
+	"github.com/opentdf/platform/service/internal/entityconstraint"
 	"github.com/opentdf/platform/service/internal/subjectmappingbuiltin"
 	"github.com/opentdf/platform/service/logger"
 )
@@ -120,7 +121,8 @@ func NewPolicyDecisionPoint(
 
 	for _, sm := range allSubjectMappings {
 		if err := validateSubjectMapping(sm); err != nil {
-			l.WarnContext(ctx,
+			l.WarnContext(
+				ctx,
 				"invalid subject mapping - skipping",
 				slog.Any("subject_mapping", sm),
 				slog.Any("error", err),
@@ -131,7 +133,8 @@ func NewPolicyDecisionPoint(
 		if namespacedPolicy {
 			ns := sm.GetNamespace()
 			if ns == nil || (ns.GetId() == "" && ns.GetFqn() == "") {
-				l.TraceContext(ctx,
+				l.TraceContext(
+					ctx,
 					"unnamespaced subject mapping in strict namespaced-policy mode - skipping",
 					slog.String("reason", "subject_mapping_namespace_missing"),
 					slog.String("subject_mapping_id", sm.GetId()),
@@ -230,103 +233,7 @@ func (p *PolicyDecisionPoint) GetDecision(
 	action *policy.Action,
 	resources []*authz.Resource,
 ) (*Decision, map[string][]*policy.Action, error) {
-	l := p.logger.With("entity_id", entityRepresentation.GetOriginalId())
-	l = l.With("action", action.GetName())
-	l.DebugContext(ctx, "getting decision", slog.Int("resources_count", len(resources)))
-
-	if err := validateGetDecision(entityRepresentation, action, resources); err != nil {
-		return nil, nil, err
-	}
-
-	// Filter all attributes down to only those that relevant to the entitlement decisioning of these specific resources
-	decisionableAttributes, err := getResourceDecisionableAttributes(
-		ctx,
-		l,
-		p.allRegisteredResourceValuesByFQN,
-		p.allEntitleableAttributesByValueFQN,
-		p.allAttributesByDefinitionFQN, /* action, */
-		resources,
-		p.allowDirectEntitlements,
-	)
-	if err != nil {
-		if !errors.Is(err, ErrFQNNotFound) {
-			return nil, nil, fmt.Errorf("error getting decisionable attributes: %w", err)
-		}
-		// Not an error: deny access to individual resources, not the entire request
-		l.WarnContext(ctx, "encountered unknown FQN on resource", slog.Any("error", err))
-	}
-	l.DebugContext(ctx, "filtered to only entitlements relevant to decisioning", slog.Int("decisionable_attribute_values_count", len(decisionableAttributes)))
-
-	// Resolve them to their entitled FQNs and the actions available on each
-	entitledFQNsToActions, err := subjectmappingbuiltin.EvaluateSubjectMappingsWithActions(decisionableAttributes, entityRepresentation, l.Logger)
-	if err != nil {
-		return nil, nil, fmt.Errorf("error evaluating subject mappings for entitlement: %w", err)
-	}
-	l.DebugContext(ctx, "evaluated subject mappings", slog.Any("entitled_value_fqns_to_actions", entitledFQNsToActions))
-
-	if p.allowDirectEntitlements {
-		p.logger.DebugContext(ctx, "setting direct entitlements on entity representation",
-			slog.Any("entity_id", entityRepresentation.GetOriginalId()),
-		)
-
-		for _, directEntitlement := range entityRepresentation.GetDirectEntitlements() {
-			fqn := directEntitlement.GetAttributeValueFqn()
-			actionNames := directEntitlement.GetActions()
-			// In strict namespaced-policy mode, direct-entitlement actions must carry
-			// the same namespace context as the entitled attribute value so they can
-			// satisfy namespace-aware action matching during rule evaluation.
-			var actionNamespace *policy.Namespace
-			if attrAndValue, ok := decisionableAttributes[fqn]; ok {
-				actionNamespace = attrAndValue.GetAttribute().GetNamespace()
-			} else if fallbackAttrAndValue, ok2 := p.allEntitleableAttributesByValueFQN[fqn]; ok2 {
-				// Fallback for direct entitlements that may not be present in the
-				// narrowed decisionable set for this specific request.
-				actionNamespace = fallbackAttrAndValue.GetAttribute().GetNamespace()
-			}
-
-			// Merge direct-entitlement actions with subject-mapping actions for the
-			// same value FQN instead of replacing them.
-			actions, ok := entitledFQNsToActions[fqn]
-			if !ok {
-				actions = make([]*policy.Action, 0, len(actionNames))
-			}
-			for _, name := range actionNames {
-				actions = append(actions, &policy.Action{
-					Name:      name,
-					Namespace: actionNamespace,
-				})
-			}
-
-			entitledFQNsToActions[fqn] = actions
-		}
-	}
-
-	decision := &Decision{
-		AllPermitted: true,
-		Results:      make([]ResourceDecision, len(resources)),
-	}
-
-	for idx, resource := range resources {
-		resourceDecision, err := getResourceDecision(ctx, l, decisionableAttributes, p.allRegisteredResourceValuesByFQN, entitledFQNsToActions, action, resource, p.namespacedPolicy)
-		if err != nil || resourceDecision == nil {
-			return nil, nil, fmt.Errorf("error evaluating a decision on resource [%v]: %w", resource, err)
-		}
-
-		if !resourceDecision.Entitled {
-			decision.AllPermitted = false
-		}
-
-		l.DebugContext(
-			ctx,
-			"resourceDecision result",
-			slog.Bool("entitled", resourceDecision.Entitled),
-			slog.String("resource_id", resourceDecision.ResourceID),
-			slog.Int("data_rule_results_count", len(resourceDecision.DataRuleResults)),
-		)
-		decision.Results[idx] = *resourceDecision
-	}
-
-	return decision, entitledFQNsToActions, nil
+	return p.getDecision(ctx, entityRepresentation, action, resources, nil)
 }
 
 func (p *PolicyDecisionPoint) GetDecisionRegisteredResource(
@@ -375,7 +282,8 @@ func (p *PolicyDecisionPoint) GetDecisionRegisteredResource(
 		}
 
 		if !isRequestedActionMatch(ctx, l, action, requiredNamespaceFQN, aavAction, p.namespacedPolicy) {
-			l.DebugContext(ctx, "skipping action not matching Decision Request action",
+			l.DebugContext(
+				ctx, "skipping action not matching Decision Request action",
 				slog.String("action_name", aavAction.GetName()),
 				slog.String("attribute_value_fqn", attrValFQN),
 				slog.String("required_namespace", requiredNamespaceFQN),
@@ -560,4 +468,127 @@ func (p *PolicyDecisionPoint) GetEntitlementsRegisteredResource(
 	)
 
 	return result, nil
+}
+
+// getDecision is GetDecision with the entity's entitlements, from subject
+// mappings and direct entitlements alike, narrowed to what every constraint
+// lets it keep before any resource is evaluated.
+func (p *PolicyDecisionPoint) getDecision(
+	ctx context.Context,
+	entityRepresentation *entityresolutionV2.EntityRepresentation,
+	action *policy.Action,
+	resources []*authz.Resource,
+	constraints []entityconstraint.Constraint,
+) (*Decision, map[string][]*policy.Action, error) {
+	l := p.logger.With("entity_id", entityRepresentation.GetOriginalId())
+	l = l.With("action", action.GetName())
+	l.DebugContext(ctx, "getting decision", slog.Int("resources_count", len(resources)))
+
+	if err := validateGetDecision(entityRepresentation, action, resources); err != nil {
+		return nil, nil, err
+	}
+
+	// Filter all attributes down to only those that relevant to the entitlement decisioning of these specific resources
+	decisionableAttributes, err := getResourceDecisionableAttributes(
+		ctx,
+		l,
+		p.allRegisteredResourceValuesByFQN,
+		p.allEntitleableAttributesByValueFQN,
+		p.allAttributesByDefinitionFQN, /* action, */
+		resources,
+		p.allowDirectEntitlements,
+	)
+	if err != nil {
+		if !errors.Is(err, ErrFQNNotFound) {
+			return nil, nil, fmt.Errorf("error getting decisionable attributes: %w", err)
+		}
+		// Not an error: deny access to individual resources, not the entire request
+		l.WarnContext(ctx, "encountered unknown FQN on resource", slog.Any("error", err))
+	}
+	l.DebugContext(ctx, "filtered to only entitlements relevant to decisioning", slog.Int("decisionable_attribute_values_count", len(decisionableAttributes)))
+
+	// Resolve them to their entitled FQNs and the actions available on each
+	entitledFQNsToActions, err := subjectmappingbuiltin.EvaluateSubjectMappingsWithActions(decisionableAttributes, entityRepresentation, l.Logger)
+	if err != nil {
+		return nil, nil, fmt.Errorf("error evaluating subject mappings for entitlement: %w", err)
+	}
+	l.DebugContext(ctx, "evaluated subject mappings", slog.Any("entitled_value_fqns_to_actions", entitledFQNsToActions))
+
+	if p.allowDirectEntitlements {
+		p.logger.DebugContext(
+			ctx, "setting direct entitlements on entity representation",
+			slog.Any("entity_id", entityRepresentation.GetOriginalId()),
+		)
+
+		for _, directEntitlement := range entityRepresentation.GetDirectEntitlements() {
+			fqn := directEntitlement.GetAttributeValueFqn()
+			actionNames := directEntitlement.GetActions()
+			// In strict namespaced-policy mode, direct-entitlement actions must carry
+			// the same namespace context as the entitled attribute value so they can
+			// satisfy namespace-aware action matching during rule evaluation.
+			var actionNamespace *policy.Namespace
+			if attrAndValue, ok := decisionableAttributes[fqn]; ok {
+				actionNamespace = attrAndValue.GetAttribute().GetNamespace()
+			} else if fallbackAttrAndValue, ok2 := p.allEntitleableAttributesByValueFQN[fqn]; ok2 {
+				// Fallback for direct entitlements that may not be present in the
+				// narrowed decisionable set for this specific request.
+				actionNamespace = fallbackAttrAndValue.GetAttribute().GetNamespace()
+			}
+
+			// Merge direct-entitlement actions with subject-mapping actions for the
+			// same value FQN instead of replacing them.
+			actions, ok := entitledFQNsToActions[fqn]
+			if !ok {
+				actions = make([]*policy.Action, 0, len(actionNames))
+			}
+			for _, name := range actionNames {
+				actions = append(actions, &policy.Action{
+					Name:      name,
+					Namespace: actionNamespace,
+				})
+			}
+
+			entitledFQNsToActions[fqn] = actions
+		}
+	}
+
+	if len(constraints) > 0 {
+		for fqn := range entitledFQNsToActions {
+			if !entityconstraint.Keeps(constraints, fqn) {
+				delete(entitledFQNsToActions, fqn)
+			}
+		}
+		l.DebugContext(
+			ctx, "narrowed entitlements to the chain's constraints",
+			slog.Int("constraints_count", len(constraints)),
+			slog.Any("entitled_value_fqns_to_actions", entitledFQNsToActions),
+		)
+	}
+
+	decision := &Decision{
+		AllPermitted: true,
+		Results:      make([]ResourceDecision, len(resources)),
+	}
+
+	for idx, resource := range resources {
+		resourceDecision, err := getResourceDecision(ctx, l, decisionableAttributes, p.allRegisteredResourceValuesByFQN, entitledFQNsToActions, action, resource, p.namespacedPolicy)
+		if err != nil || resourceDecision == nil {
+			return nil, nil, fmt.Errorf("error evaluating a decision on resource [%v]: %w", resource, err)
+		}
+
+		if !resourceDecision.Entitled {
+			decision.AllPermitted = false
+		}
+
+		l.DebugContext(
+			ctx,
+			"resourceDecision result",
+			slog.Bool("entitled", resourceDecision.Entitled),
+			slog.String("resource_id", resourceDecision.ResourceID),
+			slog.Int("data_rule_results_count", len(resourceDecision.DataRuleResults)),
+		)
+		decision.Results[idx] = *resourceDecision
+	}
+
+	return decision, entitledFQNsToActions, nil
 }

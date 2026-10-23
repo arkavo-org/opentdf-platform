@@ -588,7 +588,7 @@ On the token route (the KAS rewrap and licence decisions) it verifies each token
 | `sources[].entitlements_namespace` | `patreon-token` only: namespace of the `campaign` and `campaign-tier` definitions. | `patreon.arkavo.com` |
 | `sources[].infer_unknown_as_free` | `patreon-token` only: give a subject with no `arkavo_patreon` claim the free `.patreon` view. | `false` |
 | `constraints.agent_status` | Where to ask authnz-rs whether an agent is eligible; see [agent status](#composite-resolver-agent-status). Unset withholds every agent subject. | |
-| `constraints.device_class_caps` | `arkavo_npe.class` to the value FQNs a device of that class is capped to. A cap only removes grants; a class missing from the map has no cap. | `{}` |
+| `constraints.device_class_caps` | `arkavo_npe.class` to the value FQNs a device of that class is capped to. A cap only removes grants; a class missing from the map has no cap. It caps a device subject's own grants, and a device that comes with a person in a chain caps the person: see [devices in a chain](#composite-resolver-devices-in-a-chain). | `{}` |
 
 **Supplying `seal_key`.** With the default config loader, `OPENTDF_SERVICES_ENTITYRESOLUTION_EVIDENCE_SEAL_KEY` sets `evidence.seal_key`, but only when the key is present in the YAML file (an empty value is enough: `seal_key: ""`), as for every environment variable in this section. Otherwise set it in the config file or a mounted config. Keep it secret: `ResolveEntities` honours whatever a valid seal holds, so anyone with the key can forge evidence that grants any entitlement.
 
@@ -632,6 +632,16 @@ Complete configs: [`examples/config/opentdf-patreon-prod.yaml`](../examples/conf
 | `device_class_ceilings` | Split: what a device class is granted goes to a `device-class` source's `sources[].classes`; what it is capped to goes to `constraints.device_class_caps`. |
 | `client_id_claim` | Removed. The subject's account is always `arkavo_account_id`; a PEP's client ID is what the platform derives through `server.auth.policy.client_id_claim`. |
 | `direct_entitlement_actions` | `sources[].actions`. |
+
+#### Composite resolver: devices in a chain
+
+A PEP may send a person's chain with each DeviceCheck-attested device as a `CATEGORY_ENVIRONMENT` entity (the AuthZEN CWT profile; arks builds this chain). Such a device is never decided as a subject, since it never holds the person's entitlements. Instead its class narrows them:
+
+- **What is a device:** an entity whose claims, from a PEP on `claims_chain_peps`, carry `arkavo_npe.type: device` or an `aud` naming `arkavo:devicecheck`. Its class is `arkavo_npe.class`, or `unverified` when absent. Claims from any other caller are discarded, so they cannot make a device, and that entity is skipped.
+- **What it does:** the person's entitlements, from subject mappings and direct grants alike, are cut to `device_class_caps[class]` before any resource is evaluated. Several devices intersect their caps. A class missing from the map narrows nothing, so `device_class_caps: {}` decides as before.
+- **Caps match exactly.** A cap listing a hierarchy value does not cover the values below it.
+- **Other environment entities** (the node's `region`) are resolved too but still skipped. `GetDecision` and `GetEntitlements` resolve a chain the same way; `GetEntitlements` reports the subjects only.
+- **Reserved:** the resolver hands the cap to the PDP under the representation property `arkavo_constraint`, so no source may use it as its `properties_key`.
 
 #### Composite resolver: agent status
 

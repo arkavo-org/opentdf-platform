@@ -15,6 +15,7 @@ import (
 	"github.com/opentdf/platform/protocol/go/entity"
 	entityresolutionV2 "github.com/opentdf/platform/protocol/go/entityresolution/v2"
 	"github.com/opentdf/platform/service/entityresolution/source"
+	"github.com/opentdf/platform/service/internal/entityconstraint"
 	ctxAuth "github.com/opentdf/platform/service/pkg/auth"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -255,7 +256,8 @@ func TestResolve_PEPChainWithoutIssGrantsNothing(t *testing.T) {
 func TestResolve_NonClaimsEntityGetsFreeView(t *testing.T) {
 	svc := newTestService(t, pepConfig(), nil, []configuredSource{pepPatreonSource(), identityCoreSource()}, nil)
 
-	reps := resolveAs(callerContext(t.Context(), testPEP), t, svc,
+	reps := resolveAs(
+		callerContext(t.Context(), testPEP), t, svc,
 		&entity.Entity{EntityType: &entity.Entity_UserName{UserName: "creator"}, EphemeralId: "user", Category: entity.Entity_CATEGORY_SUBJECT},
 		&entity.Entity{EntityType: &entity.Entity_UserName{UserName: "creator"}, Category: entity.Entity_CATEGORY_SUBJECT},
 	)
@@ -333,4 +335,46 @@ func TestResolveSubject_KindComesFromClaims(t *testing.T) {
 	assert.Equal(t, source.OutcomeComplete, ev.Outcomes["device-class"], "the device-class source serves it as a device")
 	assert.Equal(t, []string{classInternal}, grantFQNs(ev),
 		"the managed cap keeps internal and removes confidential and decrypt")
+}
+
+// A device in a PEP's chain carries its class's cap for the PDP: capped to
+// the class's FQNs, uncapped when its class has no entry, and never a marker
+// on a person or on a device whose claims were discarded.
+func TestResolve_DeviceCarriesItsConstraint(t *testing.T) {
+	cfg := pepConfig()
+	cfg.Constraints.DeviceClassCaps = map[string][]string{"managed": {creatorCampaign}}
+	svc := newTestService(t, cfg, nil, []configuredSource{pepPatreonSource(), identityCoreSource()}, nil)
+	device := func(class string) map[string]any {
+		c := map[string]any{"iss": testIssuer, "sub": "d", "aud": "arkavo:devicecheck", "kid": "k"}
+		if class != "" {
+			c["arkavo_npe"] = map[string]any{"type": "device", "class": class}
+		}
+		return c
+	}
+	constraintOf := func(t *testing.T, ctx context.Context, claims map[string]any) (entityconstraint.Constraint, bool) {
+		t.Helper()
+		return entityconstraint.FromRepresentation(resolveAs(ctx, t, svc, claimsEntity(t, "e1", claims))[0])
+	}
+	pep := callerContext(t.Context(), testPEP)
+
+	c, ok := constraintOf(t, pep, device("managed"))
+	require.True(t, ok)
+	assert.Equal(t, entityconstraint.Constraint{
+		Kind: entityconstraint.KindDevice, Class: "managed", Capped: true,
+		Allow: map[string]bool{creatorCampaign: true},
+	}, c)
+
+	c, ok = constraintOf(t, pep, device("attested"))
+	require.True(t, ok)
+	assert.False(t, c.Capped, "a class with no cap entry is not capped")
+
+	c, ok = constraintOf(t, pep, device(""))
+	require.True(t, ok, "the DeviceCheck audience alone makes a device")
+	assert.Equal(t, "unverified", c.Class)
+
+	_, ok = constraintOf(t, pep, catalogCreatorClaims())
+	assert.False(t, ok, "a person carries no constraint")
+
+	_, ok = constraintOf(t, callerContext(t.Context(), "arks-media"), device("managed"))
+	assert.False(t, ok, "discarded claims cannot make a device")
 }

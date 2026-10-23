@@ -196,3 +196,129 @@ func TestAgentGate_ThroughTheV2PDP(t *testing.T) {
 		require.False(t, decide(t, &agentstatus.DenialError{Reason: agentstatus.ReasonUnreachable}))
 	})
 }
+
+// environmentEntity is a claims entity a PEP sends as CATEGORY_ENVIRONMENT:
+// a device NPE or the node's environment.
+func environmentEntity(t *testing.T, id string, claims map[string]any) *entity.Entity {
+	t.Helper()
+	e := claimsEntity(t, id, claims)
+	e.Category = entity.Entity_CATEGORY_ENVIRONMENT
+	return e
+}
+
+// deviceClaims are a DeviceCheck device as arks forwards it: the
+// allowlisted fields, and arkavo_npe when the device has a class. With no
+// class it is still a device, by its audience.
+func deviceClaims(kid, class string) map[string]any {
+	claims := map[string]any{
+		"iss": testIssuer,
+		"sub": "550e8400-e29b-41d4-a716-446655440000",
+		"aud": "arkavo:devicecheck",
+		"kid": kid,
+	}
+	if class != "" {
+		claims["arkavo_npe"] = map[string]any{"type": "device", "class": class}
+	}
+	return claims
+}
+
+// TestChainDevices_ThroughTheV2PDP runs the catalog route with device NPEs
+// in the chain (issue #60). A device comes as CATEGORY_ENVIRONMENT and is
+// never decided as a subject, but its class's cap narrows the person's
+// grants. A class with no cap, and an environment that is no device, change
+// nothing.
+func TestChainDevices_ThroughTheV2PDP(t *testing.T) {
+	cfg := pepConfig()
+	cfg.Constraints.DeviceClassCaps = map[string][]string{
+		"attested":   {creatorCampaign, creatorSupporter},
+		"managed":    {creatorCampaign},
+		"unverified": {},
+	}
+	svc := newTestService(t, cfg, verifiersFor(&fakeVerifier{}),
+		[]configuredSource{pepPatreonSource(), identityCoreSource()}, nil)
+	pdp := pdpFor(t, svc, patreonPolicy)
+	content := []string{creatorCampaign, creatorSupporter}
+	person := func(t *testing.T) *entity.Entity {
+		t.Helper()
+		return claimsEntity(t, "e0", catalogCreatorClaims())
+	}
+	region := func(t *testing.T) *entity.Entity {
+		t.Helper()
+		return environmentEntity(t, "env", map[string]any{"region": "us-east-1"})
+	}
+	decide := func(t *testing.T, entities []*entity.Entity, fqns ...string) bool {
+		t.Helper()
+		return permitted(t, pdp, testPEP, chainIdentifier(entities...), fqns...)
+	}
+
+	t.Run("person alone decides as today", func(t *testing.T) {
+		require.True(t, decide(t, []*entity.Entity{person(t)}, content...))
+	})
+	t.Run("person and environment decide as today", func(t *testing.T) {
+		require.True(t, decide(t, []*entity.Entity{person(t), region(t)}, content...))
+	})
+	t.Run("a device whose cap covers the content", func(t *testing.T) {
+		chain := []*entity.Entity{person(t), environmentEntity(t, "e1", deviceClaims("phone", "attested")), region(t)}
+		require.True(t, decide(t, chain, content...),
+			"the device holds no grants itself, yet it must not deny as a subject would")
+	})
+	t.Run("a capped class loses grants outside the cap", func(t *testing.T) {
+		chain := []*entity.Entity{person(t), environmentEntity(t, "e1", deviceClaims("phone", "managed")), region(t)}
+		require.False(t, decide(t, chain, content...))
+		require.True(t, decide(t, chain, creatorCampaign), "grants within the cap are kept")
+	})
+	t.Run("a class with no cap narrows nothing", func(t *testing.T) {
+		chain := []*entity.Entity{person(t), environmentEntity(t, "e1", deviceClaims("phone", "jailbroken-but-uncapped"))}
+		require.True(t, decide(t, chain, content...))
+	})
+	t.Run("a device with no class is unverified, by its audience", func(t *testing.T) {
+		chain := []*entity.Entity{person(t), environmentEntity(t, "e1", deviceClaims("phone", ""))}
+		require.False(t, decide(t, chain, creatorCampaign), "unverified is capped to nothing")
+	})
+	t.Run("several devices intersect their caps", func(t *testing.T) {
+		chain := []*entity.Entity{
+			person(t),
+			environmentEntity(t, "e1", deviceClaims("phone", "attested")),
+			environmentEntity(t, "e2", deviceClaims("watch", "managed")),
+		}
+		require.False(t, decide(t, chain, content...))
+		require.True(t, decide(t, chain, creatorCampaign))
+	})
+	t.Run("a device from a caller not on claims_chain_peps narrows nothing", func(t *testing.T) {
+		// The person is anonymous too, so compare with the person alone: the
+		// untrusted device is skipped like any environment entity.
+		chain := chainIdentifier(person(t), environmentEntity(t, "e1", deviceClaims("phone", "")))
+		alone := chainIdentifier(person(t))
+		require.Equal(t,
+			permitted(t, pdp, "arks-media", alone, publishValue),
+			permitted(t, pdp, "arks-media", chain, publishValue))
+	})
+	t.Run("a chain of environment entities only is an error", func(t *testing.T) {
+		ctx := callerContext(audit.ContextWithActorID(t.Context(), testPEP), testPEP)
+		_, err := pdp.GetDecision(ctx,
+			chainIdentifier(environmentEntity(t, "e1", deviceClaims("phone", "attested")), region(t)),
+			&policy.Action{Name: "read"},
+			[]*authzV2.Resource{{EphemeralId: "r", Resource: &authzV2.Resource_AttributeValues_{
+				AttributeValues: &authzV2.Resource_AttributeValues{Fqns: content},
+			}}}, nil, nil)
+		require.Error(t, err)
+	})
+	t.Run("GetEntitlements resolves the chain as GetDecision does", func(t *testing.T) {
+		// GetEntitlements reports what subject mappings entitle, not direct
+		// grants: here the creator's .patreon status, which no cap lists.
+		const status = patreonAttrNS + "status/value/former"
+		entitled := func(t *testing.T, entities ...*entity.Entity) map[string]*authzV2.EntityEntitlements_ActionsList {
+			t.Helper()
+			got, err := pdp.GetEntitlements(callerContext(t.Context(), testPEP), chainIdentifier(entities...), false)
+			require.NoError(t, err)
+			require.Len(t, got, 1, "only the person is a subject")
+			require.Equal(t, "e0", got[0].GetEphemeralId())
+			return got[0].GetActionsPerAttributeValueFqn()
+		}
+		require.Contains(t, entitled(t, person(t)), status)
+		require.Contains(t, entitled(t, person(t), region(t)), status)
+		require.Contains(t, entitled(t, person(t), environmentEntity(t, "e1", deviceClaims("phone", "uncapped"))), status)
+		require.NotContains(t, entitled(t, person(t), environmentEntity(t, "e1", deviceClaims("phone", "managed")), region(t)), status,
+			"a cap applies after subject mappings, not only to direct grants")
+	})
+}
