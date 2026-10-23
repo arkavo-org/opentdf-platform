@@ -322,3 +322,43 @@ func TestChainDevices_ThroughTheV2PDP(t *testing.T) {
 			"a cap applies after subject mappings, not only to direct grants")
 	})
 }
+
+// recordingERS records the entities of every ResolveEntities call.
+type recordingERS struct {
+	inProcessERS
+	seen *[][]*entity.Entity
+}
+
+func (e recordingERS) ResolveEntities(ctx context.Context, req *entityresolutionV2.ResolveEntitiesRequest) (*entityresolutionV2.ResolveEntitiesResponse, error) {
+	*e.seen = append(*e.seen, req.GetEntities())
+	return e.inProcessERS.ResolveEntities(ctx, req)
+}
+
+// A non-claims environment entity, such as the client ID Keycloak puts in a
+// token's chain, can never be a device, so it is skipped before the ERS as
+// upstream does: resolving it would cost a lookup that can fail the decision.
+func TestChainDevices_NonClaimsEnvironmentNeverReachesTheERS(t *testing.T) {
+	svc := newTestService(t, pepConfig(), verifiersFor(&fakeVerifier{}),
+		[]configuredSource{pepPatreonSource(), identityCoreSource()}, nil)
+	var seen [][]*entity.Entity
+	store, err := filestore.NewStoreFromFile(patreonPolicy)
+	require.NoError(t, err)
+	sdk := &otdf.SDK{EntityResolutionV2: recordingERS{inProcessERS: inProcessERS{svc: svc}, seen: &seen}}
+	pdp, err := access.NewJustInTimePDP(t.Context(), logger.CreateTestLogger(), sdk, store, true, false)
+	require.NoError(t, err)
+
+	client := &entity.Entity{
+		EntityType:  &entity.Entity_ClientId{ClientId: "tdf-iroh-s3"},
+		EphemeralId: "client",
+		Category:    entity.Entity_CATEGORY_ENVIRONMENT,
+	}
+	chain := chainIdentifier(claimsEntity(t, "e0", catalogCreatorClaims()), client,
+		environmentEntity(t, "e1", deviceClaims("phone", "attested")))
+	require.True(t, permitted(t, pdp, testPEP, chain, creatorCampaign, creatorSupporter))
+	require.Len(t, seen, 1)
+	ids := make([]string, 0, len(seen[0]))
+	for _, e := range seen[0] {
+		ids = append(ids, e.GetEphemeralId())
+	}
+	require.Equal(t, []string{"e0", "e1"}, ids, "the claims device is resolved; the client ID is not")
+}

@@ -640,7 +640,7 @@ A PEP may send a person's chain with each DeviceCheck-attested device as a `CATE
 - **What is a device:** an entity whose claims, from a PEP on `claims_chain_peps`, carry `arkavo_npe.type: device` or an `aud` naming `arkavo:devicecheck`. Its class is `arkavo_npe.class`, or `unverified` when absent. Claims from any other caller are discarded, so they cannot make a device, and that entity is skipped.
 - **What it does:** the person's entitlements, from subject mappings and direct grants alike, are cut to `device_class_caps[class]` before any resource is evaluated. Several devices intersect their caps. A class missing from the map narrows nothing, so `device_class_caps: {}` decides as before.
 - **Caps match exactly.** A cap listing a hierarchy value does not cover the values below it.
-- **Other environment entities** (the node's `region`) are resolved too but still skipped. `GetDecision` and `GetEntitlements` resolve a chain the same way; `GetEntitlements` reports the subjects only.
+- **Other environment entities** are still skipped: a claims entity (the node's `region`) after it resolves to no device, any other kind (a token's client ID) before the resolver sees it. `GetDecision` and `GetEntitlements` resolve a chain the same way; `GetEntitlements` reports the subjects only.
 - **Reserved:** the resolver hands the cap to the PDP under the representation property `arkavo_constraint`, so no source may use it as its `properties_key`.
 
 #### Composite resolver: agent status

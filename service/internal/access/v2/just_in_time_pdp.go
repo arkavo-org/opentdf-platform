@@ -374,9 +374,9 @@ type resolvedChain struct {
 	constraints []entityconstraint.Constraint
 }
 
-// resolveEntitiesFromEntityChain roundtrips to ERS to resolve the whole
-// entity chain, environment entities included, so the ERS can tell a device
-// from the request's environment by what it resolves to. Both decisioning and
+// resolveEntitiesFromEntityChain roundtrips to ERS to resolve the entity
+// chain, its claims environment entities included, so the ERS can tell a
+// device from the request's environment by what it resolves to. Both decisioning and
 // entitlements then partition the representations alike:
 //   - those of non-environment entities are subjects, as they always were;
 //   - those of environment entities that resolve to a constraint (a device
@@ -396,9 +396,19 @@ func (p *JustInTimePDP) resolveEntitiesFromEntityChain(
 		slog.String("entity_chain_id", entityChain.GetEphemeralId()),
 	)
 
-	entities := entityChain.GetEntities()
+	// Only a claims entity can resolve to a device, so every other
+	// environment entity (a token's client ID, say) is skipped before the ERS,
+	// as upstream does: resolving it would cost an ERS lookup that can fail
+	// the decision.
+	var entities []*entity.Entity
+	for _, chained := range entityChain.GetEntities() {
+		if chained.GetCategory() == entity.Entity_CATEGORY_ENVIRONMENT && chained.GetClaims() == nil {
+			continue
+		}
+		entities = append(entities, chained)
+	}
 	// The ERS names a representation after its entity's ephemeral ID, or
-	// EntityIDPrefix and its index when the entity has none.
+	// EntityIDPrefix and its index in the request when the entity has none.
 	environmentIDs := make(map[string]bool)
 	subjectIDs := make(map[string]bool)
 	for i, chained := range entities {
