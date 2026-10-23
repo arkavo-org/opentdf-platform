@@ -18,10 +18,9 @@ import (
 	ctxAuth "github.com/opentdf/platform/service/pkg/auth"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 
-	"github.com/opentdf/platform/service/internal/entityconstraint"
-
 	ent "github.com/opentdf/platform/service/entity"
 	"github.com/opentdf/platform/service/internal/access/v2/obligations"
+	"github.com/opentdf/platform/service/internal/chaindevice"
 	"github.com/opentdf/platform/service/logger"
 	"github.com/opentdf/platform/service/logger/audit"
 )
@@ -47,6 +46,10 @@ type JustInTimePDP struct {
 	// optional local subject mapping matcher; when set, getMatchedSubjectMappings
 	// avoids an SDK round-trip and serves from the in-memory store.
 	matcher SubjectMappingMatcher
+	// optional device rules of the policy; when set, the devices of a chain
+	// narrow what each subject keeps by these rules. Read-only: the store
+	// owns them.
+	deviceRules *chaindevice.Rules
 }
 
 // NewJustInTimePDP creates a new Policy Decision Point instance with no in-memory policy and a remote connection
@@ -83,6 +86,9 @@ func NewJustInTimePDP(
 	}
 	if m, ok := store.(SubjectMappingMatcher); ok {
 		p.matcher = m
+	}
+	if d, ok := store.(DeviceRuleSource); ok {
+		p.deviceRules = d.DeviceRules()
 	}
 
 	allAttributes, err := store.ListAllAttributes(ctx)
@@ -225,7 +231,7 @@ func (p *JustInTimePDP) GetDecision(
 	allPermitted := true
 
 	for _, entityRep := range resolved.subjects {
-		entityRepresentationDecision, entitlements, err := p.pdp.getDecision(ctx, entityRep, action, resources, resolved.constraints)
+		entityRepresentationDecision, entitlements, err := p.pdp.getDecision(ctx, entityRep, action, resources, p.deviceRules, resolved.devices)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get decision for entityRepresentation with original id [%s]: %w", entityRep.GetOriginalId(), err)
 		}
@@ -322,7 +328,7 @@ func (p *JustInTimePDP) GetEntitlements(
 	if err != nil {
 		return nil, fmt.Errorf("failed to get entitlements: %w", err)
 	}
-	narrowEntityEntitlements(entitlements, resolved.constraints)
+	narrowEntityEntitlements(entitlements, p.deviceRules, resolved.devices)
 	return entitlements, nil
 }
 
@@ -367,21 +373,23 @@ func (p *JustInTimePDP) getMatchedSubjectMappings(
 }
 
 // resolvedChain is an entity identifier resolved for decisioning: the
-// representations every one of which must be entitled, and the constraints
-// that narrow what each of them holds.
+// representations every one of which must be entitled, and the devices that
+// ride with them and narrow what each of them keeps (see chaindevice).
 type resolvedChain struct {
-	subjects    []*entityresolutionV2.EntityRepresentation
-	constraints []entityconstraint.Constraint
+	subjects []*entityresolutionV2.EntityRepresentation
+	devices  []chaindevice.Device
 }
 
 // resolveEntitiesFromEntityChain roundtrips to ERS to resolve the entity
 // chain, its claims environment entities included, so the ERS can tell a
 // device from the request's environment by what it resolves to. Both decisioning and
 // entitlements then partition the representations alike:
-//   - those of non-environment entities are subjects, as they always were;
-//   - those of environment entities that resolve to a constraint (a device
-//     that comes with a person) narrow the subjects instead of being one,
-//     since a device never holds the person's entitlements;
+//   - a representation of a non-environment entity is a subject, as it always
+//     was, and if it carries a device marker the device is also one of the
+//     chain's devices;
+//   - a representation of an environment entity that carries a device marker
+//     (a device that comes with a person) is a device, not a subject, since a
+//     device never holds the person's entitlements;
 //   - every other environment entity is skipped, as upstream OpenTDF does.
 //
 // A representation that names no entity of the chain is a subject, so an
@@ -439,20 +447,22 @@ func (p *JustInTimePDP) resolveEntitiesFromEntityChain(
 	for _, rep := range entityRepresentations {
 		id := rep.GetOriginalId()
 		// An ID both categories use is a subject.
-		if !environmentIDs[id] || subjectIDs[id] {
+		isSubject := !environmentIDs[id] || subjectIDs[id]
+		if isSubject {
 			resolved.subjects = append(resolved.subjects, rep)
+		}
+		d, ok := chaindevice.FromRepresentation(rep)
+		if !ok {
 			continue
 		}
-		if c, ok := entityconstraint.FromRepresentation(rep); ok {
-			p.logger.DebugContext(
-				ctx, "environment entity narrows the chain's subjects",
-				slog.String("entity_id", id),
-				slog.String("kind", c.Kind),
-				slog.String("class", c.Class),
-				slog.Bool("capped", c.Capped),
-			)
-			resolved.constraints = append(resolved.constraints, c)
-		}
+		p.logger.DebugContext(
+			ctx, "entity in the chain is a device that narrows its subjects",
+			slog.String("entity_id", id),
+			slog.Bool("is_subject", isSubject),
+			slog.String("class", d.Class),
+			slog.Bool("bound", d.Bound),
+		)
+		resolved.devices = append(resolved.devices, d)
 	}
 	if len(resolved.subjects) == 0 {
 		return resolvedChain{}, errors.New("no subject entity representations returned by entity resolution")
@@ -503,15 +513,15 @@ func (p *JustInTimePDP) resolveEntitiesFromRequestToken(
 }
 
 // narrowEntityEntitlements removes from each entity's entitlements the value
-// FQNs the constraints do not let it keep.
-func narrowEntityEntitlements(entitlements []*authzV2.EntityEntitlements, constraints []entityconstraint.Constraint) {
-	if len(constraints) == 0 {
+// FQNs the rules do not let it keep while devices ride in its chain.
+func narrowEntityEntitlements(entitlements []*authzV2.EntityEntitlements, rules *chaindevice.Rules, devices []chaindevice.Device) {
+	if !rules.Narrows(devices) {
 		return
 	}
 	for _, e := range entitlements {
 		actions := e.GetActionsPerAttributeValueFqn()
 		for fqn := range actions {
-			if !entityconstraint.Keeps(constraints, fqn) {
+			if !rules.Keeps(devices, fqn) {
 				delete(actions, fqn)
 			}
 		}

@@ -14,7 +14,7 @@ import (
 	entityresolutionV2 "github.com/opentdf/platform/protocol/go/entityresolution/v2"
 	"github.com/opentdf/platform/protocol/go/policy"
 	attrs "github.com/opentdf/platform/protocol/go/policy/attributes"
-	"github.com/opentdf/platform/service/internal/entityconstraint"
+	"github.com/opentdf/platform/service/internal/chaindevice"
 	"github.com/opentdf/platform/service/internal/subjectmappingbuiltin"
 	"github.com/opentdf/platform/service/logger"
 )
@@ -233,7 +233,7 @@ func (p *PolicyDecisionPoint) GetDecision(
 	action *policy.Action,
 	resources []*authz.Resource,
 ) (*Decision, map[string][]*policy.Action, error) {
-	return p.getDecision(ctx, entityRepresentation, action, resources, nil)
+	return p.getDecision(ctx, entityRepresentation, action, resources, nil, nil)
 }
 
 func (p *PolicyDecisionPoint) GetDecisionRegisteredResource(
@@ -471,14 +471,15 @@ func (p *PolicyDecisionPoint) GetEntitlementsRegisteredResource(
 }
 
 // getDecision is GetDecision with the entity's entitlements, from subject
-// mappings and direct entitlements alike, narrowed to what every constraint
-// lets it keep before any resource is evaluated.
+// mappings and direct entitlements alike, narrowed to what the rules let it
+// keep while devices ride in its chain, before any resource is evaluated.
 func (p *PolicyDecisionPoint) getDecision(
 	ctx context.Context,
 	entityRepresentation *entityresolutionV2.EntityRepresentation,
 	action *policy.Action,
 	resources []*authz.Resource,
-	constraints []entityconstraint.Constraint,
+	rules *chaindevice.Rules,
+	devices []chaindevice.Device,
 ) (*Decision, map[string][]*policy.Action, error) {
 	l := p.logger.With("entity_id", entityRepresentation.GetOriginalId())
 	l = l.With("action", action.GetName())
@@ -552,15 +553,15 @@ func (p *PolicyDecisionPoint) getDecision(
 		}
 	}
 
-	if len(constraints) > 0 {
+	if rules.Narrows(devices) {
 		for fqn := range entitledFQNsToActions {
-			if !entityconstraint.Keeps(constraints, fqn) {
+			if !rules.Keeps(devices, fqn) {
 				delete(entitledFQNsToActions, fqn)
 			}
 		}
 		l.DebugContext(
-			ctx, "narrowed entitlements to the chain's constraints",
-			slog.Int("constraints_count", len(constraints)),
+			ctx, "narrowed entitlements by the device rules",
+			slog.Int("devices_count", len(devices)),
 			slog.Any("entitled_value_fqns_to_actions", entitledFQNsToActions),
 		)
 	}

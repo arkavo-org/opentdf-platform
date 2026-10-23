@@ -11,6 +11,7 @@ import (
 	"github.com/opentdf/platform/protocol/go/policy/registeredresources"
 	"github.com/opentdf/platform/protocol/go/policy/subjectmapping"
 	otdfSDK "github.com/opentdf/platform/sdk"
+	"github.com/opentdf/platform/service/internal/chaindevice"
 )
 
 // Shared interface for a cache or the connected retriever below to implement to provide entitlement policy data.
@@ -28,6 +29,14 @@ type EntitlementPolicyStore interface {
 // satisfies this interface the JIT PDP uses it instead of an SDK call.
 type SubjectMappingMatcher interface {
 	MatchSubjectMappings(ctx context.Context, properties []*policy.SubjectProperty) ([]*policy.SubjectMapping, error)
+}
+
+// DeviceRuleSource is implemented by stores that declare the device rules of
+// the policy (see chaindevice.Rules). When a store satisfies this interface the
+// JIT PDP applies its rules to the devices of a chain. The rules are shared
+// with the store and read-only.
+type DeviceRuleSource interface {
+	DeviceRules() *chaindevice.Rules
 }
 
 var (
