@@ -1,13 +1,17 @@
 package filestore
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/opentdf/platform/protocol/go/policy"
 	"github.com/opentdf/platform/service/entityresolution/source"
 	"github.com/opentdf/platform/service/internal/chaindevice"
+	"gopkg.in/yaml.v3"
 )
 
 // Length of the Team ID in an App Attest app ID, <TeamID>.<BundleID>.
@@ -21,6 +25,70 @@ func (s *Store) DeviceRules() *chaindevice.Rules {
 		return nil
 	}
 	return s.deviceRules
+}
+
+// The device_rules subtree decodes strictly, unlike the rest of the schema.
+// An optional key that is misspelled (app: for apps:, app_env: for app_envs:)
+// would otherwise load as "any app" or "any environment", and a misspelled
+// requirements: or caps: would drop the rules, so a rule would silently allow.
+// Each type below rejects a key it does not know, naming the key.
+
+// deviceRulesFields has the fields of DeviceRulesDef and none of its methods,
+// so decoding into it does not recurse into UnmarshalYAML or UnmarshalJSON.
+type (
+	deviceRulesFields       DeviceRulesDef
+	deviceRequirementFields DeviceRequirementDef
+	deviceCapFields         DeviceCapDef
+)
+
+// UnmarshalYAML implements yaml.Unmarshaler, rejecting unknown keys.
+func (d *DeviceRulesDef) UnmarshalYAML(n *yaml.Node) error {
+	if err := rejectUnknownKeys(n, "device_rules", "requirements", "caps"); err != nil {
+		return err
+	}
+	return n.Decode((*deviceRulesFields)(d))
+}
+
+// UnmarshalYAML implements yaml.Unmarshaler, rejecting unknown keys.
+func (d *DeviceRequirementDef) UnmarshalYAML(n *yaml.Node) error {
+	if err := rejectUnknownKeys(n, "a requirement", "grants", "device_classes", "apps", "app_envs"); err != nil {
+		return err
+	}
+	return n.Decode((*deviceRequirementFields)(d))
+}
+
+// UnmarshalYAML implements yaml.Unmarshaler, rejecting unknown keys.
+func (d *DeviceCapDef) UnmarshalYAML(n *yaml.Node) error {
+	if err := rejectUnknownKeys(n, "a cap", "device_class", "keeps"); err != nil {
+		return err
+	}
+	return n.Decode((*deviceCapFields)(d))
+}
+
+// rejectUnknownKeys fails when the mapping n has a key outside known. what
+// names the mapping in the error.
+func rejectUnknownKeys(n *yaml.Node, what string, known ...string) error {
+	if n.Kind != yaml.MappingNode {
+		return nil // the decode that follows reports the wrong shape
+	}
+	for i := 0; i+1 < len(n.Content); i += 2 {
+		if key := n.Content[i]; !slices.Contains(known, key.Value) {
+			return fmt.Errorf("filestore: device_rules: line %d: unknown key %q in %s (expected %s)",
+				key.Line, key.Value, what, strings.Join(known, "|"))
+		}
+	}
+	return nil
+}
+
+// UnmarshalJSON implements json.Unmarshaler, rejecting unknown keys at every
+// level of the subtree.
+func (d *DeviceRulesDef) UnmarshalJSON(data []byte) error {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode((*deviceRulesFields)(d)); err != nil {
+		return fmt.Errorf("filestore: device_rules: %w", err)
+	}
+	return nil
 }
 
 // buildDeviceRules loads and validates the device_rules section. Every

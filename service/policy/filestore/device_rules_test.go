@@ -1,6 +1,10 @@
 package filestore
 
 import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -64,11 +68,14 @@ device_rules:
 )
 
 // storeWithDeviceRules builds a store from deviceRulesPolicy plus the given
-// device_rules block, decoding the YAML the way a policy file is decoded.
+// device_rules block, decoding the YAML the way a policy file is decoded. It
+// returns a decode error, if any, as well as a load error.
 func storeWithDeviceRules(t *testing.T, rulesYAML string) (*Store, error) {
 	t.Helper()
 	var schema Schema
-	require.NoError(t, yaml.Unmarshal([]byte(deviceRulesPolicy+rulesYAML), &schema))
+	if err := yaml.Unmarshal([]byte(deviceRulesPolicy+rulesYAML), &schema); err != nil {
+		return nil, err
+	}
 	return NewStore(&schema)
 }
 
@@ -248,6 +255,16 @@ func TestDeviceRules_RejectsAtLoad(t *testing.T) {
 		{"app env prod", requirementYAML(validGrant, "[attested]", "app_envs: [prod]"), "prod"},
 		{"present but empty apps", requirementYAML(validGrant, "[attested]", "apps: []"), "apps"},
 		{"present but empty app_envs", requirementYAML(validGrant, "[attested]", "app_envs: []"), "app_envs"},
+		// A misspelled optional key must not load as "any app" or "any
+		// environment", nor drop the section.
+		{"misspelled apps", requirementYAML(validGrant, "[attested]", "app: [M8GS7ZT95Y.com.arkavo.Arkavo]"), `unknown key "app"`},
+		{"misspelled app_envs", requirementYAML(validGrant, "[attested]", "app_env: [production]"), `unknown key "app_env"`},
+		{"misspelled device_classes", requirementYAML(validGrant, "", "device_class: [attested]"), `unknown key "device_class"`},
+		{"misspelled grants", "device_rules:\n  requirements:\n    - grant: [" + publishGrant + "]\n      device_classes: [attested]\n", `unknown key "grant"`},
+		{"misspelled requirements", "device_rules:\n  requirement:\n    - grants: [" + publishGrant + "]\n      device_classes: [attested]\n", `unknown key "requirement"`},
+		{"misspelled caps", "device_rules:\n  cap:\n    - device_class: managed\n      keeps: [" + campaignDefinition + "]\n", `unknown key "cap"`},
+		{"unknown key in a cap", "device_rules:\n  caps:\n    - device_class: managed\n      keep: [" + campaignDefinition + "]\n", `unknown key "keep"`},
+		{"differently cased key", requirementYAML(validGrant, "[attested]", "Apps: [M8GS7ZT95Y.com.arkavo.Arkavo]"), `unknown key "Apps"`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			store, err := storeWithDeviceRules(t, tc.rules)
@@ -299,4 +316,72 @@ func TestDeviceRules_CapThatKeepsNothingAccepted(t *testing.T) {
 	rules := store.DeviceRules()
 	require.Len(t, rules.Caps, 1)
 	assert.Empty(t, rules.Caps[0].Keeps)
+}
+
+const deviceRulesPolicyJSON = `{
+  "namespaces": [{"name": "patreon.arkavo.com"}],
+  "attributes": [
+    {"namespace": "patreon.arkavo.com", "name": "arkavo-creator", "rule": "anyOf", "values": [{"value": "publish"}]},
+    {"namespace": "patreon.arkavo.com", "name": "campaign", "rule": "anyOf"}
+  ],
+  "device_rules": %s
+}`
+
+func TestDeviceRules_LoadsFromJSON(t *testing.T) {
+	var schema Schema
+	require.NoError(t, json.Unmarshal([]byte(fmt.Sprintf(deviceRulesPolicyJSON, `{
+    "requirements": [{
+      "grants": ["`+publishGrant+`"],
+      "device_classes": ["attested"],
+      "apps": ["M8GS7ZT95Y.com.arkavo.Arkavo"],
+      "app_envs": ["production"]
+    }],
+    "caps": [{"device_class": "managed", "keeps": ["`+campaignDefinition+`"]}]
+  }`)), &schema))
+	store, err := NewStore(&schema)
+	require.NoError(t, err)
+	rules := store.DeviceRules()
+	require.NotNil(t, rules)
+	assert.Equal(t, []string{arkavoAppHash}, rules.Requirements[0].AppIDHashes)
+	assert.Equal(t, []chaindevice.Cap{{DeviceClass: chaindevice.ClassManaged, Keeps: []string{campaignDefinition}}}, rules.Caps)
+}
+
+func TestDeviceRules_JSONRejectsUnknownKeys(t *testing.T) {
+	grants := `"grants": ["` + publishGrant + `"], "device_classes": ["attested"]`
+	for _, tc := range []struct {
+		name    string
+		rules   string
+		wantErr string
+	}{
+		{"misspelled apps", `{"requirements": [{` + grants + `, "app": ["M8GS7ZT95Y.com.arkavo.Arkavo"]}]}`, `"app"`},
+		{"misspelled app_envs", `{"requirements": [{` + grants + `, "app_env": ["production"]}]}`, `"app_env"`},
+		{"misspelled requirements", `{"requirement": [{` + grants + `}]}`, `"requirement"`},
+		{"unknown key in a cap", `{"caps": [{"device_class": "managed", "keep": ["` + campaignDefinition + `"]}]}`, `"keep"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var schema Schema
+			err := json.Unmarshal([]byte(fmt.Sprintf(deviceRulesPolicyJSON, tc.rules)), &schema)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "filestore: device_rules: ")
+			assert.Contains(t, err.Error(), tc.wantErr)
+		})
+	}
+}
+
+func TestDeviceRules_LoadSchemaRejectsUnknownKeys(t *testing.T) {
+	dir := t.TempDir()
+	yamlPath := filepath.Join(dir, "policy.yaml")
+	require.NoError(t, os.WriteFile(yamlPath, []byte(deviceRulesPolicy+requirementYAML(
+		"["+publishGrant+"]", "[attested]", "app_env: [production]",
+	)), 0o600))
+	_, err := LoadSchema(yamlPath)
+	require.ErrorContains(t, err, "filestore: device_rules: ")
+	require.ErrorContains(t, err, `"app_env"`)
+
+	jsonPath := filepath.Join(dir, "policy.json")
+	require.NoError(t, os.WriteFile(jsonPath, []byte(fmt.Sprintf(deviceRulesPolicyJSON,
+		`{"requirements": [{"grants": ["`+publishGrant+`"], "device_classes": ["attested"], "app_env": ["production"]}]}`)), 0o600))
+	_, err = LoadSchema(jsonPath)
+	require.ErrorContains(t, err, "filestore: device_rules: ")
+	require.ErrorContains(t, err, `"app_env"`)
 }
