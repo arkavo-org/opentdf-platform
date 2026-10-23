@@ -42,7 +42,7 @@ What App Attest can and cannot give that rule:
 
 ## What #61 keeps
 
-- The JIT PDP sends the chain's subjects and its claims and token environment entities to the ERS; other environment entities are skipped before it.
+- The JIT PDP sends the chain's subjects and its claims environment entities to the ERS; other environment entities are skipped before it. (OpenTDF's `Entity` has no token type: email, user name, claims or client ID. A device token travels inside a claims entity; see §1.)
 - Representations are partitioned alike on both routes: subjects; environment entities resolved as devices; the rest skipped.
 - `source.KindOf`: `arkavo_npe.type: device` or an `aud` naming `arkavo:devicecheck`. The agent marker still wins.
 - Narrowing runs in `pdp.getDecision` after direct grants are merged, and on `GetEntitlements` output.
@@ -60,17 +60,25 @@ authnz-rs gains two `arkavo_npe` members (Downstream):
 
 A token without them has no app, which fails any requirement that names apps or app environments.
 
-- **In a chain.** The PEP forwards the DeviceCheck CWT as a token environment entity. The composite already verifies token entities against the issuer's COSE keys (`verifyToken`), so a verified device token has `TrustVerified`, and its `arkavo_npe` gives the device's class, app and app environment.
-- **Claims from a PEP.** A device sent as claims (`TrustPEP`) is still a device, but its class reads as `unverified` and it has no app, whatever the claims say. It never satisfies a requirement for `attested` or `managed`, or one that names apps.
-- **Binding.** A device token belongs to the chain's person only if its issuer and `sub` match the person's. A device that doesn't match fails the decision, not just the device: ignoring it would drop a cap and widen grants.
-- **Lone device.** A chain with a device and no person is denied (#61's "no subject entities" error already does this).
-- **A DeviceCheck token as the subject** (KAS rewrap from iOS, arkavo-rs#72). The token carries the person's claims and the device's. The composite splits it: the person is the subject, resolved from the token's claims as any person token is, and the device is its accompanying device with the token's class. Device rules then apply as in a chain. This replaces the composite's own handling of device subjects, so `device_class_caps` goes entirely.
+- **In a chain.** The PEP forwards an environment claims entity whose only claim is `arkavo_device_token`: the raw DeviceCheck CWT. `arkavo_device_token` is reserved (a `properties_key` may not use it, as `arkavo_device` below). The composite verifies it with the issuer's verifier (`verifyToken`), from any caller: the signature, not the caller, is what it trusts, as with sealed evidence. A verified token that `KindOf` judges a device gives the device's class, app and app environment. One that doesn't verify, has expired, or isn't a device token is a device of class `unverified` with no app. A device entity is never resolved by the sources and holds no grants.
+- **Claims from a PEP.** A device sent as plain claims (`TrustPEP`) is still a device, but its class reads as `unverified` and it has no app, whatever the claims say. It never satisfies a requirement for `attested` or `managed`, or one that names apps.
+- **Binding, in the composite.** `ResolveEntities` receives one chain per request, with each entity's category, so the composite binds there and the PDP never needs identities. A device is bound only if it is a verified token, and its `iss` and `arkavo_account_id` equal those of every subject entity in the request. A subject's `iss` and `arkavo_account_id` come from its PEP claims, or from its sealed evidence, which gains both fields. `arkavo_account_id`, not `sub`: authnz-rs mints different `sub` forms per token type (a UUID on auth and DeviceCheck tokens, `arkavo:<id>` on OIDC access tokens), while `arkavo_account_id` is the one account UUID on all of them and is already the composite's stable ID (`claimAccountID`). A subject or device with either missing never binds, and an anonymous subject never binds.
+- **An unbound device denies.** The marker carries `bound: false`, and the PDP then keeps no grant for any subject of the chain, on both routes: ignoring the device would drop a cap and widen grants. A PEP-claims device is never bound, so it denies too once it rides with a person. *(Builder's call: binding needs a signature to mean anything.)*
+- **Lone device.** A chain with a device and no subject is denied (#61's "no subject entities" error already does this).
+- **A DeviceCheck token as the subject** (KAS rewrap from iOS, arkavo-rs#72). The token carries the person's claims and the device's. On the token route the composite splits it:
+  - the person: the same claims with `arkavo_npe`, `cnf` and the `arkavo:devicecheck` audience removed, so `KindOf` judges a person and the sources resolve it as any person token;
+  - the device: kind, class, app and app environment from the token's `arkavo_npe`, sealed into the person's evidence (new `device` member), bound by construction.
+  
+  The chain stays one sealed subject entity. Its representation carries the device marker, and the PDP reads a marker on a subject representation as that subject's own bound device. Device rules then apply as in a chain. This replaces the composite's own handling of device subjects, so `device_class_caps` goes entirely.
+- **The `device-class` source goes.** After the split no token route subject is a device, so a source that grants by device class never fires; and devices never grant (owner, #60). A config with a source of `type: device-class` fails startup, as one with `device_class_caps` does, with a message pointing to `device_rules`. The arkavo-plane example (`opentdf-arkavo-local-test.yaml`, `policy.arkavo.yaml`) grants `classification` by device class today; it loses that source. See Open question.
 
 ### 2. The ERS reports identity only
 
-The composite's device marker (`arkavo_constraint` in `AdditionalProps`) becomes `{kind: "device", class, verified, app_id_hash, app_env}`. `capped` and `allow` go, as do `deviceConstraint()` and `device_class_caps`.
+The composite's device marker (`arkavo_constraint` in `AdditionalProps`) is renamed `arkavo_device` and becomes `{kind: "device", class, verified, bound, app_id_hash, app_env}`. `capped` and `allow` go, as do `deviceConstraint()`, `capGrants()` and `device_class_caps`.
 
-`entityconstraint` is renamed to `chaindevice`: it parses that value from a representation. A device that isn't verified, or whose value is malformed, reads as class `unverified` with no app, which fails toward fewer grants under any rule set.
+`entityconstraint` is renamed to `chaindevice`: it parses that value from a representation. A device that isn't verified, or whose value is malformed, reads as class `unverified`, unbound, with no app, which fails toward fewer grants under any rule set.
+
+The PDP flattens every `AdditionalProps` key into subject-mapping selectors, so on a split subject the marker is selector input. That is harmless: the key is reserved and only the composite writes it.
 
 ### 3. Policy declares the rules
 
@@ -123,7 +131,7 @@ device_rules:
   - Tie the App Attest assertion to the upload: the client's assertion signs a hash of the content being published, so a hooked device must drive the real app once per upload instead of replaying a token from a script (authnz-rs, arks, tdf-iroh-s3, specifications).
   - Use Apple's App Attest receipt risk metric in authnz-rs to spot device farms.
   - Terms are still enforced by moderation and account reputation; attestation raises the cost of abuse, it doesn't end it.
-- **arkavo-rs (arks).** Forward the DeviceCheck CWT as a token entity in the chain, not `{type, class}` claims. #96 (class-only forwarding) is superseded; rework or close it.
+- **arkavo-rs (arks).** Forward the DeviceCheck CWT as an environment claims entity `{arkavo_device_token: <CWT>}` in the chain, not `{type, class}` claims. #96 (class-only forwarding) is superseded; rework or close it.
 - **tdf-iroh-s3 (#35).** Send the signed device token, not `context.device.class`. Update the comment.
 - **specifications#9.** The device entity is the signed token; class claims from the PEP carry no weight.
 
@@ -137,7 +145,11 @@ YAML decoding is lenient, so a binary without this change silently ignores `devi
 4. Add `device_rules` to the policy file.
 5. tdf-iroh-s3 sends the device token. Until then its devices read as `unverified` and its direct claims route has none, so step 4 must not add the publish requirement before steps 2 and 5 ship, or publishing is denied.
 
-Deploying the binary alone changes one thing: a DeviceCheck token at KAS rewrap is now a person plus a device. With no rules and no `device_class_caps`, that person keeps their grants.
+Deploying the binary alone changes these things, before any rule is written:
+
+- A DeviceCheck token at KAS rewrap is now a person plus a device. With no rules and no `device_class_caps`, that person keeps their own grants: wider than a capped device subject got, but no wider than the same person's other tokens.
+- A config naming `device_class_caps` or a `device-class` source fails startup, so it must be removed in the same deploy.
+- A chain whose device is sent as plain PEP claims is denied (unbound). arks sends class-only device claims only from #96, which is unmerged; nothing in production sends devices in a chain yet.
 
 ## Tests
 
@@ -152,9 +164,12 @@ Deploying the binary alone changes one thing: a DeviceCheck token at KAS rewrap 
 - App hashing: `M8GS7ZT95Y.com.arkavo.ArkavoCreator` hashes to the `rpIdHash` in authnz-rs's App Attest fixture.
 - Load validation failures; a config with `device_class_caps` fails startup.
 
+## Open question (owner)
+
+- **Device class granting classification on the arkavo plane.** `opentdf-arkavo-local-test.yaml` grants `https://arkavo.ai/attr/classification` (a `hierarchy` attribute) by device class: attested → restricted, managed → confidential, unverified → internal. Under "devices narrow, never grant" that source goes. The narrowing equivalent, "restricted requires an attested device", names a hierarchy attribute, which §3's validation forbids. Proposed: drop the source from the example now and design hierarchy-aware device rules with #63.
+
 ## Left to the builder
 
 - Names (`device_rules`, `requirements`, `caps`, `keeps`) may change if the loader suggests better ones.
 - Where the rule evaluation lives (`internal/access/v2` or `chaindevice`).
-- How the split DeviceCheck subject carries its device through the sealed evidence.
 - Log fields for narrowed grants and binding failures.
