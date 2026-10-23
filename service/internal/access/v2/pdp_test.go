@@ -871,7 +871,8 @@ func (s *PDPTestSuite) TestNewPolicyDecisionPoint() {
 	for _, tc := range tests {
 		s.Run(tc.name, func() {
 			pdp, err := NewPolicyDecisionPoint(
-				s.T().Context(), s.logger, tc.attributes, tc.subjectMappings, tc.registeredResources, allowDirectEntitlements, false)
+				s.T().Context(), s.logger, tc.attributes, tc.subjectMappings, tc.registeredResources, allowDirectEntitlements, false,
+			)
 
 			if tc.expectError {
 				s.Require().Error(err)
@@ -1123,7 +1124,8 @@ func (s *PDPTestSuite) Test_GetDecision_MultipleResources() {
 
 		resources := createResourcePerFqn(
 			testDeptEngineeringFQN, testClassSecretFQN,
-			testDeptEngineeringRegResFQN, testClassSecretRegResFQN)
+			testDeptEngineeringRegResFQN, testClassSecretRegResFQN,
+		)
 
 		// Get decision for delete action (not allowed by either attribute's subject mappings)
 		decision, _, err := pdp.GetDecision(s.T().Context(), entity, testActionDelete, resources)
@@ -2217,7 +2219,8 @@ func (s *PDPTestSuite) Test_GetDecision_CombinedAttributeRules_SingleResource() 
 		})
 
 		// Resource with attributes from different namespaces and with different rules
-		complexResource := createAttributeValueResource("complex-multi-ns-resource",
+		complexResource := createAttributeValueResource(
+			"complex-multi-ns-resource",
 			testClassSecretFQN,   // HIERARCHY rule
 			testCountryUSAFQN,    // ALL_OF rule
 			testProjectAlphaFQN,  // ANY_OF rule
@@ -2303,7 +2306,8 @@ func (s *PDPTestSuite) Test_GetDecision_CombinedAttributeRules_SingleResource() 
 
 	s.Run("Multiple HIERARCHY of different levels", func() {
 		// Create a resource with multiple classifications (hierarchy rule)
-		cascadingResource := createAttributeValueResource("classification-cascade-resource",
+		cascadingResource := createAttributeValueResource(
+			"classification-cascade-resource",
 			testClassSecretFQN,       // Secret classification
 			testClassConfidentialFQN, // Confidential classification (lower than Secret)
 		)
@@ -2618,7 +2622,8 @@ func (s *PDPTestSuite) Test_GetDecision_AcrossNamespaces() {
 		})
 
 		// A single resource with attribute values from different namespaces
-		combinedResource := createAttributeValueResource("combined-multi-ns-resource",
+		combinedResource := createAttributeValueResource(
+			"combined-multi-ns-resource",
 			testClassConfidentialFQN, // base namespace
 			testCountryUSAFQN,        // base namespace
 			testProjectBetaFQN,       // secondary namespace
@@ -3427,12 +3432,14 @@ func (s *PDPTestSuite) Test_GetEntitlements() {
 		s.ElementsMatch(
 			actionNames(secretActions.GetActions()),
 			actionNames(confidentialActions.GetActions()),
-			"Secret and confidential should have the same actions")
+			"Secret and confidential should have the same actions",
+		)
 
 		s.ElementsMatch(
 			actionNames(secretActions.GetActions()),
 			actionNames(publicActions.GetActions()),
-			"Secret and public should have the same actions")
+			"Secret and public should have the same actions",
+		)
 	})
 
 	s.Run("With filtered subject mappings", func() {
