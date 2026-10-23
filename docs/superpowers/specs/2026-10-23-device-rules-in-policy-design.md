@@ -60,7 +60,7 @@ authnz-rs gains two `arkavo_npe` members (Downstream):
 
 A token without them has no app, which fails any requirement that names apps or app environments.
 
-- **In a chain.** The PEP forwards an environment claims entity whose only claim is `arkavo_device_token`: the raw DeviceCheck CWT. `arkavo_device_token` is reserved (a `properties_key` may not use it, as `arkavo_device` below). The composite verifies it with the issuer's verifier (`verifyToken`), from any caller: the signature, not the caller, is what it trusts, as with sealed evidence. A verified token that `KindOf` judges a device gives the device's class, app and app environment. One that doesn't verify, has expired, or isn't a device token is a device of class `unverified` with no app. A device entity is never resolved by the sources and holds no grants.
+- **In a chain.** The PEP forwards an environment claims entity whose only claim is `arkavo_device_token`: the raw DeviceCheck CWT. `arkavo_device_token` is reserved (a `properties_key` may not use it, as `arkavo_device` below). The composite verifies it with the issuer's verifier (`verifyToken`), from any caller: the signature, not the caller, is what it trusts, as with sealed evidence. A verified token that `KindOf` judges a device gives the device's class, app and app environment. One that doesn't verify, has expired, or isn't a device token is a device of class `unverified` with no app. A device token entity is never resolved by the sources and holds no grants. (A PEP-claims device is still resolved as a subject is, as today; the PDP never reads an environment representation's grants, and its marker is unbound.)
 - **Claims from a PEP.** A device sent as plain claims (`TrustPEP`) is still a device, but its class reads as `unverified` and it has no app, whatever the claims say. It never satisfies a requirement for `attested` or `managed`, or one that names apps.
 - **Binding, in the composite.** `ResolveEntities` receives one chain per request, with each entity's category, so the composite binds there and the PDP never needs identities. A device is bound only if it is a verified token, and its `iss` and `arkavo_account_id` equal those of every subject entity in the request. A subject's `iss` and `arkavo_account_id` come from its PEP claims, or from its sealed evidence, which gains both fields. `arkavo_account_id`, not `sub`: authnz-rs mints different `sub` forms per token type (a UUID on auth and DeviceCheck tokens, `arkavo:<id>` on OIDC access tokens), while `arkavo_account_id` is the one account UUID on all of them and is already the composite's stable ID (`claimAccountID`). A subject or device with either missing never binds, and an anonymous subject never binds.
 - **An unbound device denies.** The marker carries `bound: false`, and the PDP then keeps no grant for any subject of the chain, on both routes: ignoring the device would drop a cap and widen grants. A PEP-claims device is never bound, so it denies too once it rides with a person. *(Builder's call: binding needs a signature to mean anything.)*
@@ -139,9 +139,9 @@ device_rules:
 
 YAML decoding is lenient, so a binary without this change silently ignores `device_rules`. A requirement like publish-needs-attested would then fail open. Order:
 
-1. Deploy the platform binary.
+1. Deploy arks forwarding the device token (`{arkavo_device_token: <CWT>}`) **instead of** the device's claims. **Hard precondition for step 3.** arks `main` forwards a device today as `{sub, iss, aud, kid}` (`device_to_value`); a DeviceCheck `aud` makes `KindOf` judge it a device, which this change reads as a PEP-claims device, unbound, so the whole decision denies. Safe before the platform: the current platform skips every environment entity.
 2. Deploy authnz-rs minting `app_id_hash` and `app_env`.
-3. Deploy arks forwarding the device token.
+3. Deploy the platform binary.
 4. Add `device_rules` to the policy file. `policy.patreon.yaml` doesn't declare `patreon.arkavo.com/attr/arkavo-creator` today (only the ERS config's source grants name it), so the publish rule fails load validation until the attribute and its `publish` value are declared in the same change.
 5. tdf-iroh-s3 sends the device token. Until then its devices read as `unverified` and its direct claims route has none, so step 4 must not add the publish requirement before steps 2 and 5 ship, or publishing is denied.
 
@@ -149,7 +149,7 @@ Deploying the binary alone changes these things, before any rule is written:
 
 - A DeviceCheck token at KAS rewrap is now a person plus a device. With no rules and no `device_class_caps`, that person keeps their own grants: wider than a capped device subject got, but no wider than the same person's other tokens.
 - A config naming `device_class_caps` or a `device-class` source fails startup, so it must be removed in the same deploy.
-- A chain whose device is sent as plain PEP claims is denied (unbound). arks sends class-only device claims only from #96, which is unmerged; nothing in production sends devices in a chain yet.
+- A chain whose device is sent as plain PEP claims is denied (unbound). arks `main` sends exactly that today (`{sub, iss, aud, kid}`), hence step 1.
 
 ## Tests
 

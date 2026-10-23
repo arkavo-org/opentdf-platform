@@ -55,8 +55,7 @@
 2. **A DeviceCheck token whose `aud` is a plain string `arkavo:devicecheck`, with no platform audience, used as the subject.** After the split, the person's claims have no `aud`. They must still resolve as a person, not a device or an agent. Task 5 covers it in `TestSplit_StringAudience`.
 3. **A cap whose class is misspelled (`atested`).** It would never apply, which fails open, so it must fail the policy load. Task 2: `TestDeviceRules_UnknownClassFailsLoad`.
 4. **A definition FQN that is a prefix of another definition** (`…/attr/campaign` vs `…/attr/campaign-tier`). The campaign rule must not match tier values. Task 1: `TestMatch_DefinitionIsNotAPrefix`.
-5. **Old sealed evidence after the deploy:** a v1 payload with no `iss`, `account_id` or `device`. It opens with no device, so a subject that was minted before the deploy and travels with a device token never binds, and that decision denies until the token is re-minted. Task 4 pins this in `TestBind_EvidenceWithoutIdentityNeverBinds`.
-
+5. **arks `main` forwards a device as `{sub, iss, aud: arkavo:devicecheck, kid}`.** After this deploys, that chain denies, so arks must forward `arkavo_device_token` first (spec Rollout step 1). Task 6: `TestDeviceRules_ArksMainDeviceShapeDenies` pins the deny; Task 8 states the precondition on #61.
 ---
 
 ### Task 1: `chaindevice` package: marker, rules, evaluator
@@ -282,7 +281,7 @@
   - other environment representations are skipped.
 
 - [ ] **Step 1: Write failing tests.**
-  - In `pdp_test.go`, `Test_GetDecision_DeviceRules` (suite method). It uses a rep with direct entitlements `publish` and `campaign` and the suite's direct-entitlements PDP. Rule: publish requires attested.
+  - In `pdp_test.go`, `Test_GetDecision_DeviceRules` (suite method). The suite builds its PDPs with `allowDirectEntitlements = false` (line 26), so this test constructs its own with `NewPolicyDecisionPoint(..., true, false)` over attributes declaring `publish` and a `campaign` value. It uses a rep with direct entitlements `publish` and `campaign`. Rule: publish requires attested.
     - No devices: publish denied, campaign permitted.
     - Attested bound device: both permitted.
     - Unbound device: both denied.
@@ -376,9 +375,6 @@
   - `TestDeviceToken_UnknownClassIsUnverified`: `class: "gold"` reads as `unverified` (`Verified` stays true).
   - `TestPEPClaimsDevice_Unbound`: an env claims entity with `deviceClaims` from an allowlisted PEP has a marker with `Verified: false`, `Bound: false`.
   - `TestBind_OneUnboundDeviceDeniesAll`: person plus a bound device token plus a mismatched device token. One marker is bound and one isn't. Task 6 checks the decision.
-  - `TestBind_EvidenceWithoutIdentityNeverBinds`:
-    - a sealed subject whose evidence was sealed without `Iss` and `AccountID` (build it with `sealEvidence` directly), plus a valid device token;
-    - the device is unbound.
   - `TestResolveSubject_RecordsIssAndAccount`: the token-route evidence for `creatorClaims` has `Iss == testIssuer` and `AccountID == creatorAccount`.
   - `TestSealedEvidence_RoundTripsIdentityAndDevice`: `openEvidence(sealEvidence(ev))` keeps `Iss`, `AccountID` and `Device`.
   - Config: `properties_key: arkavo_device` and `properties_key: arkavo_device_token` each fail `Validate`.
@@ -392,7 +388,7 @@
     3. allowlisted PEP claims, as today: a `KindDevice` subject gets `deviceFromClaims(claims, false)`;
     4. anonymous.
   - `ResolveEntities` builds `[]resolvedEntry`, calls `bindDevices`, then builds representations.
-  - Keep the `capGrants`/`deviceConstraint` code until Task 5. Only `representation`'s caller changes.
+  - Delete `deviceConstraint` (unused once `representation` changes, or lint fails). Keep `capGrants` until Task 5; `resolveSubject` still calls it.
 
 - [ ] **Step 4: Run.** `go test ./service/entityresolution/... ./service/internal/... && golangci-lint run ./service/entityresolution/composite/...`. Expected: pass, 0 issues.
 
@@ -408,7 +404,7 @@
   - remove the `caps` field from `Service` and `New`;
   - remove the `capGrants` call in `resolveSubject`.
 - Modify: `service/entityresolution/composite/v2/device.go`: add `personClaims`.
-- Modify: `service/entityresolution/composite/v2/constraints.go`: delete `capGrants` and `deviceConstraint`; keep `withheldAgent`.
+- Modify: `service/entityresolution/composite/v2/constraints.go`: delete `capGrants` (Task 4 already removed `deviceConstraint`); keep `withheldAgent`.
 - Delete: `service/entityresolution/composite/v2/device_class.go` and `device_class_test.go`.
 - Modify: `service/entityresolution/composite/v2/register.go`: remove the `typeDeviceClass` case.
 - Modify: `service/entityresolution/composite/v2/config.go`:
@@ -418,7 +414,7 @@
 - Modify: `service/entityresolution/v2/entity_resolution.go:48`: the `device_class_ceilings` message becomes "device rules moved to device_rules in the policy file".
 - Modify tests that use caps or the device-class source:
   - `constraints_test.go`: delete `TestDeviceCaps_*`, `device` and `sealed` if they're unused;
-  - `composite_resolve_test.go`: delete `TestResolveSubject_KindComesFromClaims`, or rewrite it to assert a device subject's kind without the device-class source;
+  - `composite_resolve_test.go`: rewrite `TestResolveSubject_KindComesFromClaims` without the device-class source. Keep its invariant: the kind is judged from the claims, never from the caller's `Kind`. Use a fake source admitting only `KindDevice` and assert it runs;
   - `composite_token_test.go`: delete `TestResolveSubject_TrustNoneNeverGetsDeviceClassGrants`;
   - `register_test.go`, `config_test.go`: update.
 - Test: `service/entityresolution/composite/v2/split_test.go` (new)
@@ -481,7 +477,8 @@
     | person + PEP-claims device saying attested with a listed app | deny |
     | person + device token for another account | deny |
     | person + one bound attested device + one unbound device | deny |
-    | device token alone | error, "no subject entities" |
+    | device token alone | error, "no subject entities": call `pdp.GetDecision` directly and assert the error, since `permitted` requires no error |
+    | person + device as arks `main` sends it (`{sub, iss, aud: arkavo:devicecheck, kid}`) | deny (`TestDeviceRules_ArksMainDeviceShapeDenies`, a separate test) |
   - `TestDeviceRules_CapThroughTheV2PDP`: person + managed device:
     - campaign and tier content permitted;
     - a `content-type` value the person holds denied.
@@ -491,7 +488,7 @@
   - `TestDeviceRules_RoutesAgree`: take every subject-mapped FQN (the `status` and `entitlement` values) the person holds with no device. `GetEntitlements` reads subject mappings only (#62), so only those are comparable.
     - Person + managed device: the cap keeps only `campaign` and `campaign-tier`, so each of those FQNs is absent from `GetEntitlements` and denied by `GetDecision`.
     - Person + attested device (no cap, no requirement on them): each is present in `GetEntitlements` and permitted by `GetDecision`.
-  - `TestDeviceRules_NoRulesDecidesAsBefore`: with `patreonPolicy`, which has no rules, person alone and person + attested device both decide as `TestPatreonDecisions_ThroughTheV2PDP` expects.
+  - `TestDeviceRules_NoRulesDecidesAsBefore`: with `patreonPolicy`, which has no rules, person alone and person + a bound attested device *token* both decide as `TestPatreonDecisions_ThroughTheV2PDP` expects. (A PEP-claims device denies even without rules: it's unbound.)
 
 - [ ] **Step 2: Run.** `go test ./service/entityresolution/composite/... -run 'DeviceRules'`. Expected: pass. A failure here means an earlier task diverged from the spec: fix that task's code, not the test.
 
@@ -550,6 +547,7 @@ These are outward-facing writes. The user has authorised pushing this branch, cr
 - [ ] **Step 2:** Comment on #61 (`--repo arkavo-org/opentdf-platform`):
   - what changed since the last review: rules moved to policy, signed device tokens, binding, the split, and the removed settings;
   - the PR now "Closes #60";
+  - **deploy precondition:** arks must forward `arkavo_device_token` before this deploys (spec Rollout step 1), or iOS chains with a device deny;
   - link the spec and #63.
 - [ ] **Step 3:** Comment on these, each saying what the PEP or spec must now send (from the spec's Downstream section):
   - specifications#9 (`arkavo-org/specifications`);
