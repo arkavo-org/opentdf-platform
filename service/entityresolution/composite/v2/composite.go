@@ -167,21 +167,29 @@ func (s *Service) CreateEntityChainsFromTokens(
 //
 // The request is one chain, so once every entity is resolved each device is
 // bound to the chain's subjects, or not (see bindDevices), and carries a
-// marker saying which (see chaindevice).
+// marker saying which (see chaindevice). The PDP partitions the chain by
+// representation ID, so a request in which two entities share an ID is
+// refused before anything is resolved: binding would otherwise see fewer
+// subjects than the PDP narrows.
 func (s *Service) ResolveEntities(
 	ctx context.Context,
 	req *connect.Request[entityresolutionV2.ResolveEntitiesRequest],
 ) (*connect.Response[entityresolutionV2.ResolveEntitiesResponse], error) {
 	ctx, span := s.Start(ctx, "ResolveEntities")
 	defer span.End()
+	ids, dup := entityIDs(req.Msg.GetEntities())
+	if dup != "" {
+		s.logger.WarnContext(
+			ctx, "composite: two entities of the request share an ID; it is refused",
+			slog.String("entity_id", dup),
+		)
+		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("composite: entity ID %q is used by two entities", dup))
+	}
 	// The request names no resources, so sources answer subject-wide.
 	q := source.Query{Action: defaultAction}
 	entries := make([]resolvedEntry, 0, len(req.Msg.GetEntities()))
 	for i, e := range req.Msg.GetEntities() {
-		id := e.GetEphemeralId()
-		if id == "" {
-			id = ent.EntityIDPrefix + strconv.Itoa(i)
-		}
+		id := ids[i]
 		ev, device, err := s.resolveEntity(ctx, id, e, q)
 		if err != nil {
 			s.logger.WarnContext(
@@ -218,6 +226,26 @@ func (s *Service) ResolveEntities(
 		reps = append(reps, rep)
 	}
 	return connect.NewResponse(&entityresolutionV2.ResolveEntitiesResponse{EntityRepresentations: reps}), nil
+}
+
+// entityIDs names each entity as its representation is named, and as the PDP
+// names it: its ephemeral ID, or EntityIDPrefix and its index when it has
+// none. It also returns the first ID two entities share, or "".
+func entityIDs(entities []*entity.Entity) ([]string, string) {
+	ids := make([]string, len(entities))
+	seen := make(map[string]bool, len(entities))
+	for i, e := range entities {
+		id := e.GetEphemeralId()
+		if id == "" {
+			id = ent.EntityIDPrefix + strconv.Itoa(i)
+		}
+		if seen[id] {
+			return nil, id
+		}
+		seen[id] = true
+		ids[i] = id
+	}
+	return ids, ""
 }
 
 // subjectEntity seals ev into a chain's subject entity.

@@ -10,8 +10,10 @@ import (
 	"testing"
 	"time"
 
+	"connectrpc.com/connect"
 	"github.com/opentdf/platform/protocol/go/entity"
 	entityresolutionV2 "github.com/opentdf/platform/protocol/go/entityresolution/v2"
+	ent "github.com/opentdf/platform/service/entity"
 	"github.com/opentdf/platform/service/entityresolution/source"
 	"github.com/opentdf/platform/service/internal/chaindevice"
 	"github.com/stretchr/testify/assert"
@@ -147,6 +149,79 @@ func TestDeviceToken_AsSubjectHoldsNoGrants(t *testing.T) {
 
 	assert.Equal(t, attestedIOS(true), deviceOf(t, reps[1]))
 	requireMarkerOnly(t, reps[1])
+}
+
+// The PDP reads an ID that both categories use as a subject's, so binding
+// against each entity's own category would bind a device to fewer subjects
+// than the PDP narrows with it. A request naming two entities alike, its
+// explicit IDs and the index-derived ones the PDP gives ID-less entities
+// alike, is refused before anything is resolved.
+func TestResolve_DuplicateEntityIDsAreInvalidArgument(t *testing.T) {
+	exp := time.Now().Add(time.Hour)
+	token := signCWT(t, deviceTokenClaims(exp))
+	// idless is an entity with no ephemeral ID, which both the PDP and the
+	// composite name EntityIDPrefix and its index.
+	idless := func(t *testing.T, claims map[string]any) *entity.Entity {
+		t.Helper()
+		return claimsEntity(t, "", claims)
+	}
+
+	for name, tc := range map[string]struct {
+		entities func(t *testing.T, svc *Service) []*entity.Entity
+		dup      string
+	}{
+		"a subject and an environment entity share an ID": {func(t *testing.T, svc *Service) []*entity.Entity {
+			sealed, err := sealEvidence(svc.sealKeys[0], evidence{
+				V:         evidenceVersion,
+				Iss:       testIssuer,
+				AccountID: otherAccount,
+				Exp:       svc.now().Add(time.Minute).Unix(),
+				Grants:    []sealedGrant{{FQN: publishValue, Actions: []string{"publish"}, Source: "identity-core"}},
+			})
+			require.NoError(t, err)
+			return []*entity.Entity{
+				claimsEntity(t, "x", catalogCreatorClaims()),
+				deviceTokenEnv(t, "e1", token),
+				environmentEntity(t, "x", map[string]any{evidenceClaim: sealed}),
+			}
+		}, "x"},
+		"an explicit ID equals an index-derived one": {func(t *testing.T, _ *Service) []*entity.Entity {
+			return []*entity.Entity{
+				claimsEntity(t, ent.EntityIDPrefix+"1", catalogCreatorClaims()),
+				idless(t, catalogCreatorClaims()),
+				deviceTokenEnv(t, "e2", token),
+			}
+		}, ent.EntityIDPrefix + "1"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			verifier := &fakeVerifier{}
+			svc, buf := deviceService(t, verifier)
+
+			_, err := svc.ResolveEntities(callerContext(t.Context(), testPEP), connect.NewRequest(&entityresolutionV2.ResolveEntitiesRequest{
+				Entities: tc.entities(t, svc),
+			}))
+
+			require.Error(t, err)
+			assert.Equal(t, connect.CodeInvalidArgument, connect.CodeOf(err))
+			assert.Contains(t, err.Error(), tc.dup)
+			assert.Zero(t, verifier.calls.Load(), "nothing is resolved: the device token is never verified")
+			rec := logRecord(t, buf, "composite: two entities of the request share an ID; it is refused")
+			assert.Equal(t, "WARN", rec["level"])
+			assert.Equal(t, tc.dup, rec["entity_id"])
+			assert.NotContains(t, buf.String(), token, "the raw token is never logged")
+		})
+	}
+
+	t.Run("distinct IDs, explicit and index-derived, resolve", func(t *testing.T) {
+		svc, _ := deviceService(t, &fakeVerifier{})
+		reps := resolveAs(callerContext(t.Context(), testPEP), t, svc,
+			idless(t, catalogCreatorClaims()), claimsEntity(t, "x", catalogCreatorClaims()), idless(t, catalogCreatorClaims()))
+		ids := make([]string, 0, len(reps))
+		for _, rep := range reps {
+			ids = append(ids, rep.GetOriginalId())
+		}
+		assert.Equal(t, []string{ent.EntityIDPrefix + "0", "x", ent.EntityIDPrefix + "2"}, ids)
+	})
 }
 
 // A device token that does not verify, has expired or is not a device's is a
