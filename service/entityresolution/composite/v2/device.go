@@ -221,7 +221,7 @@ func bindDevices(entries []resolvedEntry) {
 // subject (an entity of any category but environment), and every subject has
 // a non-empty iss and arkavo_account_id equal to the device's. A sealed
 // device is its own subject's, so in a chain of that subject alone it binds
-// by construction.
+// when its evidence carries both.
 func unboundReason(dev resolvedEntry, entries []resolvedEntry) (string, string) {
 	if !dev.device.Verified {
 		return unboundNotVerified, ""

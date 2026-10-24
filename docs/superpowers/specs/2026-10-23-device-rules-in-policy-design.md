@@ -51,7 +51,7 @@ What App Attest can and cannot give that rule:
 
 ### 1. The device proves its class with a signed token
 
-authnz-rs mints the DeviceCheck token: a CWT with aud `arkavo:devicecheck` (plus the platform audience) and `arkavo_npe {type: device, class, device_id}`. `class` is `attested` while the last App Attest assertion is under 15 minutes old, else `managed`.
+authnz-rs mints the DeviceCheck token: a CWT with aud `arkavo:devicecheck` (plus the platform audience) and `arkavo_npe {type: device, class, device_id}`. `class` is `attested` while the last App Attest assertion is under 15 minutes old, else `managed`. The token lasts an hour, so authnz-rs also mints `arkavo_npe.attestation_expiry` (the assertion plus 15 minutes), and the composite reads `attested` only before it: past it, or without one, the device is `managed`, in a chain and in sealed evidence alike.
 
 authnz-rs gains two `arkavo_npe` members (Downstream):
 
