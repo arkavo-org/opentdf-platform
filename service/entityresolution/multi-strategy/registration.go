@@ -12,6 +12,7 @@ import (
 	"github.com/opentdf/platform/protocol/go/authorization"
 	"github.com/opentdf/platform/protocol/go/entityresolution"
 	"github.com/opentdf/platform/service/entityresolution/multi-strategy/types"
+	"github.com/opentdf/platform/service/internal/chaindevice"
 	"github.com/opentdf/platform/service/logger"
 	"github.com/opentdf/platform/service/pkg/serviceregistry"
 	"go.opentelemetry.io/otel/trace"
@@ -104,21 +105,8 @@ func (ers *ERS) ResolveEntities(
 			continue
 		}
 
-		// Convert multi-strategy result to protocol format
-		resultData := make(map[string]interface{})
-
-		// Add resolved claims
-		for claimName, claimValue := range result.Claims {
-			resultData[claimName] = claimValue
-		}
-
-		// Add metadata with "metadata_" prefix
-		for metaKey, metaValue := range result.Metadata {
-			resultData[("metadata_" + metaKey)] = metaValue
-		}
-
 		// Convert to protobuf struct
-		resultStruct, structErr := structpb.NewStruct(resultData)
+		resultStruct, structErr := structpb.NewStruct(RepresentationData(result))
 		if structErr != nil {
 			ers.logger.Error("failed to create result struct",
 				slog.String("entity_id", entityID),
@@ -426,6 +414,29 @@ func getEntityValue(entityType interface{}) string {
 	default:
 		return "unknown"
 	}
+}
+
+// RepresentationData converts a multi-strategy result to the protocol's
+// AdditionalProps format: its claims, and its metadata with a "metadata_"
+// prefix. Only the composite resolver writes a device marker
+// (chaindevice.PropKey), so a claim an output mapping names after it, or
+// after the device token's claim, is dropped: whatever filled it, a caller's
+// own claims say, cannot forge a device the PDP trusts.
+func RepresentationData(result *types.EntityResult) map[string]interface{} {
+	resultData := make(map[string]interface{})
+
+	// Add resolved claims
+	for claimName, claimValue := range result.Claims {
+		resultData[claimName] = claimValue
+	}
+	delete(resultData, chaindevice.PropKey)
+	delete(resultData, chaindevice.TokenClaim)
+
+	// Add metadata with "metadata_" prefix
+	for metaKey, metaValue := range result.Metadata {
+		resultData[("metadata_" + metaKey)] = metaValue
+	}
+	return resultData
 }
 
 // RegisterMultiStrategyERS registers the multi-strategy ERS service

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 
 	"github.com/opentdf/platform/lib/flattening"
@@ -17,7 +18,9 @@ import (
 	ctxAuth "github.com/opentdf/platform/service/pkg/auth"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 
+	ent "github.com/opentdf/platform/service/entity"
 	"github.com/opentdf/platform/service/internal/access/v2/obligations"
+	"github.com/opentdf/platform/service/internal/chaindevice"
 	"github.com/opentdf/platform/service/logger"
 	"github.com/opentdf/platform/service/logger/audit"
 )
@@ -43,6 +46,11 @@ type JustInTimePDP struct {
 	// optional local subject mapping matcher; when set, getMatchedSubjectMappings
 	// avoids an SDK round-trip and serves from the in-memory store.
 	matcher SubjectMappingMatcher
+	// optional device rules of the policy; when set, they narrow what each
+	// subject keeps given the devices of its chain, none included: a
+	// requirement drops what it guards when no device meets it. Read-only:
+	// the store owns them.
+	deviceRules *chaindevice.Rules
 }
 
 // NewJustInTimePDP creates a new Policy Decision Point instance with no in-memory policy and a remote connection
@@ -79,6 +87,9 @@ func NewJustInTimePDP(
 	}
 	if m, ok := store.(SubjectMappingMatcher); ok {
 		p.matcher = m
+	}
+	if d, ok := store.(DeviceRuleSource); ok {
+		p.deviceRules = d.DeviceRules()
 	}
 
 	allAttributes, err := store.ListAllAttributes(ctx)
@@ -148,9 +159,8 @@ func (p *JustInTimePDP) GetDecision(
 	fulfillableObligationValueFQNs []string,
 ) (*Decision, error) {
 	var (
-		entityRepresentations   []*entityresolutionV2.EntityRepresentation
-		err                     error
-		skipEnvironmentEntities = true
+		resolved resolvedChain
+		err      error
 	)
 
 	// Because there are three possible types of entities, check obligations first to more easily handle decisioning logic
@@ -169,13 +179,13 @@ func (p *JustInTimePDP) GetDecision(
 
 	switch entityIdentifier.GetIdentifier().(type) {
 	case *authzV2.EntityIdentifier_EntityChain:
-		entityRepresentations, err = p.resolveEntitiesFromEntityChain(ctx, entityIdentifier.GetEntityChain(), skipEnvironmentEntities)
+		resolved, err = p.resolveEntitiesFromEntityChain(ctx, entityIdentifier.GetEntityChain())
 
 	case *authzV2.EntityIdentifier_Token:
-		entityRepresentations, err = p.resolveEntitiesFromToken(ctx, entityIdentifier.GetToken(), skipEnvironmentEntities, resources)
+		resolved, err = p.resolveEntitiesFromToken(ctx, entityIdentifier.GetToken(), resources)
 
 	case *authzV2.EntityIdentifier_WithRequestToken:
-		entityRepresentations, err = p.resolveEntitiesFromRequestToken(ctx, entityIdentifier.GetWithRequestToken(), skipEnvironmentEntities, resources)
+		resolved, err = p.resolveEntitiesFromRequestToken(ctx, entityIdentifier.GetWithRequestToken(), resources)
 
 	case *authzV2.EntityIdentifier_RegisteredResourceValueFqn:
 		regResValueFQN := strings.ToLower(entityIdentifier.GetRegisteredResourceValueFqn())
@@ -221,8 +231,8 @@ func (p *JustInTimePDP) GetDecision(
 	var resourceDecisionsAcrossAllEntityReps []ResourceDecision
 	allPermitted := true
 
-	for _, entityRep := range entityRepresentations {
-		entityRepresentationDecision, entitlements, err := p.pdp.GetDecision(ctx, entityRep, action, resources)
+	for _, entityRep := range resolved.subjects {
+		entityRepresentationDecision, entitlements, err := p.pdp.getDecision(ctx, entityRep, action, resources, p.deviceRules, resolved.devices)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get decision for entityRepresentation with original id [%s]: %w", entityRep.GetOriginalId(), err)
 		}
@@ -278,17 +288,16 @@ func (p *JustInTimePDP) GetEntitlements(
 	p.logger.DebugContext(ctx, "getting entitlements - resolving entity chain")
 
 	var (
-		entityRepresentations   []*entityresolutionV2.EntityRepresentation
-		err                     error
-		skipEnvironmentEntities = false
+		resolved resolvedChain
+		err      error
 	)
 
 	switch entityIdentifier.GetIdentifier().(type) {
 	case *authzV2.EntityIdentifier_EntityChain:
-		entityRepresentations, err = p.resolveEntitiesFromEntityChain(ctx, entityIdentifier.GetEntityChain(), skipEnvironmentEntities)
+		resolved, err = p.resolveEntitiesFromEntityChain(ctx, entityIdentifier.GetEntityChain())
 
 	case *authzV2.EntityIdentifier_Token:
-		entityRepresentations, err = p.resolveEntitiesFromToken(ctx, entityIdentifier.GetToken(), skipEnvironmentEntities, []*authzV2.Resource{})
+		resolved, err = p.resolveEntitiesFromToken(ctx, entityIdentifier.GetToken(), []*authzV2.Resource{})
 
 	case *authzV2.EntityIdentifier_RegisteredResourceValueFqn:
 		p.logger.DebugContext(ctx, "getting entitlements - resolving registered resource value FQN")
@@ -297,7 +306,7 @@ func (p *JustInTimePDP) GetEntitlements(
 		return p.pdp.GetEntitlementsRegisteredResource(ctx, regResValueFQN, withComprehensiveHierarchy)
 
 	case *authzV2.EntityIdentifier_WithRequestToken:
-		entityRepresentations, err = p.resolveEntitiesFromRequestToken(ctx, entityIdentifier.GetWithRequestToken(), skipEnvironmentEntities, []*authzV2.Resource{})
+		resolved, err = p.resolveEntitiesFromRequestToken(ctx, entityIdentifier.GetWithRequestToken(), []*authzV2.Resource{})
 
 	default:
 		return nil, fmt.Errorf("entity type %T: %w", entityIdentifier.GetIdentifier(), ErrInvalidEntityType)
@@ -306,7 +315,7 @@ func (p *JustInTimePDP) GetEntitlements(
 		return nil, fmt.Errorf("failed to resolve entities from entity identifier: %w", err)
 	}
 
-	matchedSubjectMappings, err := p.getMatchedSubjectMappings(ctx, entityRepresentations)
+	matchedSubjectMappings, err := p.getMatchedSubjectMappings(ctx, resolved.subjects)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get matched subject mappings: %w", err)
 	}
@@ -316,10 +325,11 @@ func (p *JustInTimePDP) GetEntitlements(
 		return nil, nil
 	}
 
-	entitlements, err := p.pdp.GetEntitlements(ctx, entityRepresentations, matchedSubjectMappings, withComprehensiveHierarchy)
+	entitlements, err := p.pdp.GetEntitlements(ctx, resolved.subjects, matchedSubjectMappings, withComprehensiveHierarchy)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get entitlements: %w", err)
 	}
+	narrowEntityEntitlements(ctx, p.logger, entitlements, p.deviceRules, resolved.devices)
 	return entitlements, nil
 }
 
@@ -363,64 +373,133 @@ func (p *JustInTimePDP) getMatchedSubjectMappings(
 	return rsp.GetSubjectMappings(), nil
 }
 
-// resolveEntitiesFromEntityChain roundtrips to ERS to resolve the provided entity chain
-// and optionally skips environment entities (which is expected behavior in decision flow)
+// resolvedChain is an entity identifier resolved for decisioning: the
+// representations every one of which must be entitled, and the devices that
+// ride with them and narrow what each of them keeps (see chaindevice).
+type resolvedChain struct {
+	subjects []*entityresolutionV2.EntityRepresentation
+	devices  []chaindevice.Device
+}
+
+// resolveEntitiesFromEntityChain roundtrips to ERS to resolve the entity
+// chain, its claims environment entities included, so the ERS can tell a
+// device from the request's environment by what it resolves to. Both decisioning and
+// entitlements then partition the representations alike:
+//   - a representation of a non-environment entity is a subject, as it always
+//     was, and if it carries a device marker the device is also one of the
+//     chain's devices;
+//   - a representation of an environment entity that carries a device marker
+//     (a device that comes with a person) is a device, not a subject, since a
+//     device never holds the person's entitlements;
+//   - every other environment entity is skipped, as upstream OpenTDF does.
+//
+// A representation that names no entity of the chain is a subject, so an
+// unexpected one must be entitled rather than ignored. The ERS binds a device
+// to the subjects it is sent, so the partition must be the one it saw: a
+// chain in which a subject and an environment entity share an ID is refused
+// before the ERS is asked, and so is a response with two representations of
+// one ID.
 func (p *JustInTimePDP) resolveEntitiesFromEntityChain(
 	ctx context.Context,
 	entityChain *entity.EntityChain,
-	skipEnvironmentEntities bool,
-) ([]*entityresolutionV2.EntityRepresentation, error) {
-	p.logger.DebugContext(ctx,
+) (resolvedChain, error) {
+	p.logger.DebugContext(
+		ctx,
 		"resolving entities from entity chain",
 		slog.String("entity_chain_id", entityChain.GetEphemeralId()),
-		slog.Bool("skip_environment_entities", skipEnvironmentEntities),
 	)
 
-	var filteredEntities []*entity.Entity
-	if skipEnvironmentEntities {
-		for _, chained := range entityChain.GetEntities() {
-			if chained.GetCategory() == entity.Entity_CATEGORY_ENVIRONMENT {
-				continue
-			}
-			filteredEntities = append(filteredEntities, chained)
+	// Only a claims entity can resolve to a device, so every other
+	// environment entity (a token's client ID, say) is skipped before the ERS,
+	// as upstream does: resolving it would cost an ERS lookup that can fail
+	// the decision.
+	var entities []*entity.Entity
+	for _, chained := range entityChain.GetEntities() {
+		if chained.GetCategory() == entity.Entity_CATEGORY_ENVIRONMENT && chained.GetClaims() == nil {
+			continue
 		}
-	} else {
-		filteredEntities = entityChain.GetEntities()
+		entities = append(entities, chained)
 	}
-	if len(filteredEntities) == 0 {
-		return nil, errors.New("no subject entities to resolve - all were environment entities and skipped")
+	// The ERS names a representation after its entity's ephemeral ID, or
+	// EntityIDPrefix and its index in the request when the entity has none.
+	environmentIDs := make(map[string]bool)
+	subjectIDs := make(map[string]bool)
+	for i, chained := range entities {
+		id := chained.GetEphemeralId()
+		if id == "" {
+			id = ent.EntityIDPrefix + strconv.Itoa(i)
+		}
+		if chained.GetCategory() == entity.Entity_CATEGORY_ENVIRONMENT {
+			environmentIDs[id] = true
+		} else {
+			subjectIDs[id] = true
+		}
+		if environmentIDs[id] && subjectIDs[id] {
+			return resolvedChain{}, fmt.Errorf("entity ID %q is used by both a subject and an environment entity", id)
+		}
+	}
+	if len(subjectIDs) == 0 {
+		return resolvedChain{}, errors.New("no subject entities to resolve - all were environment entities and skipped")
 	}
 
-	ersResp, err := p.sdk.EntityResolutionV2.ResolveEntities(ctx, &entityresolutionV2.ResolveEntitiesRequest{Entities: filteredEntities})
+	ersResp, err := p.sdk.EntityResolutionV2.ResolveEntities(ctx, &entityresolutionV2.ResolveEntitiesRequest{Entities: entities})
 	if err != nil {
-		return nil, fmt.Errorf("failed to resolve entities: %w", err)
+		return resolvedChain{}, fmt.Errorf("failed to resolve entities: %w", err)
 	}
 	entityRepresentations := ersResp.GetEntityRepresentations()
 	if entityRepresentations == nil {
-		return nil, fmt.Errorf("failed to get entity representations: %w", err)
+		return resolvedChain{}, fmt.Errorf("failed to get entity representations: %w", err)
 	}
-	return entityRepresentations, nil
+
+	var resolved resolvedChain
+	repIDs := make(map[string]bool, len(entityRepresentations))
+	for _, rep := range entityRepresentations {
+		id := rep.GetOriginalId()
+		if repIDs[id] {
+			return resolvedChain{}, fmt.Errorf("entity resolution returned two entity representations with ID %q", id)
+		}
+		repIDs[id] = true
+		isSubject := !environmentIDs[id]
+		if isSubject {
+			resolved.subjects = append(resolved.subjects, rep)
+		}
+		d, ok := chaindevice.FromRepresentation(rep)
+		if !ok {
+			continue
+		}
+		p.logger.DebugContext(
+			ctx, "entity in the chain is a device that narrows its subjects",
+			slog.String("entity_id", id),
+			slog.Bool("is_subject", isSubject),
+			slog.String("class", d.Class),
+			slog.Bool("bound", d.Bound),
+		)
+		resolved.devices = append(resolved.devices, d)
+	}
+	if len(resolved.subjects) == 0 {
+		return resolvedChain{}, errors.New("no subject entity representations returned by entity resolution")
+	}
+	return resolved, nil
 }
 
-// resolveEntitiesFromToken roundtrips to ERS to resolve the provided token
-// and optionally skips environment entities (which is expected behavior in decision flow)
+// resolveEntitiesFromToken roundtrips to ERS to create the token's entity
+// chain and resolves it as resolveEntitiesFromEntityChain does.
 func (p *JustInTimePDP) resolveEntitiesFromToken(
 	ctx context.Context,
 	token *entity.Token,
-	skipEnvironmentEntities bool,
 	resources []*authzV2.Resource,
-) ([]*entityresolutionV2.EntityRepresentation, error) {
+) (resolvedChain, error) {
 	// WARNING: do not log the token JWT, just its ID
 	p.logger.DebugContext(ctx, "resolving entities from token", slog.String("token_ephemeral_id", token.GetEphemeralId()))
 	ersResp, err := p.sdk.EntityResolutionV2.CreateEntityChainsFromTokens(ctx, &entityresolutionV2.CreateEntityChainsFromTokensRequest{Tokens: []*entity.Token{token}, Resources: resources})
 	if err != nil {
-		return nil, fmt.Errorf("failed to create entity chains from token: %w", err)
+		return resolvedChain{}, fmt.Errorf("failed to create entity chains from token: %w", err)
 	}
 	entityChains := ersResp.GetEntityChains()
 	if len(entityChains) != 1 {
-		return nil, fmt.Errorf("received %d entity chains in ERS response but expected exactly 1", len(entityChains))
+		return resolvedChain{}, fmt.Errorf("received %d entity chains in ERS response but expected exactly 1", len(entityChains))
 	}
-	return p.resolveEntitiesFromEntityChain(ctx, entityChains[0], skipEnvironmentEntities)
+	return p.resolveEntitiesFromEntityChain(ctx, entityChains[0])
 }
 
 // resolveEntitiesFromRequestToken pulls the request token off the context where it has been set upstream
@@ -428,22 +507,41 @@ func (p *JustInTimePDP) resolveEntitiesFromToken(
 func (p *JustInTimePDP) resolveEntitiesFromRequestToken(
 	ctx context.Context,
 	withRequestToken *wrapperspb.BoolValue,
-	skipEnvironmentEntities bool,
 	resources []*authzV2.Resource,
-) ([]*entityresolutionV2.EntityRepresentation, error) {
+) (resolvedChain, error) {
 	if !withRequestToken.GetValue() {
-		return nil, ErrInvalidWithRequestTokenEntityIdentifier
+		return resolvedChain{}, ErrInvalidWithRequestTokenEntityIdentifier
 	}
 	rawToken := ctxAuth.GetRawAccessTokenFromContext(ctx, p.logger)
 	if rawToken == "" {
-		return nil, ErrFailedToWithRequestTokenEntityIdentifier
+		return resolvedChain{}, ErrFailedToWithRequestTokenEntityIdentifier
 	}
 	token := &entity.Token{
 		Jwt:         rawToken,
 		EphemeralId: requestAuthTokenEphemeralID,
 	}
 
-	return p.resolveEntitiesFromToken(ctx, token, skipEnvironmentEntities, resources)
+	return p.resolveEntitiesFromToken(ctx, token, resources)
+}
+
+// narrowEntityEntitlements removes from each entity's entitlements the value
+// FQNs the rules do not let it keep given the devices of its chain, none
+// included: a requirement drops what it guards when no device meets it. What
+// is dropped is logged at Info, per entity.
+func narrowEntityEntitlements(
+	ctx context.Context,
+	l *logger.Logger,
+	entitlements []*authzV2.EntityEntitlements,
+	rules *chaindevice.Rules,
+	devices []chaindevice.Device,
+) {
+	if !rules.Narrows(devices) {
+		return
+	}
+	for _, e := range entitlements {
+		dropped := narrowGrants(e.GetActionsPerAttributeValueFqn(), rules, devices)
+		logDroppedGrants(ctx, l.With("entity_id", e.GetEphemeralId()).Logger, dropped, len(devices))
+	}
 }
 
 // auditDecision logs a GetDecisionV2 audit event with obligation information.

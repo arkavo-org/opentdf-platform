@@ -38,7 +38,7 @@ ERS enables the OpenTDF platform to:
 - **Status**: V2 only; selected by a `sources` list instead of `mode`
 - **Location**: [`./composite/`](./composite/), with the Patreon source in [`./patreon/`](./patreon/), the agent gate in [`./arkavo/`](./arkavo/) and the source contract in [`./source/`](./source/)
 - **Backends**: authnz-rs CWTs, verified against each issuer's COSE key set
-- **Features**: Per-source capabilities (one source owns each attribute definition), direct entitlements sealed between the two ERS calls, constraints that only remove grants (agent status, device-class caps)
+- **Features**: Per-source capabilities (one source owns each attribute definition), direct entitlements sealed between the two ERS calls, constraints that only remove grants (agent status), and device identity for the PDP's `device_rules` (a signed device token, bound to the person it rides with)
 - **Use Case**: Arkavo identity plane and Patreon creator memberships
 - **Configuration**: [`docs/Configuring.md`](../../docs/Configuring.md#composite-resolver)
 
@@ -75,7 +75,7 @@ services:
       - id: patreon
         type: patreon-token
         ...
-    constraints:    # agent_status, device_class_caps: only remove grants
+    constraints:    # agent_status: only removes grants
       ...
 ```
 

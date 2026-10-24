@@ -9,17 +9,12 @@ import (
 	"github.com/opentdf/platform/service/entityresolution/source"
 	"github.com/opentdf/platform/service/internal/agentstatus"
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 const (
-	tdfDef       = "https://arkavo.ai/attr/tdf"
-	agentDID     = "did:key:z6Mkagent"
-	agentOwner   = "00000000-0000-0000-0000-000000000001"
-	classifyDef  = "https://arkavo.ai/attr/classification"
-	classPublic  = "https://arkavo.ai/attr/classification/value/public"
-	attestedNPE  = "attested"
-	managedClass = "managed"
+	tdfDef     = "https://arkavo.ai/attr/tdf"
+	agentDID   = "did:key:z6Mkagent"
+	agentOwner = "00000000-0000-0000-0000-000000000001"
 )
 
 // agentClaims is a contract v2 agent token: an arkavo_npe of type agent, a
@@ -110,65 +105,4 @@ func TestAgentGate_PersonIsNeverChecked(t *testing.T) {
 
 	assert.Contains(t, grantFQNs(ev), creatorCampaign)
 	assert.Zero(t, checker.calls.Load())
-}
-
-func device(class string) source.Subject {
-	npe := map[string]any{"type": "device"}
-	if class != "" {
-		npe["class"] = class
-	}
-	claims := map[string]any{"iss": testIssuer, "arkavo_npe": npe}
-	return source.Subject{Claims: claims, Kind: source.KindOf(claims), Trust: source.TrustVerified}
-}
-
-func sealed(fqns ...string) []sealedGrant {
-	out := make([]sealedGrant, 0, len(fqns))
-	for _, f := range fqns {
-		out = append(out, sealedGrant{FQN: f, Actions: []string{"read"}, Source: "s"})
-	}
-	return out
-}
-
-func TestDeviceCaps_MissingClassIsNoCap(t *testing.T) {
-	caps := map[string]map[string]bool{managedClass: {classInternal: true}}
-	grants := sealed(classInternal, classConfidential)
-
-	assert.Equal(t, grants, capGrants(caps, device(attestedNPE), grants), "attested has no cap")
-	assert.Equal(t, grants, capGrants(caps, device(""), grants), "unverified has no cap")
-	assert.Equal(t, grants, capGrants(nil, device(managedClass), grants), "no caps configured")
-
-	person := source.Subject{Claims: map[string]any{"iss": testIssuer}, Kind: source.KindPerson, Trust: source.TrustVerified}
-	assert.Equal(t, grants, capGrants(caps, person, grants), "caps bind devices only")
-}
-
-func TestDeviceCaps_IntersectNeverAdds(t *testing.T) {
-	caps := map[string]map[string]bool{
-		managedClass:    {classInternal: true, classPublic: true},
-		classUnverified: {},
-	}
-	grants := sealed(classInternal, classConfidential)
-
-	assert.Equal(t, sealed(classInternal), capGrants(caps, device(managedClass), grants),
-		"the cap keeps internal, removes confidential and never adds public")
-	assert.Empty(t, capGrants(caps, device(""), grants), "a device with no class is unverified, capped to nothing")
-}
-
-// The caps are applied on the token route, after the union, to every
-// source's grants, the device-class source's included.
-func TestDeviceCaps_AppliedOnTokenRoute(t *testing.T) {
-	cfg := testConfig()
-	cfg.Constraints.DeviceClassCaps = map[string][]string{managedClass: {"HTTPS://arkavo.ai/attr/classification/value/Internal"}}
-	devices := SourceConfig{ID: "device-class", Issuer: testIssuer, Grants: []string{classifyDef}}
-	svc := newTestService(t, cfg, verifiersFor(&fakeVerifier{}), []configuredSource{
-		sourceOf(devices, newDeviceClassSource(map[string][]string{managedClass: {classInternal, classConfidential}})),
-		tdfSource(),
-	}, nil)
-	claims := creatorClaims(time.Now().Add(time.Hour))
-	claims["arkavo_entitlements"] = []any{decryptValue}
-	claims["arkavo_npe"] = map[string]any{"type": "device", "class": managedClass}
-
-	ev := tokenEvidence(t, svc, signCWT(t, claims))
-
-	assert.Equal(t, []string{classInternal}, grantFQNs(ev))
-	require.Equal(t, source.OutcomeComplete, ev.Outcomes["device-class"])
 }

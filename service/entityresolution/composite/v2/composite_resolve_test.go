@@ -255,7 +255,8 @@ func TestResolve_PEPChainWithoutIssGrantsNothing(t *testing.T) {
 func TestResolve_NonClaimsEntityGetsFreeView(t *testing.T) {
 	svc := newTestService(t, pepConfig(), nil, []configuredSource{pepPatreonSource(), identityCoreSource()}, nil)
 
-	reps := resolveAs(callerContext(t.Context(), testPEP), t, svc,
+	reps := resolveAs(
+		callerContext(t.Context(), testPEP), t, svc,
 		&entity.Entity{EntityType: &entity.Entity_UserName{UserName: "creator"}, EphemeralId: "user", Category: entity.Entity_CATEGORY_SUBJECT},
 		&entity.Entity{EntityType: &entity.Entity_UserName{UserName: "creator"}, Category: entity.Entity_CATEGORY_SUBJECT},
 	)
@@ -307,30 +308,37 @@ func TestResolve_UnreadableClaimsAreInvalidArgument(t *testing.T) {
 }
 
 // The kind is read from the claims the sources see, never taken from the
-// caller: a PEP subject whose claims describe a device is a device, so the
-// device-class source serves it and its class's cap binds it.
+// caller. A source serving devices alone runs for a PEP subject whose claims
+// describe a device, whatever kind the caller set, and never for claims that
+// describe a person, nor for claims discarded for want of trust.
 func TestResolveSubject_KindComesFromClaims(t *testing.T) {
-	cfg := pepConfig()
-	cfg.Constraints.DeviceClassCaps = map[string][]string{managedClass: {classInternal}}
-	devices := SourceConfig{
-		ID: "device-class", Issuer: testIssuer, Grants: []string{classifyDef},
+	devicesOnly := SourceConfig{
+		ID: "devices-only", Issuer: testIssuer, Grants: []string{exampleDef},
 		Subjects: []source.Kind{source.KindDevice}, PEPAssertable: true,
 	}
-	tdf := SourceConfig{ID: "identity-core", Issuer: testIssuer, Grants: []string{tdfDef}, PEPAssertable: true}
-	svc := newTestService(t, cfg, nil, []configuredSource{
-		sourceOf(devices, newDeviceClassSource(map[string][]string{managedClass: {classInternal, classConfidential}})),
-		sourceOf(tdf, newTokenClaimsSource("arkavo_entitlements", tdf.Grants)),
-	}, nil)
-	claims := map[string]any{
-		"iss":                 testIssuer,
-		"arkavo_entitlements": []any{decryptValue},
-		"arkavo_npe":          map[string]any{"type": "device", "class": managedClass},
+	svc := newTestService(t, pepConfig(), nil, []configuredSource{sourceOf(devicesOnly, fakeSource{res: granting(exampleValue)})}, nil)
+	deviceSays := map[string]any{"iss": testIssuer, "arkavo_npe": map[string]any{"type": "device", "class": "managed"}}
+	personSays := map[string]any{"iss": testIssuer, "sub": creatorSub}
+
+	for name, tc := range map[string]struct {
+		subj source.Subject
+		runs bool
+	}{
+		"device claims, the caller says person": {source.Subject{Claims: deviceSays, Kind: source.KindPerson, Trust: source.TrustPEP}, true},
+		"person claims, the caller says device": {source.Subject{Claims: personSays, Kind: source.KindDevice, Trust: source.TrustPEP}, false},
+		"discarded device claims":               {source.Subject{Claims: deviceSays, Kind: source.KindDevice, Trust: source.TrustNone}, false},
+		"no claims, the caller says device":     {source.Subject{Kind: source.KindDevice, Trust: source.TrustNone}, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ev := svc.resolveSubject(t.Context(), tc.subj, source.Query{Action: "read"}, svc.now().Add(time.Minute))
+
+			if tc.runs {
+				assert.Equal(t, source.OutcomeComplete, ev.Outcomes["devices-only"], "the claims make it a device")
+				assert.Equal(t, []string{exampleValue}, grantFQNs(ev))
+				return
+			}
+			assert.Equal(t, source.OutcomeNotApplicable, ev.Outcomes["devices-only"], "the claims do not make it a device")
+			assert.Empty(t, ev.Grants)
+		})
 	}
-
-	ev := svc.resolveSubject(t.Context(), source.Subject{Claims: claims, Kind: source.KindPerson, Trust: source.TrustPEP},
-		source.Query{Action: "read"}, svc.now().Add(time.Minute))
-
-	assert.Equal(t, source.OutcomeComplete, ev.Outcomes["device-class"], "the device-class source serves it as a device")
-	assert.Equal(t, []string{classInternal}, grantFQNs(ev),
-		"the managed cap keeps internal and removes confidential and decrypt")
 }

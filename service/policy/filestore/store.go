@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/opentdf/platform/protocol/go/policy"
+	"github.com/opentdf/platform/service/internal/chaindevice"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 )
@@ -27,6 +28,7 @@ type Store struct {
 	kasByURI            map[string]*policy.KeyAccessServer
 	registeredResources []*policy.RegisteredResource
 	obligations         []*policy.Obligation
+	deviceRules         *chaindevice.Rules
 }
 
 // NewStore builds an in-memory store from the supplied schema. Validation is
@@ -209,12 +211,16 @@ type builder struct {
 	scsByID          map[string]*policy.SubjectConditionSet
 	registered       []*policy.RegisteredResource
 	obligations      []*policy.Obligation
+	deviceRules      *chaindevice.Rules
 }
 
 func (b *builder) build() (*Store, error) {
 	b.buildKAS()
 	b.buildNamespaces()
 	if err := b.buildAttributes(); err != nil {
+		return nil, err
+	}
+	if err := b.buildDeviceRules(); err != nil {
 		return nil, err
 	}
 	if err := b.buildSubjectConditionSets(); err != nil {
@@ -244,6 +250,7 @@ func (b *builder) build() (*Store, error) {
 		kasByURI:            b.kasByURI,
 		registeredResources: b.registered,
 		obligations:         b.obligations,
+		deviceRules:         b.deviceRules,
 	}, nil
 }
 
