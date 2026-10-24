@@ -393,7 +393,11 @@ type resolvedChain struct {
 //   - every other environment entity is skipped, as upstream OpenTDF does.
 //
 // A representation that names no entity of the chain is a subject, so an
-// unexpected one must be entitled rather than ignored.
+// unexpected one must be entitled rather than ignored. The ERS binds a device
+// to the subjects it is sent, so the partition must be the one it saw: a
+// chain in which a subject and an environment entity share an ID is refused
+// before the ERS is asked, and so is a response with two representations of
+// one ID.
 func (p *JustInTimePDP) resolveEntitiesFromEntityChain(
 	ctx context.Context,
 	entityChain *entity.EntityChain,
@@ -429,6 +433,9 @@ func (p *JustInTimePDP) resolveEntitiesFromEntityChain(
 		} else {
 			subjectIDs[id] = true
 		}
+		if environmentIDs[id] && subjectIDs[id] {
+			return resolvedChain{}, fmt.Errorf("entity ID %q is used by both a subject and an environment entity", id)
+		}
 	}
 	if len(subjectIDs) == 0 {
 		return resolvedChain{}, errors.New("no subject entities to resolve - all were environment entities and skipped")
@@ -444,10 +451,14 @@ func (p *JustInTimePDP) resolveEntitiesFromEntityChain(
 	}
 
 	var resolved resolvedChain
+	repIDs := make(map[string]bool, len(entityRepresentations))
 	for _, rep := range entityRepresentations {
 		id := rep.GetOriginalId()
-		// An ID both categories use is a subject.
-		isSubject := !environmentIDs[id] || subjectIDs[id]
+		if repIDs[id] {
+			return resolvedChain{}, fmt.Errorf("entity resolution returned two entity representations with ID %q", id)
+		}
+		repIDs[id] = true
+		isSubject := !environmentIDs[id]
 		if isSubject {
 			resolved.subjects = append(resolved.subjects, rep)
 		}

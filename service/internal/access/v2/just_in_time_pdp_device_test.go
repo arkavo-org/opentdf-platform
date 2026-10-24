@@ -11,6 +11,7 @@ import (
 	entityresolutionV2 "github.com/opentdf/platform/protocol/go/entityresolution/v2"
 	"github.com/opentdf/platform/protocol/go/policy"
 	otdfSDK "github.com/opentdf/platform/sdk"
+	ent "github.com/opentdf/platform/service/entity"
 	"github.com/opentdf/platform/service/internal/chaindevice"
 	"github.com/opentdf/platform/service/logger"
 	"github.com/opentdf/platform/service/logger/audit"
@@ -163,16 +164,6 @@ func TestResolveChain_PartitionsDevices(t *testing.T) {
 			},
 			wantSubjects: []string{"person", "stranger"},
 		},
-		{
-			name: "an ID both categories use is a subject",
-			entities: func(t *testing.T) []*entity.Entity {
-				return []*entity.Entity{person(t), claimsEntityOf(t, "person", entity.Entity_CATEGORY_ENVIRONMENT)}
-			},
-			reps: func(t *testing.T) []*entityresolutionV2.EntityRepresentation {
-				return []*entityresolutionV2.EntityRepresentation{repOf(t, "person", nil)}
-			},
-			wantSubjects: []string{"person"},
-		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -199,6 +190,56 @@ func TestResolveChain_PartitionsDevices(t *testing.T) {
 			sent = append(sent, e.GetEphemeralId())
 		}
 		assert.Equal(t, []string{"person", "device"}, sent, "the claims device is resolved; the client ID is not")
+		assert.Equal(t, []chaindevice.Device{bound}, resolved.devices)
+	})
+
+	// The ERS binds a device to the subjects it is sent, so the PDP must not
+	// partition the chain otherwise: an ID that a subject and an environment
+	// entity share, whether explicit or index-derived as the ERS names an
+	// entity with none, is refused before the ERS is asked, and so are two
+	// representations with one ID.
+	t.Run("an ID a subject and an environment entity share is an error", func(t *testing.T) {
+		for name, entities := range map[string]func(t *testing.T) []*entity.Entity{
+			"explicit IDs": func(t *testing.T) []*entity.Entity {
+				return []*entity.Entity{person(t), device(t), claimsEntityOf(t, "person", entity.Entity_CATEGORY_ENVIRONMENT)}
+			},
+			"an explicit ID equals an index-derived one": func(t *testing.T) []*entity.Entity {
+				idless := claimsEntityOf(t, "", entity.Entity_CATEGORY_ENVIRONMENT)
+				return []*entity.Entity{claimsEntityOf(t, ent.EntityIDPrefix+"1", entity.Entity_CATEGORY_SUBJECT), idless}
+			},
+		} {
+			t.Run(name, func(t *testing.T) {
+				ers := &stubERS{reps: []*entityresolutionV2.EntityRepresentation{repOf(t, "person", nil)}}
+				_, err := jitWith(ers).resolveEntitiesFromEntityChain(t.Context(), chainOf(entities(t)...))
+				require.ErrorContains(t, err, "is used by both a subject and an environment entity")
+				assert.Empty(t, ers.seen, "the ERS is never asked")
+			})
+		}
+	})
+
+	t.Run("two representations with one ID are an error", func(t *testing.T) {
+		for name, reps := range map[string]func(t *testing.T) []*entityresolutionV2.EntityRepresentation{
+			"a subject's": func(t *testing.T) []*entityresolutionV2.EntityRepresentation {
+				return []*entityresolutionV2.EntityRepresentation{repOf(t, "person", nil), repOf(t, "person", nil)}
+			},
+			"a device's": func(t *testing.T) []*entityresolutionV2.EntityRepresentation {
+				return []*entityresolutionV2.EntityRepresentation{repOf(t, "person", nil), repOf(t, "device", bound), repOf(t, "device", unverified)}
+			},
+		} {
+			t.Run(name, func(t *testing.T) {
+				ers := &stubERS{reps: reps(t)}
+				_, err := jitWith(ers).resolveEntitiesFromEntityChain(t.Context(), chainOf(person(t), device(t)))
+				require.ErrorContains(t, err, "two entity representations with ID")
+			})
+		}
+	})
+
+	t.Run("distinct explicit and index-derived IDs resolve", func(t *testing.T) {
+		idless := claimsEntityOf(t, "", entity.Entity_CATEGORY_ENVIRONMENT)
+		ers := &stubERS{reps: []*entityresolutionV2.EntityRepresentation{repOf(t, "person", nil), repOf(t, ent.EntityIDPrefix+"1", bound)}}
+		resolved, err := jitWith(ers).resolveEntitiesFromEntityChain(t.Context(), chainOf(person(t), idless))
+		require.NoError(t, err)
+		assert.Equal(t, []string{"person"}, repIDs(resolved.subjects))
 		assert.Equal(t, []chaindevice.Device{bound}, resolved.devices)
 	})
 
