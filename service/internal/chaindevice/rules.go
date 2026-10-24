@@ -81,6 +81,38 @@ func (r *Rules) Keeps(devices []Device, fqn string) bool {
 	return true
 }
 
+// Why Keeps drops a grant, as Why reports it.
+const (
+	// WhyUnboundDevice: a device of the chain is not bound to its person.
+	WhyUnboundDevice = "unbound_device"
+	// WhyRequirement: a requirement names the grant and no device meets it.
+	WhyRequirement = "requirement"
+	// WhyCap: a cap on the class of a device of the chain does not keep it.
+	WhyCap = "cap"
+)
+
+// Why says why Keeps drops the grant fqn for these devices: "" when Keeps
+// keeps it, else the first check of Keeps' it fails, WhyUnboundDevice,
+// WhyRequirement or WhyCap. Keeps decides; Why only explains, for logs, and
+// consults Keeps first, so it never disagrees with it.
+func (r *Rules) Why(devices []Device, fqn string) string {
+	if r.Keeps(devices, fqn) {
+		return ""
+	}
+	if slices.ContainsFunc(devices, func(d Device) bool { return !d.Bound }) {
+		return WhyUnboundDevice
+	}
+	if r != nil {
+		for _, req := range r.Requirements {
+			if matchesAny(req.Grants, fqn) && !slices.ContainsFunc(devices, req.metBy) {
+				return WhyRequirement
+			}
+		}
+	}
+	// Every device is bound and every requirement met, so a cap dropped it.
+	return WhyCap
+}
+
 // Narrows reports whether Keeps could drop a grant for these devices, so a
 // caller can skip it when it cannot.
 func (r *Rules) Narrows(devices []Device) bool {

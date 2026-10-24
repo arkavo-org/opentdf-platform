@@ -1,8 +1,12 @@
 package access
 
 import (
+	"bufio"
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"log/slog"
 	"strings"
 	"testing"
 
@@ -292,27 +296,27 @@ func TestNarrowEntityEntitlements_Rules(t *testing.T) {
 
 	t.Run("no devices: a requirement drops what it names", func(t *testing.T) {
 		e := entitlementsOf(publishFQN, campaignFQN)
-		narrowEntityEntitlements(e, publishRule(publishFQN), nil)
+		narrowEntityEntitlements(t.Context(), logger.CreateTestLogger(), e, publishRule(publishFQN), nil)
 		assert.Equal(t, []string{campaignFQN}, kept(e))
 	})
 	t.Run("an attested device keeps both", func(t *testing.T) {
 		e := entitlementsOf(publishFQN, campaignFQN)
-		narrowEntityEntitlements(e, publishRule(publishFQN), []chaindevice.Device{attested})
+		narrowEntityEntitlements(t.Context(), logger.CreateTestLogger(), e, publishRule(publishFQN), []chaindevice.Device{attested})
 		assert.ElementsMatch(t, []string{publishFQN, campaignFQN}, kept(e))
 	})
 	t.Run("an unbound device drops everything", func(t *testing.T) {
 		e := entitlementsOf(publishFQN, campaignFQN)
-		narrowEntityEntitlements(e, publishRule(publishFQN), []chaindevice.Device{attested, unbound})
+		narrowEntityEntitlements(t.Context(), logger.CreateTestLogger(), e, publishRule(publishFQN), []chaindevice.Device{attested, unbound})
 		assert.Empty(t, kept(e))
 	})
 	t.Run("an unbound device drops everything under nil rules too", func(t *testing.T) {
 		e := entitlementsOf(publishFQN, campaignFQN)
-		narrowEntityEntitlements(e, nil, []chaindevice.Device{unbound})
+		narrowEntityEntitlements(t.Context(), logger.CreateTestLogger(), e, nil, []chaindevice.Device{unbound})
 		assert.Empty(t, kept(e))
 	})
 	t.Run("nil rules and no devices change nothing", func(t *testing.T) {
 		e := entitlementsOf(publishFQN, campaignFQN)
-		narrowEntityEntitlements(e, nil, nil)
+		narrowEntityEntitlements(t.Context(), logger.CreateTestLogger(), e, nil, nil)
 		assert.ElementsMatch(t, []string{publishFQN, campaignFQN}, kept(e))
 	})
 }
@@ -373,15 +377,11 @@ func TestNewJustInTimePDP_DetectsDeviceRules(t *testing.T) {
 	assert.Nil(t, pdp.deviceRules)
 }
 
-// The rules and the chain's devices reach both routes of the JIT PDP: a
-// decision and the entitlements of the same chain narrow alike.
-func TestJustInTimePDP_DeviceRulesNarrowBothRoutes(t *testing.T) {
-	publishFQN := createAttrValueFQN(testBaseNamespace, "capability", "publish")
-	campaignFQN := createAttrValueFQN(testBaseNamespace, "campaign", "13167240")
-	attested := chaindevice.Device{Class: chaindevice.ClassAttested, Verified: true, Bound: true, AppEnv: chaindevice.EnvProduction}
-	managed := chaindevice.Device{Class: chaindevice.ClassManaged, Verified: true, Bound: true}
-	unbound := chaindevice.Device{Class: chaindevice.ClassAttested, Verified: true}
-
+// creatorPDP is a JIT PDP, logging to l, over a policy that declares
+// publishFQN and campaignFQN, both mapped to a creator, and rules. Its ERS
+// answers with the representations personChain sets.
+func creatorPDP(t *testing.T, l *logger.Logger, publishFQN, campaignFQN string, rules *chaindevice.Rules) (*JustInTimePDP, *stubERS) {
+	t.Helper()
 	store := &ruleStore{
 		attributes: []*policy.Attribute{
 			{
@@ -399,23 +399,42 @@ func TestJustInTimePDP_DeviceRulesNarrowBothRoutes(t *testing.T) {
 			createSimpleSubjectMapping(publishFQN, "publish", []*policy.Action{testActionRead}, ".properties.role", []string{"creator"}, nil),
 			createSimpleSubjectMapping(campaignFQN, "13167240", []*policy.Action{testActionRead}, ".properties.role", []string{"creator"}, nil),
 		},
-		rules: publishRule(publishFQN),
+		rules: rules,
 	}
 	ers := &stubERS{}
-	pdp, err := NewJustInTimePDP(t.Context(), logger.CreateTestLogger(), &otdfSDK.SDK{EntityResolutionV2: ers}, store, false, false)
+	pdp, err := NewJustInTimePDP(t.Context(), l, &otdfSDK.SDK{EntityResolutionV2: ers}, store, false, false)
 	require.NoError(t, err)
+	return pdp, ers
+}
 
+// personChain is a chain of a creator, "person", and one environment entity
+// per device, which ers resolves to a representation carrying its marker.
+func personChain(t *testing.T, ers *stubERS, devices ...chaindevice.Device) *authzV2.EntityIdentifier {
+	t.Helper()
+	entities := []*entity.Entity{claimsEntityOf(t, "person", entity.Entity_CATEGORY_SUBJECT)}
+	reps := []*entityresolutionV2.EntityRepresentation{repOf(t, "person", nil)}
+	for i, d := range devices {
+		id := "device-" + string(rune('a'+i))
+		entities = append(entities, claimsEntityOf(t, id, entity.Entity_CATEGORY_ENVIRONMENT))
+		reps = append(reps, repOf(t, id, d))
+	}
+	ers.reps = reps
+	return &authzV2.EntityIdentifier{Identifier: &authzV2.EntityIdentifier_EntityChain{EntityChain: chainOf(entities...)}}
+}
+
+// The rules and the chain's devices reach both routes of the JIT PDP: a
+// decision and the entitlements of the same chain narrow alike.
+func TestJustInTimePDP_DeviceRulesNarrowBothRoutes(t *testing.T) {
+	publishFQN := createAttrValueFQN(testBaseNamespace, "capability", "publish")
+	campaignFQN := createAttrValueFQN(testBaseNamespace, "campaign", "13167240")
+	attested := chaindevice.Device{Class: chaindevice.ClassAttested, Verified: true, Bound: true, AppEnv: chaindevice.EnvProduction}
+	managed := chaindevice.Device{Class: chaindevice.ClassManaged, Verified: true, Bound: true}
+	unbound := chaindevice.Device{Class: chaindevice.ClassAttested, Verified: true}
+
+	pdp, ers := creatorPDP(t, logger.CreateTestLogger(), publishFQN, campaignFQN, publishRule(publishFQN))
 	chain := func(t *testing.T, devices ...chaindevice.Device) *authzV2.EntityIdentifier {
 		t.Helper()
-		entities := []*entity.Entity{claimsEntityOf(t, "person", entity.Entity_CATEGORY_SUBJECT)}
-		reps := []*entityresolutionV2.EntityRepresentation{repOf(t, "person", nil)}
-		for i, d := range devices {
-			id := "device-" + string(rune('a'+i))
-			entities = append(entities, claimsEntityOf(t, id, entity.Entity_CATEGORY_ENVIRONMENT))
-			reps = append(reps, repOf(t, id, d))
-		}
-		ers.reps = reps
-		return &authzV2.EntityIdentifier{Identifier: &authzV2.EntityIdentifier_EntityChain{EntityChain: chainOf(entities...)}}
+		return personChain(t, ers, devices...)
 	}
 	permitted := func(t *testing.T, id *authzV2.EntityIdentifier, fqn string) bool {
 		t.Helper()
@@ -459,5 +478,84 @@ func TestJustInTimePDP_DeviceRulesNarrowBothRoutes(t *testing.T) {
 		assert.False(t, permitted(t, id, publishFQN))
 		assert.False(t, permitted(t, id, campaignFQN))
 		assert.Empty(t, entitled(t, id))
+	})
+}
+
+// droppedMsg is logged at Info whenever device rules drop a grant.
+const droppedMsg = "device rules dropped grants"
+
+// droppedRecords decodes the JSON log lines in buf and returns the dropped
+// grants of each droppedMsg record, by entity ID.
+func droppedRecords(t *testing.T, buf *bytes.Buffer) []map[string]any {
+	t.Helper()
+	var out []map[string]any
+	for sc := bufio.NewScanner(buf); sc.Scan(); {
+		var rec map[string]any
+		require.NoError(t, json.Unmarshal(sc.Bytes(), &rec))
+		if rec["msg"] == droppedMsg {
+			assert.Equal(t, "INFO", rec["level"])
+			out = append(out, rec)
+		}
+	}
+	buf.Reset()
+	return out
+}
+
+// Every grant the device rules drop is logged at Info, with the entity and
+// why (see chaindevice.Rules.Why), on both routes; nothing is logged when
+// nothing is dropped.
+func TestJustInTimePDP_LogsDroppedGrants(t *testing.T) {
+	publishFQN := createAttrValueFQN(testBaseNamespace, "capability", "publish")
+	campaignFQN := createAttrValueFQN(testBaseNamespace, "campaign", "13167240")
+	attested := chaindevice.Device{Class: chaindevice.ClassAttested, Verified: true, Bound: true}
+	unbound := chaindevice.Device{Class: chaindevice.ClassAttested, Verified: true}
+	buf := &bytes.Buffer{}
+	bufLog := &logger.Logger{
+		Logger: slog.New(slog.NewJSONHandler(buf, &slog.HandlerOptions{Level: slog.LevelInfo})),
+		Audit:  logger.CreateTestLogger().Audit,
+	}
+	pdp, ers := creatorPDP(t, bufLog, publishFQN, campaignFQN, publishRule(publishFQN))
+	decide := func(t *testing.T, id *authzV2.EntityIdentifier, fqn string) {
+		t.Helper()
+		_, err := pdp.GetDecision(audit.ContextWithActorID(t.Context(), "pep"), id, testActionRead, createResourcePerFqn(fqn), nil, nil)
+		require.NoError(t, err)
+	}
+	entitlements := func(t *testing.T, id *authzV2.EntityIdentifier) {
+		t.Helper()
+		_, err := pdp.GetEntitlements(t.Context(), id, false)
+		require.NoError(t, err)
+	}
+
+	t.Run("a requirement with no device", func(t *testing.T) {
+		id := personChain(t, ers)
+		decide(t, id, publishFQN)
+		recs := droppedRecords(t, buf)
+		require.Len(t, recs, 1, "GetDecision")
+		assert.Equal(t, "person", recs[0]["entity_id"])
+		assert.Equal(t, map[string]any{publishFQN: chaindevice.WhyRequirement}, recs[0]["dropped"])
+		assert.InDelta(t, 0, recs[0]["devices_count"], 0)
+
+		entitlements(t, id)
+		recs = droppedRecords(t, buf)
+		require.Len(t, recs, 1, "GetEntitlements")
+		assert.Equal(t, "person", recs[0]["entity_id"])
+		assert.Equal(t, map[string]any{publishFQN: chaindevice.WhyRequirement}, recs[0]["dropped"])
+	})
+	t.Run("an unbound device", func(t *testing.T) {
+		id := personChain(t, ers, attested, unbound)
+		entitlements(t, id)
+		recs := droppedRecords(t, buf)
+		require.Len(t, recs, 1)
+		assert.Equal(t, map[string]any{
+			publishFQN:  chaindevice.WhyUnboundDevice,
+			campaignFQN: chaindevice.WhyUnboundDevice,
+		}, recs[0]["dropped"])
+		assert.InDelta(t, 2, recs[0]["devices_count"], 0)
+	})
+	t.Run("nothing dropped", func(t *testing.T) {
+		id := personChain(t, ers, attested)
+		decide(t, id, publishFQN)
+		entitlements(t, id)
+		assert.Empty(t, droppedRecords(t, buf))
 	})
 }

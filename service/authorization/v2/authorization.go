@@ -17,6 +17,7 @@ import (
 	otdf "github.com/opentdf/platform/sdk"
 	"github.com/opentdf/platform/service/internal/access/v2"
 	authn "github.com/opentdf/platform/service/internal/auth"
+	"github.com/opentdf/platform/service/internal/chaindevice"
 	"github.com/opentdf/platform/service/logger"
 	ctxAuth "github.com/opentdf/platform/service/pkg/auth"
 	"github.com/opentdf/platform/service/pkg/cache"
@@ -75,7 +76,8 @@ func NewRegistration() *serviceregistry.Service[authzV2Connect.AuthorizationServ
 				}
 
 				if err := authZCfg.Validate(); err != nil {
-					l.Error("invalid authorization service config",
+					l.Error(
+						"invalid authorization service config",
 						slog.Any("config", authZCfg.LogValue()),
 						slog.Any("error", err),
 					)
@@ -91,16 +93,19 @@ func NewRegistration() *serviceregistry.Service[authzV2Connect.AuthorizationServ
 				if authZCfg.PolicyFile != "" {
 					store, err := filestore.NewStoreFromFile(authZCfg.PolicyFile)
 					if err != nil {
-						l.Error("failed to load policy file",
+						l.Error(
+							"failed to load policy file",
 							slog.String("path", authZCfg.PolicyFile),
 							slog.Any("error", err),
 						)
 						panic(fmt.Errorf("failed to load policy file %q: %w", authZCfg.PolicyFile, err))
 					}
 					as.cache = store
-					l.Info("authorization service using file-backed policy provider",
+					l.Info(
+						"authorization service using file-backed policy provider",
 						slog.String("path", authZCfg.PolicyFile),
 					)
+					logDeviceRules(l, authZCfg.PolicyFile, store.DeviceRules())
 					// Public attribute discovery from the same snapshot the
 					// PDP evaluates — attribute FQNs dereference here (see
 					// attributes_endpoint.go). Compose with the RAR handler.
@@ -156,6 +161,23 @@ func NewRegistration() *serviceregistry.Service[authzV2Connect.AuthorizationServ
 	}
 }
 
+// logDeviceRules says at Info whether the policy file at path declares device
+// rules, and how many of each kind, so an operator can see they loaded: a
+// binary that predates device_rules ignores the section silently, and with
+// no rules a device requirement guards nothing.
+func logDeviceRules(l *logger.Logger, path string, rules *chaindevice.Rules) {
+	if rules == nil {
+		l.Info("device_rules: none declared in the policy file", slog.String("path", path))
+		return
+	}
+	l.Info(
+		"device_rules loaded",
+		slog.String("path", path),
+		slog.Int("requirements", len(rules.Requirements)),
+		slog.Int("caps", len(rules.Caps)),
+	)
+}
+
 // buildRARHandler wires the RFC 8693 + RFC 9396 token-exchange endpoint when
 // enabled. Returns nil when the feature is off, in which case the platform
 // HTTP mux logs a benign "no extra http handlers" message and moves on.
@@ -181,7 +203,8 @@ func buildRARHandler(svc *Service, cfg *Config, srp serviceregistry.Registration
 			slog.Any("error", err))
 		cwtSigner = nil
 	}
-	srp.Logger.Info("rar token endpoint enabled",
+	srp.Logger.Info(
+		"rar token endpoint enabled",
 		slog.String("issuer", cfg.RAR.Issuer),
 		slog.String("token_ttl", ttl.String()),
 		slog.String("token_path", rarTokenPath),
@@ -219,7 +242,8 @@ func buildRARHandler(svc *Service, cfg *Config, srp serviceregistry.Registration
 			srp.Logger.Error("failed to create CWT verifier; CWT subject tokens disabled",
 				slog.Any("error", err))
 		} else {
-			srp.Logger.Info("CWT subject-token verifier enabled",
+			srp.Logger.Info(
+				"CWT subject-token verifier enabled",
 				slog.String("cose_keys_url", cfg.RAR.CWTVerifier.COSEKeysURL),
 				slog.String("issuer", cfg.RAR.CWTVerifier.Issuer),
 				slog.String("audience", cfg.RAR.CWTVerifier.Audience),

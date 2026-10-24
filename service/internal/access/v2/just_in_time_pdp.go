@@ -46,9 +46,10 @@ type JustInTimePDP struct {
 	// optional local subject mapping matcher; when set, getMatchedSubjectMappings
 	// avoids an SDK round-trip and serves from the in-memory store.
 	matcher SubjectMappingMatcher
-	// optional device rules of the policy; when set, the devices of a chain
-	// narrow what each subject keeps by these rules. Read-only: the store
-	// owns them.
+	// optional device rules of the policy; when set, they narrow what each
+	// subject keeps given the devices of its chain, none included: a
+	// requirement drops what it guards when no device meets it. Read-only:
+	// the store owns them.
 	deviceRules *chaindevice.Rules
 }
 
@@ -328,7 +329,7 @@ func (p *JustInTimePDP) GetEntitlements(
 	if err != nil {
 		return nil, fmt.Errorf("failed to get entitlements: %w", err)
 	}
-	narrowEntityEntitlements(entitlements, p.deviceRules, resolved.devices)
+	narrowEntityEntitlements(ctx, p.logger, entitlements, p.deviceRules, resolved.devices)
 	return entitlements, nil
 }
 
@@ -524,18 +525,22 @@ func (p *JustInTimePDP) resolveEntitiesFromRequestToken(
 }
 
 // narrowEntityEntitlements removes from each entity's entitlements the value
-// FQNs the rules do not let it keep while devices ride in its chain.
-func narrowEntityEntitlements(entitlements []*authzV2.EntityEntitlements, rules *chaindevice.Rules, devices []chaindevice.Device) {
+// FQNs the rules do not let it keep given the devices of its chain, none
+// included: a requirement drops what it guards when no device meets it. What
+// is dropped is logged at Info, per entity.
+func narrowEntityEntitlements(
+	ctx context.Context,
+	l *logger.Logger,
+	entitlements []*authzV2.EntityEntitlements,
+	rules *chaindevice.Rules,
+	devices []chaindevice.Device,
+) {
 	if !rules.Narrows(devices) {
 		return
 	}
 	for _, e := range entitlements {
-		actions := e.GetActionsPerAttributeValueFqn()
-		for fqn := range actions {
-			if !rules.Keeps(devices, fqn) {
-				delete(actions, fqn)
-			}
-		}
+		dropped := narrowGrants(e.GetActionsPerAttributeValueFqn(), rules, devices)
+		logDroppedGrants(ctx, l.With("entity_id", e.GetEphemeralId()).Logger, dropped, len(devices))
 	}
 }
 

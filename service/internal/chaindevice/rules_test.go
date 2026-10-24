@@ -182,3 +182,79 @@ func TestNarrows(t *testing.T) {
 	assert.True(t, (&Rules{}).Narrows(device))
 	assert.True(t, (&Rules{Requirements: []Requirement{{Grants: []string{publish}}}}).Narrows(nil))
 }
+
+// Why names the first check Keeps fails, in Keeps' order: an unbound device,
+// then a requirement, then a cap.
+func TestWhy(t *testing.T) {
+	attested := Device{Class: ClassAttested, Verified: true, Bound: true}
+	managed := Device{Class: ClassManaged, Verified: true, Bound: true}
+	unbound := Device{Class: ClassAttested, Verified: true}
+	rules := &Rules{
+		Requirements: []Requirement{{Grants: []string{publish}, DeviceClasses: []string{ClassAttested}}},
+		Caps:         []Cap{{DeviceClass: ClassManaged, Keeps: []string{campaignDef}}},
+	}
+	var noRules *Rules
+
+	for _, tc := range []struct {
+		name    string
+		rules   *Rules
+		devices []Device
+		fqn     string
+		want    string
+	}{
+		{"kept", rules, []Device{attested}, publish, ""},
+		{"no rule names it", rules, nil, campaignValue, ""},
+		{"unbound, no rules", noRules, []Device{unbound}, campaignValue, WhyUnboundDevice},
+		{"unbound beside a device that meets the requirement", rules, []Device{attested, unbound}, publish, WhyUnboundDevice},
+		{"requirement, no device", rules, nil, publish, WhyRequirement},
+		{"requirement and cap both fail: the requirement is named", rules, []Device{managed}, publish, WhyRequirement},
+		{"cap", rules, []Device{managed}, tierValue, WhyCap},
+		{"cap beside a device that meets the requirement", rules, []Device{attested, managed}, publish, WhyCap},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, tc.rules.Why(tc.devices, tc.fqn))
+		})
+	}
+}
+
+// Why explains Keeps and never disagrees with it: it is empty exactly when
+// Keeps keeps the grant, for every rule set, device set and FQN tried.
+func TestWhy_AgreesWithKeeps(t *testing.T) {
+	ruleSets := map[string]*Rules{
+		"nil":   nil,
+		"empty": {},
+		"requirement": {Requirements: []Requirement{{
+			Grants: []string{publish, tierDef}, DeviceClasses: []string{ClassAttested},
+			AppIDHashes: []string{arkavoApp}, AppEnvs: []string{EnvProduction},
+		}}},
+		"caps": {Caps: []Cap{
+			{DeviceClass: ClassManaged, Keeps: []string{campaignDef, tierDef}},
+			{DeviceClass: ClassUnverified},
+		}},
+		"both": {
+			Requirements: []Requirement{{Grants: []string{publish}, DeviceClasses: []string{ClassAttested, ClassManaged}}},
+			Caps:         []Cap{{DeviceClass: ClassManaged, Keeps: []string{campaignDef, publish}}},
+		},
+	}
+	attested := Device{Class: ClassAttested, Verified: true, Bound: true, AppIDHash: arkavoApp, AppEnv: EnvProduction}
+	devSets := [][]Device{
+		nil,
+		{attested},
+		{{Class: ClassAttested, Verified: true, Bound: true}},
+		{{Class: ClassManaged, Verified: true, Bound: true}},
+		{{Class: ClassUnverified, Verified: true, Bound: true}},
+		{{Class: ClassUnverified}},
+		{attested, {Class: ClassManaged, Verified: true, Bound: true}},
+		{attested, {Class: ClassManaged, Verified: true}},
+	}
+	reasons := []string{"", WhyUnboundDevice, WhyRequirement, WhyCap}
+	for name, rules := range ruleSets {
+		for i, devices := range devSets {
+			for _, fqn := range []string{publish, campaignValue, tierValue, decryptValue} {
+				why := rules.Why(devices, fqn)
+				assert.Contains(t, reasons, why)
+				assert.Equal(t, rules.Keeps(devices, fqn), why == "", "rules %s, devices %d, %s: Why %q", name, i, fqn, why)
+			}
+		}
+	}
+}

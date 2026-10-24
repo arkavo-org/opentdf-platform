@@ -33,8 +33,9 @@ type SubjectMappingMatcher interface {
 
 // DeviceRuleSource is implemented by stores that declare the device rules of
 // the policy (see chaindevice.Rules). When a store satisfies this interface the
-// JIT PDP applies its rules to the devices of a chain. The rules are shared
-// with the store and read-only.
+// JIT PDP narrows every subject's grants by its rules, given the devices of
+// its chain, none included: a requirement drops what it guards when no device
+// meets it. The rules are shared with the store and read-only.
 type DeviceRuleSource interface {
 	DeviceRules() *chaindevice.Rules
 }

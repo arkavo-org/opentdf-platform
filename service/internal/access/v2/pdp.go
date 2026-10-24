@@ -471,8 +471,10 @@ func (p *PolicyDecisionPoint) GetEntitlementsRegisteredResource(
 }
 
 // getDecision is GetDecision with the entity's entitlements, from subject
-// mappings and direct entitlements alike, narrowed to what the rules let it
-// keep while devices ride in its chain, before any resource is evaluated.
+// mappings and direct entitlements alike, narrowed by the rules to what it
+// keeps given the devices of its chain, before any resource is evaluated. The
+// rules narrow with no device too: a requirement drops what it guards when no
+// device meets it.
 func (p *PolicyDecisionPoint) getDecision(
 	ctx context.Context,
 	entityRepresentation *entityresolutionV2.EntityRepresentation,
@@ -554,11 +556,8 @@ func (p *PolicyDecisionPoint) getDecision(
 	}
 
 	if rules.Narrows(devices) {
-		for fqn := range entitledFQNsToActions {
-			if !rules.Keeps(devices, fqn) {
-				delete(entitledFQNsToActions, fqn)
-			}
-		}
+		dropped := narrowGrants(entitledFQNsToActions, rules, devices)
+		logDroppedGrants(ctx, l.Logger, dropped, len(devices))
 		l.DebugContext(
 			ctx, "narrowed entitlements by the device rules",
 			slog.Int("devices_count", len(devices)),
@@ -592,4 +591,36 @@ func (p *PolicyDecisionPoint) getDecision(
 	}
 
 	return decision, entitledFQNsToActions, nil
+}
+
+// narrowGrants deletes from grants, keyed by value FQN, every FQN that
+// rules.Keeps drops given devices, and returns why each was dropped (see
+// chaindevice.Rules.Why), nil when none was.
+func narrowGrants[V any](grants map[string]V, rules *chaindevice.Rules, devices []chaindevice.Device) map[string]string {
+	var dropped map[string]string
+	for fqn := range grants {
+		if rules.Keeps(devices, fqn) {
+			continue
+		}
+		if dropped == nil {
+			dropped = make(map[string]string)
+		}
+		dropped[fqn] = rules.Why(devices, fqn)
+		delete(grants, fqn)
+	}
+	return dropped
+}
+
+// logDroppedGrants logs at Info the grants the device rules dropped, by value
+// FQN with why, when there are any, so a denial a device rule caused can be
+// told from one policy caused. l names the entity.
+func logDroppedGrants(ctx context.Context, l *slog.Logger, dropped map[string]string, devicesCount int) {
+	if len(dropped) == 0 {
+		return
+	}
+	l.InfoContext(
+		ctx, "device rules dropped grants",
+		slog.Any("dropped", dropped),
+		slog.Int("devices_count", devicesCount),
+	)
 }
