@@ -11,6 +11,7 @@ import (
 	"github.com/opentdf/platform/protocol/go/authorization"
 	"github.com/opentdf/platform/protocol/go/entityresolution"
 	ent "github.com/opentdf/platform/service/entity"
+	"github.com/opentdf/platform/service/internal/chaindevice"
 	"github.com/opentdf/platform/service/logger"
 	"github.com/opentdf/platform/service/pkg/config"
 	"github.com/opentdf/platform/service/pkg/serviceregistry"
@@ -87,6 +88,10 @@ func EntityResolution(_ context.Context,
 			}
 			entityStruct = retrievedStruct
 		}
+		// Only the composite resolver writes a device marker, so the caller's
+		// copy of one, or of a device token, never reaches the PDP.
+		delete(entityStruct.GetFields(), chaindevice.PropKey)
+		delete(entityStruct.GetFields(), chaindevice.TokenClaim)
 		// make sure the id field is populated
 		originialID := ident.GetId()
 		if originialID == "" {

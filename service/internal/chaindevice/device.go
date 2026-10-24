@@ -8,7 +8,10 @@
 // representation, under PropKey in an AdditionalProps struct, and decides
 // whether the device is bound to the person. The PDP reads the marker only
 // from the representation, never from the entity the caller sent, and applies
-// Rules.Keeps to the person's grants.
+// Rules.Keeps to the person's grants. Only the composite writes a marker: a
+// resolver that copies the caller's claims into a representation (the claims
+// and multi-strategy resolvers) drops PropKey and TokenClaim from them, so a
+// caller cannot forge one.
 package chaindevice
 
 import (
