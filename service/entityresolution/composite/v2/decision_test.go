@@ -197,15 +197,6 @@ func TestAgentGate_ThroughTheV2PDP(t *testing.T) {
 	})
 }
 
-// environmentEntity is a claims entity a PEP sends as CATEGORY_ENVIRONMENT:
-// a device NPE or the node's environment.
-func environmentEntity(t *testing.T, id string, claims map[string]any) *entity.Entity {
-	t.Helper()
-	e := claimsEntity(t, id, claims)
-	e.Category = entity.Entity_CATEGORY_ENVIRONMENT
-	return e
-}
-
 // deviceClaims are a DeviceCheck device as arks forwards it: the
 // allowlisted fields, and arkavo_npe when the device has a class. With no
 // class it is still a device, by its audience.
@@ -251,8 +242,10 @@ func TestChainDevices_NonClaimsEnvironmentNeverReachesTheERS(t *testing.T) {
 		EphemeralId: "client",
 		Category:    entity.Entity_CATEGORY_ENVIRONMENT,
 	}
-	chain := chainIdentifier(claimsEntity(t, "e0", catalogCreatorClaims()), client,
-		environmentEntity(t, "e1", deviceClaims("phone", "attested")))
+	// The device is a bound device token, so it narrows nothing under a
+	// policy with no device rules and the decision turns on the routing alone.
+	device := deviceTokenEnv(t, "e1", signCWT(t, deviceTokenClaims(time.Now().Add(time.Hour))))
+	chain := chainIdentifier(claimsEntity(t, "e0", catalogCreatorClaims()), client, device)
 	require.True(t, permitted(t, pdp, testPEP, chain, creatorCampaign, creatorSupporter))
 	require.Len(t, seen, 1)
 	ids := make([]string, 0, len(seen[0]))

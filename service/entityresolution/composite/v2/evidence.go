@@ -29,6 +29,11 @@ const (
 type evidence struct {
 	V   int    `json:"v"`
 	Sub string `json:"sub"`
+	// Iss and AccountID are the issuer and arkavo_account_id of the subject
+	// resolved, empty for a subject with no trust. A device binds to the
+	// subject by them.
+	Iss       string `json:"iss,omitempty"`
+	AccountID string `json:"account_id,omitempty"`
 	// Exp is unix seconds and never later than the token's own exp.
 	Exp    int64         `json:"exp"`
 	Grants []sealedGrant `json:"grants"`
@@ -36,6 +41,17 @@ type evidence struct {
 	Props map[string]map[string]any `json:"props"`
 	// Outcomes maps a source id to its outcome; "_token" is the token itself.
 	Outcomes map[string]source.Outcome `json:"outcomes"`
+	// Device is the device a DeviceCheck token used as the subject carries,
+	// verified with the token.
+	Device *sealedDevice `json:"device,omitempty"`
+}
+
+// sealedDevice is what a verified device token said its device is (see
+// chaindevice.Device).
+type sealedDevice struct {
+	Class     string `json:"class"`
+	AppIDHash string `json:"app_id_hash,omitempty"`
+	AppEnv    string `json:"app_env,omitempty"`
 }
 
 type sealedGrant struct {

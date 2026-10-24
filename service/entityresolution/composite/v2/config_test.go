@@ -11,6 +11,7 @@ import (
 
 	"github.com/opentdf/platform/service/entityresolution/source"
 	"github.com/opentdf/platform/service/internal/agentstatus"
+	"github.com/opentdf/platform/service/internal/chaindevice"
 	"github.com/opentdf/platform/service/pkg/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -130,9 +131,6 @@ func TestValidate(t *testing.T) {
 			c.Sources[1].PropertiesKey = "shared"
 			c.Sources[2].PropertiesKey = "shared"
 		}, []string{"properties_key", `"shared"`, "identity-core", "device-class"}},
-		{"properties_key reserved for device constraints", func(c *Config) {
-			c.Sources[1].PropertiesKey = "arkavo_constraint"
-		}, []string{"properties_key", `"arkavo_constraint"`, "reserved"}},
 		{"patreon-token missing campaign-tier", func(c *Config) { c.Sources[0].Grants = []string{campaignDef} }, []string{"patreon", campaignDef, tierDef}},
 		{"patreon-token with an extra definition", func(c *Config) {
 			c.Sources[0].Grants = []string{campaignDef, tierDef, "https://patreon.arkavo.com/attr/extra"}
@@ -181,6 +179,26 @@ func TestValidate(t *testing.T) {
 		require.Error(t, err)
 		assert.NotContains(t, err.Error(), cfg.Evidence.SealKey)
 	})
+}
+
+// A source's properties land at the top level of a representation, under
+// its properties_key, where the PDP reads a device marker. Only the composite
+// may write the marker, so its key is reserved, as is the device token's
+// claim.
+func TestValidate_ReservedPropertiesKeys(t *testing.T) {
+	for _, key := range []string{chaindevice.PropKey, chaindevice.TokenClaim} {
+		t.Run(key, func(t *testing.T) {
+			cfg := validConfig()
+			cfg.Sources[1].PropertiesKey = key
+
+			err := cfg.Validate()
+
+			require.Error(t, err)
+			for _, w := range []string{"identity-core", "properties_key", `"` + key + `"`, "reserved"} {
+				assert.Contains(t, err.Error(), w)
+			}
+		})
+	}
 }
 
 func TestConfig_LogValueRedactsKeys(t *testing.T) {

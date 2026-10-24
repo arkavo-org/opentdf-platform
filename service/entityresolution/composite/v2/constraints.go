@@ -2,11 +2,9 @@ package composite
 
 import (
 	"context"
-	"slices"
 
 	arkavo "github.com/opentdf/platform/service/entityresolution/arkavo/v2"
 	"github.com/opentdf/platform/service/entityresolution/source"
-	"github.com/opentdf/platform/service/internal/entityconstraint"
 )
 
 // Constraints only remove grants.
@@ -43,17 +41,4 @@ func capGrants(caps map[string]map[string]bool, subj source.Subject, grants []se
 		}
 	}
 	return kept
-}
-
-// deviceConstraint is the constraint a device of class puts on the subjects
-// of its chain: capped to caps[class], or not capped when the class has no
-// entry, as capGrants judges a device subject.
-func (s *Service) deviceConstraint(class string) map[string]any {
-	allowed, capped := s.caps[class]
-	fqns := make([]string, 0, len(allowed))
-	for fqn := range allowed {
-		fqns = append(fqns, fqn)
-	}
-	slices.Sort(fqns)
-	return entityconstraint.Props(entityconstraint.KindDevice, class, capped, fqns)
 }

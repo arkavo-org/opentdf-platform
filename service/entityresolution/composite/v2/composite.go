@@ -19,7 +19,7 @@ import (
 	"github.com/opentdf/platform/service/entityresolution/source"
 	"github.com/opentdf/platform/service/internal/agentstatus"
 	"github.com/opentdf/platform/service/internal/auth"
-	"github.com/opentdf/platform/service/internal/entityconstraint"
+	"github.com/opentdf/platform/service/internal/chaindevice"
 	"github.com/opentdf/platform/service/logger"
 	ctxAuth "github.com/opentdf/platform/service/pkg/auth"
 	"go.opentelemetry.io/otel/trace"
@@ -156,11 +156,18 @@ func (s *Service) CreateEntityChainsFromTokens(
 //   - A claims entity carrying arkavo_evidence is judged by its seal alone:
 //     the opened evidence is the representation, whoever the caller. One
 //     that does not open grants nothing and is never read as a PEP's claims.
+//   - A claims entity carrying arkavo_device_token is a device, judged by
+//     the token's signature alone, whoever the caller (see
+//     deviceTokenEntity). It holds no grants.
 //   - Any other claims entity is a PEP's assertion. It counts only from a
 //     client ID on claims_chain_peps, and only pep_assertable sources read
 //     it.
 //   - Everything else, an unsealed chain from any other caller included, is
 //     a subject with no trust: the sources see no claims.
+//
+// The request is one chain, so once every entity is resolved each device is
+// bound to the chain's subjects, or not (see bindDevices), and carries a
+// marker saying which (see chaindevice).
 func (s *Service) ResolveEntities(
 	ctx context.Context,
 	req *connect.Request[entityresolutionV2.ResolveEntitiesRequest],
@@ -169,7 +176,7 @@ func (s *Service) ResolveEntities(
 	defer span.End()
 	// The request names no resources, so sources answer subject-wide.
 	q := source.Query{Action: defaultAction}
-	reps := make([]*entityresolutionV2.EntityRepresentation, 0, len(req.Msg.GetEntities()))
+	entries := make([]resolvedEntry, 0, len(req.Msg.GetEntities()))
 	for i, e := range req.Msg.GetEntities() {
 		id := e.GetEphemeralId()
 		if id == "" {
@@ -184,11 +191,26 @@ func (s *Service) ResolveEntities(
 			)
 			return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("composite: unpack claims: %w", err))
 		}
-		rep, err := s.representation(id, ev, device)
+		entries = append(entries, resolvedEntry{
+			id:       id,
+			category: e.GetCategory(),
+			ev:       ev,
+			device:   device,
+			iss:      ev.Iss,
+			account:  ev.AccountID,
+		})
+	}
+	bindDevices(entries)
+	reps := make([]*entityresolutionV2.EntityRepresentation, 0, len(entries))
+	for _, entry := range entries {
+		if entry.device != nil && !entry.device.Bound {
+			s.logUnbound(ctx, entry, entries)
+		}
+		rep, err := representation(entry.id, entry.ev, entry.device)
 		if err != nil {
 			s.logger.ErrorContext(
 				ctx, "composite: cannot build entity representation",
-				slog.String("entity_id", id),
+				slog.String("entity_id", entry.id),
 				slog.Any("error", err),
 			)
 			return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("composite: entity representation: %w", err))
@@ -281,22 +303,30 @@ func (s *Service) verifyToken(ctx context.Context, raw string) (map[string]any, 
 }
 
 // resolveEntity resolves one entity of a ResolveEntities request (see
-// there); id names it in logs. It also returns the class of a device, judged
-// as resolveSubject judges the kind, or "" for any other entity: only a PEP's
-// claims can make an entity a device. Only claims that do not unpack are an
-// error.
-func (s *Service) resolveEntity(ctx context.Context, id string, e *entity.Entity, q source.Query) (evidence, string, error) {
+// there); id names it in logs. It also returns the device the entity is, if
+// any, still unbound: the device sealed in its evidence, the device its
+// device token describes, or, for a PEP's claims that KindOf judges a
+// device's, an unverified device. A PEP's claims make a device only from a
+// caller on claims_chain_peps. Only claims that do not unpack are an error.
+func (s *Service) resolveEntity(ctx context.Context, id string, e *entity.Entity, q source.Query) (evidence, *chaindevice.Device, error) {
 	anonymous := source.Subject{Trust: source.TrustNone}
 	if _, isClaims := e.GetEntityType().(*entity.Entity_Claims); !isClaims {
-		return s.resolveSubject(ctx, anonymous, q, s.now()), "", nil
+		return s.resolveSubject(ctx, anonymous, q, s.now()), nil, nil
 	}
 	var st structpb.Struct
 	if err := e.GetClaims().UnmarshalTo(&st); err != nil {
-		return evidence{}, "", err
+		return evidence{}, nil, err
 	}
 	claims := st.AsMap()
 	if sealed, carried := claims[evidenceClaim]; carried {
-		return s.openSealed(ctx, id, sealed), "", nil
+		ev := s.openSealed(ctx, id, sealed)
+		return ev, sealedDeviceOf(ev), nil
+	}
+	// A token that is present but not a string is an unverified device, never
+	// a PEP's claims.
+	if token, carried := claims[chaindevice.TokenClaim]; carried {
+		ev, device := s.deviceTokenEntity(ctx, id, token)
+		return ev, device, nil
 	}
 	clientID, allowlisted := callerClientID(ctx, s.peps)
 	if !allowlisted {
@@ -305,14 +335,16 @@ func (s *Service) resolveEntity(ctx context.Context, id string, e *entity.Entity
 			slog.String("entity_id", id),
 			slog.String("client_id", clientID),
 		)
-		return s.resolveSubject(ctx, anonymous, q, s.now()), "", nil
+		return s.resolveSubject(ctx, anonymous, q, s.now()), nil, nil
 	}
-	var class string
+	// A PEP's word for a device's class is not trusted.
+	var device *chaindevice.Device
 	if source.KindOf(claims) == source.KindDevice {
-		class = deviceClass(claims)
+		d := deviceFromClaims(claims, false)
+		device = &d
 	}
 	accountID, _ := claims[claimAccountID].(string)
-	return s.resolveSubject(ctx, source.Subject{Claims: claims, AccountID: accountID, Trust: source.TrustPEP}, q, s.now()), class, nil
+	return s.resolveSubject(ctx, source.Subject{Claims: claims, AccountID: accountID, Trust: source.TrustPEP}, q, s.now()), device, nil
 }
 
 // openSealed opens the arkavo_evidence of the claims entity id. Whatever does
@@ -346,7 +378,8 @@ func (s *Service) logSealRefusal(ctx context.Context, id string, err error, extr
 
 // resolveSubject runs every source that admits subj, keeps what each
 // source's capability allows, unions it and applies the constraints. The
-// evidence expires at exp. A subject with no trust keeps no claims. The kind
+// evidence expires at exp and records the subject's iss and account ID. A
+// subject with no trust keeps no claims, so it records neither. The kind
 // is always judged from the claims the sources see, never taken from the
 // caller, so discarded claims cannot make a subject a device or an agent,
 // and a device cannot pass as a person.
@@ -356,7 +389,15 @@ func (s *Service) resolveSubject(ctx context.Context, subj source.Subject, q sou
 	}
 	subj.Kind = source.KindOf(subj.Claims)
 	sub, _ := subj.Claims["sub"].(string)
-	ev := evidence{V: evidenceVersion, Sub: sub, Exp: exp.Unix(), Outcomes: map[string]source.Outcome{}}
+	iss, _ := subj.Claims["iss"].(string)
+	ev := evidence{
+		V:         evidenceVersion,
+		Sub:       sub,
+		Iss:       iss,
+		AccountID: subj.AccountID,
+		Exp:       exp.Unix(),
+		Outcomes:  map[string]source.Outcome{},
+	}
 	if s.withheldAgent(ctx, subj) {
 		return ev
 	}
@@ -513,11 +554,12 @@ func callerClientID(ctx context.Context, peps map[string]bool) (string, bool) {
 
 // representation is the EntityRepresentation of ev: its grants as direct
 // entitlements and its properties, each under its properties key, in one
-// struct, omitted when there are none. A device, one whose class is set,
-// also carries under entityconstraint.PropKey the cap its class puts on the
-// subjects of its chain, so the PDP can narrow them when the device comes
-// with a person. Nothing else of the entity counts.
-func (s *Service) representation(id string, ev evidence, class string) (*entityresolutionV2.EntityRepresentation, error) {
+// struct, omitted when there are none. A device also carries its marker
+// under chaindevice.PropKey, which only the composite writes: properties
+// under that key are dropped (Validate refuses it as a properties_key, but
+// evidence sealed under an older config could carry it). Nothing else of the
+// entity counts.
+func representation(id string, ev evidence, device *chaindevice.Device) (*entityresolutionV2.EntityRepresentation, error) {
 	rep := &entityresolutionV2.EntityRepresentation{OriginalId: id}
 	for _, g := range ev.Grants {
 		rep.DirectEntitlements = append(rep.DirectEntitlements, &entityresolutionV2.DirectEntitlement{
@@ -527,10 +569,13 @@ func (s *Service) representation(id string, ev evidence, class string) (*entityr
 	}
 	props := make(map[string]any, len(ev.Props)+1)
 	for key, p := range ev.Props {
+		if key == chaindevice.PropKey {
+			continue
+		}
 		props[key] = p
 	}
-	if class != "" {
-		props[entityconstraint.PropKey] = s.deviceConstraint(class)
+	if device != nil {
+		props[chaindevice.PropKey] = device.Props()
 	}
 	if len(props) == 0 {
 		return rep, nil
