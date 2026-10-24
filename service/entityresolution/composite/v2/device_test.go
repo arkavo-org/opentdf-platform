@@ -419,7 +419,10 @@ func TestBind_SealedDevice(t *testing.T) {
 		AccountID: creatorAccount,
 		Exp:       svc.now().Add(time.Minute).Unix(),
 		Grants:    []sealedGrant{{FQN: publishValue, Actions: []string{"publish"}, Source: "identity-core"}},
-		Device:    &sealedDevice{Class: chaindevice.ClassAttested, AppIDHash: iosAppHash, AppEnv: chaindevice.EnvProduction},
+		Device: &sealedDevice{
+			Class: chaindevice.ClassAttested, AppIDHash: iosAppHash, AppEnv: chaindevice.EnvProduction,
+			AttestationExpiry: svc.now().Add(time.Minute).Unix(),
+		},
 	}
 	sealedSubject := func(t *testing.T, ev evidence) *entity.Entity {
 		t.Helper()
@@ -484,7 +487,10 @@ func TestSealedEvidence_RoundTripsIdentityAndDevice(t *testing.T) {
 	want := testEvidence()
 	want.Iss = testIssuer
 	want.AccountID = creatorAccount
-	want.Device = &sealedDevice{Class: chaindevice.ClassAttested, AppIDHash: iosAppHash, AppEnv: chaindevice.EnvProduction}
+	want.Device = &sealedDevice{
+		Class: chaindevice.ClassAttested, AppIDHash: iosAppHash, AppEnv: chaindevice.EnvProduction,
+		AttestationExpiry: evidenceNow.Add(15 * time.Minute).Unix(),
+	}
 
 	sealed, err := sealEvidence(evidenceKey, want)
 	require.NoError(t, err)
@@ -494,7 +500,7 @@ func TestSealedEvidence_RoundTripsIdentityAndDevice(t *testing.T) {
 
 	payload, err := json.Marshal(testEvidence())
 	require.NoError(t, err)
-	for _, key := range []string{`"iss"`, `"account_id"`, `"device"`} {
+	for _, key := range []string{`"iss"`, `"account_id"`, `"device"`, `"attestation_expiry"`} {
 		assert.NotContains(t, string(payload), key)
 	}
 }
@@ -541,8 +547,10 @@ func TestDeviceMarker_OnlyTheCompositeWritesIt(t *testing.T) {
 // deviceFromClaims reads a verified device token's arkavo_npe. Anything it
 // does not recognise reads toward fewer grants.
 func TestDeviceFromClaims(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
 	full := map[string]any{
 		"type": "device", "class": chaindevice.ClassAttested, "app_id_hash": iosAppHash, "app_env": chaindevice.EnvProduction,
+		"attestation_expiry": now.Add(time.Minute).Unix(),
 	}
 	// with is the full token's claims with arkavo_npe[key] set to v, or
 	// removed when v is nil.
@@ -555,11 +563,20 @@ func TestDeviceFromClaims(t *testing.T) {
 		}
 		return map[string]any{"arkavo_npe": members}
 	}
+	// noExpiry is the full token's claims of class, with no
+	// attestation_expiry.
+	noExpiry := func(class string) map[string]any {
+		members := maps.Clone(full)
+		delete(members, "attestation_expiry")
+		members["class"] = class
+		return map[string]any{"arkavo_npe": members}
+	}
 	verified := func(class, appIDHash, appEnv string) chaindevice.Device {
 		return chaindevice.Device{Class: class, Verified: true, AppIDHash: appIDHash, AppEnv: appEnv}
 	}
 	const (
 		attested   = chaindevice.ClassAttested
+		managed    = chaindevice.ClassManaged
 		unverified = chaindevice.ClassUnverified
 		prod       = chaindevice.EnvProduction
 	)
@@ -571,7 +588,7 @@ func TestDeviceFromClaims(t *testing.T) {
 	}{
 		"attested":                 {with("type", "device"), true, verified(attested, iosAppHash, prod)},
 		"not verified":             {with("type", "device"), false, chaindevice.Device{Class: unverified}},
-		"managed":                  {with("class", chaindevice.ClassManaged), true, verified(chaindevice.ClassManaged, iosAppHash, prod)},
+		"managed":                  {with("class", managed), true, verified(managed, iosAppHash, prod)},
 		"class unverified":         {with("class", unverified), true, verified(unverified, iosAppHash, prod)},
 		"class missing":            {with("class", nil), true, verified(unverified, iosAppHash, prod)},
 		"class unknown":            {with("class", "gold"), true, verified(unverified, iosAppHash, prod)},
@@ -586,9 +603,61 @@ func TestDeviceFromClaims(t *testing.T) {
 		"env missing":              {with("app_env", nil), true, verified(attested, iosAppHash, "")},
 		"no arkavo_npe":            {map[string]any{}, true, verified(unverified, "", "")},
 		"arkavo_npe not an object": {map[string]any{"arkavo_npe": "device"}, true, verified(unverified, "", "")},
+		// attested holds only before attestation_expiry, read as exp is.
+		"attestation expiry a float":  {with("attestation_expiry", float64(now.Add(time.Minute).Unix())), true, verified(attested, iosAppHash, prod)},
+		"attestation expiry a time":   {with("attestation_expiry", now.Add(time.Minute)), true, verified(attested, iosAppHash, prod)},
+		"attestation expiry now":      {with("attestation_expiry", now.Unix()), true, verified(managed, iosAppHash, prod)},
+		"attestation expired":         {with("attestation_expiry", now.Add(-time.Minute).Unix()), true, verified(managed, iosAppHash, prod)},
+		"attestation expiry missing":  {with("attestation_expiry", nil), true, verified(managed, iosAppHash, prod)},
+		"attestation expiry a string": {with("attestation_expiry", "1800000060"), true, verified(managed, iosAppHash, prod)},
+		"managed, no expiry":          {noExpiry(managed), true, verified(managed, iosAppHash, prod)},
+		"unverified, no expiry":       {noExpiry(unverified), true, verified(unverified, iosAppHash, prod)},
 	} {
 		t.Run(name, func(t *testing.T) {
-			assert.Equal(t, tc.want, deviceFromClaims(tc.claims, tc.verified))
+			assert.Equal(t, tc.want, deviceFromClaims(tc.claims, tc.verified, now))
+		})
+	}
+}
+
+// authnz-rs mints a DeviceCheck token for an hour but says it is attested
+// only until arkavo_npe.attestation_expiry, 15 minutes after the last App
+// Attest assertion. A device token in a chain reads attested only before
+// then; at or after it, or with no attestation_expiry that is a numeric
+// date, it reads managed. Only attested lapses.
+func TestDeviceToken_AttestationExpiry(t *testing.T) {
+	for name, tc := range map[string]struct {
+		class  string
+		expiry func(now time.Time) any // nil: no attestation_expiry
+		want   string
+	}{
+		"attested, expiry ahead":          {chaindevice.ClassAttested, func(now time.Time) any { return now.Add(15 * time.Minute).Unix() }, chaindevice.ClassAttested},
+		"attested, expiry a second ahead": {chaindevice.ClassAttested, func(now time.Time) any { return now.Add(time.Second).Unix() }, chaindevice.ClassAttested},
+		"attested, expiry now":            {chaindevice.ClassAttested, func(now time.Time) any { return now.Unix() }, chaindevice.ClassManaged},
+		"attested, expiry passed":         {chaindevice.ClassAttested, func(now time.Time) any { return now.Add(-time.Minute).Unix() }, chaindevice.ClassManaged},
+		"attested, no expiry":             {chaindevice.ClassAttested, nil, chaindevice.ClassManaged},
+		"attested, expiry not a date":     {chaindevice.ClassAttested, func(now time.Time) any { return now.Add(15 * time.Minute).Format(time.RFC3339) }, chaindevice.ClassManaged},
+		"managed, no expiry":              {chaindevice.ClassManaged, nil, chaindevice.ClassManaged},
+		"managed, expiry passed":          {chaindevice.ClassManaged, func(now time.Time) any { return now.Add(-time.Minute).Unix() }, chaindevice.ClassManaged},
+		"unverified, no expiry":           {chaindevice.ClassUnverified, nil, chaindevice.ClassUnverified},
+	} {
+		t.Run(name, func(t *testing.T) {
+			svc, _ := deviceService(t, &fakeVerifier{})
+			now := svc.now()
+			claims := deviceTokenClaims(now.Add(time.Hour))
+			npe, ok := claims["arkavo_npe"].(map[string]any)
+			require.True(t, ok)
+			npe["class"] = tc.class
+			delete(npe, "attestation_expiry")
+			if tc.expiry != nil {
+				npe["attestation_expiry"] = tc.expiry(now)
+			}
+
+			reps := resolveAs(callerContext(t.Context(), testPEP), t, svc,
+				claimsEntity(t, "e0", catalogCreatorClaims()), deviceTokenEnv(t, "e1", signCWT(t, claims)))
+
+			want := attestedIOS(true)
+			want.Class = tc.want
+			assert.Equal(t, want, deviceOf(t, reps[1]), "the device still binds and keeps its app")
 		})
 	}
 }

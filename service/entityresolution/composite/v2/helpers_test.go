@@ -343,7 +343,9 @@ func environmentEntity(t *testing.T, id string, claims map[string]any) *entity.E
 var iosAppHash = chaindevice.AppIDHash("M8GS7ZT95Y.com.arkavo.Arkavo")
 
 // deviceTokenClaims are a DeviceCheck token as authnz-rs mints it for the
-// creator's device: attested, running the iOS app, a production build.
+// creator's device: attested, running the iOS app, a production build. Its
+// attestation lasts as long as the token, so attested holds while the token
+// does (authnz-rs mints a shorter one; see TestDeviceToken_AttestationExpiry).
 func deviceTokenClaims(exp time.Time) map[string]any {
 	return map[string]any{
 		"iss":               testIssuer,
@@ -352,11 +354,12 @@ func deviceTokenClaims(exp time.Time) map[string]any {
 		"aud":               []any{source.DeviceCheckAudience, "https://platform.arkavo.net"},
 		"arkavo_account_id": creatorAccount,
 		"arkavo_npe": map[string]any{
-			"type":        "device",
-			"class":       chaindevice.ClassAttested,
-			"device_id":   "d1",
-			"app_id_hash": iosAppHash,
-			"app_env":     chaindevice.EnvProduction,
+			"type":               "device",
+			"class":              chaindevice.ClassAttested,
+			"device_id":          "d1",
+			"app_id_hash":        iosAppHash,
+			"app_env":            chaindevice.EnvProduction,
+			"attestation_expiry": exp.Unix(),
 		},
 	}
 }

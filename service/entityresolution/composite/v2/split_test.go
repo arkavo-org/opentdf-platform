@@ -15,12 +15,18 @@ import (
 
 const platformAudience = "https://platform.arkavo.net"
 
-// iosDevice is the device splitTokenClaims describes, as it is sealed.
-var iosDevice = &sealedDevice{Class: chaindevice.ClassAttested, AppIDHash: iosAppHash, AppEnv: chaindevice.EnvProduction}
+// iosDevice is the device splitTokenClaims(exp) describes, as it is sealed.
+func iosDevice(exp time.Time) *sealedDevice {
+	return &sealedDevice{
+		Class: chaindevice.ClassAttested, AppIDHash: iosAppHash, AppEnv: chaindevice.EnvProduction,
+		AttestationExpiry: exp.Unix(),
+	}
+}
 
 // splitTokenClaims are a DeviceCheck token used as the subject, as iOS
 // presents it at KAS rewrap: the creator's claims, and the creator's device,
-// attested, running the production iOS app, its key bound by cnf.
+// attested until the token expires, running the production iOS app, its key
+// bound by cnf.
 func splitTokenClaims(exp time.Time) map[string]any {
 	claims := creatorClaims(exp)
 	claims["aud"] = []any{source.DeviceCheckAudience, platformAudience}
@@ -30,11 +36,12 @@ func splitTokenClaims(exp time.Time) map[string]any {
 		"y": "x_FEzRu9m36HLN_tue659LNpXW6pCyStikYjKIWI5a0",
 	}}
 	claims["arkavo_npe"] = map[string]any{
-		"type":        "device",
-		"class":       chaindevice.ClassAttested,
-		"device_id":   "d1",
-		"app_id_hash": iosAppHash,
-		"app_env":     chaindevice.EnvProduction,
+		"type":               "device",
+		"class":              chaindevice.ClassAttested,
+		"device_id":          "d1",
+		"app_id_hash":        iosAppHash,
+		"app_env":            chaindevice.EnvProduction,
+		"attestation_expiry": exp.Unix(),
 	}
 	return claims
 }
@@ -69,11 +76,13 @@ func splitService(t *testing.T, checker agentstatus.Checker) (*Service, *source.
 func TestSplit_PersonResolvesAsPerson(t *testing.T) {
 	svc, seen := splitService(t, nil)
 
-	ev := tokenEvidence(t, svc, signCWT(t, splitTokenClaims(svc.now().Add(time.Hour))))
+	exp := svc.now().Add(time.Hour)
+
+	ev := tokenEvidence(t, svc, signCWT(t, splitTokenClaims(exp)))
 
 	assert.Contains(t, grantFQNs(ev), publishValue, "identity-core serves persons alone")
 	assert.Contains(t, grantFQNs(ev), creatorCampaign)
-	assert.Equal(t, iosDevice, ev.Device)
+	assert.Equal(t, iosDevice(exp), ev.Device)
 	assert.Equal(t, creatorAccount, ev.AccountID)
 	assert.Equal(t, testIssuer, ev.Iss)
 	assert.Equal(t, creatorSub, ev.Sub)
@@ -90,14 +99,15 @@ func TestSplit_PersonResolvesAsPerson(t *testing.T) {
 // has no audience left.
 func TestSplit_StringAudience(t *testing.T) {
 	svc, seen := splitService(t, nil)
-	claims := splitTokenClaims(svc.now().Add(time.Hour))
+	exp := svc.now().Add(time.Hour)
+	claims := splitTokenClaims(exp)
 	claims["aud"] = source.DeviceCheckAudience
 
 	ev := tokenEvidence(t, svc, signCWT(t, claims))
 
 	assert.Contains(t, grantFQNs(ev), publishValue)
 	assert.Contains(t, grantFQNs(ev), creatorCampaign)
-	assert.Equal(t, iosDevice, ev.Device)
+	assert.Equal(t, iosDevice(exp), ev.Device)
 	assert.Equal(t, creatorAccount, ev.AccountID)
 	assert.Equal(t, source.KindPerson, seen.Kind)
 	assert.NotContains(t, seen.Claims, "aud")
@@ -244,6 +254,50 @@ func TestPersonClaims_DoesNotMutate(t *testing.T) {
 			personClaims(claims)
 
 			assert.Equal(t, fixture(), claims)
+		})
+	}
+}
+
+// A DeviceCheck token used as the subject seals its class when the token
+// route resolves it, and the evidence lasts until the token expires, an hour.
+// attested still lapses at the token's attestation_expiry: the device reads
+// managed once that has passed when the evidence is opened, even if it was
+// attested when sealed.
+func TestSplit_AttestationLapsesAfterSeal(t *testing.T) {
+	for name, tc := range map[string]struct {
+		expiry  func(now time.Time) any // nil: no attestation_expiry
+		openAt  time.Duration           // after sealing
+		want    string
+		comment string
+	}{
+		"attested when opened": {func(now time.Time) any { return now.Add(15 * time.Minute).Unix() }, 10 * time.Minute, chaindevice.ClassAttested, ""},
+		"lapses between seal and open": {
+			func(now time.Time) any { return now.Add(15 * time.Minute).Unix() }, 16 * time.Minute, chaindevice.ClassManaged,
+			"the evidence is still valid, the attestation is not",
+		},
+		"already lapsed when sealed": {func(now time.Time) any { return now.Add(-time.Second).Unix() }, 0, chaindevice.ClassManaged, ""},
+		"no attestation_expiry":      {nil, 0, chaindevice.ClassManaged, ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			svc, _ := splitService(t, nil)
+			sealedAt := svc.now()
+			claims := splitTokenClaims(sealedAt.Add(time.Hour))
+			npe, ok := claims["arkavo_npe"].(map[string]any)
+			require.True(t, ok)
+			delete(npe, "attestation_expiry")
+			if tc.expiry != nil {
+				npe["attestation_expiry"] = tc.expiry(sealedAt)
+			}
+			chain := chainsFor(t, svc, []*entity.Token{{EphemeralId: "t0", Jwt: signCWT(t, claims)}})[0]
+
+			openedAt := sealedAt.Add(tc.openAt)
+			svc.now = func() time.Time { return openedAt }
+			rep := resolveAs(callerContext(t.Context(), "arks-media"), t, svc, chain.GetEntities()...)[0]
+
+			want := attestedIOS(true)
+			want.Class = tc.want
+			assert.Equal(t, want, deviceOf(t, rep), tc.comment)
+			assert.Contains(t, entitlements(rep), publishValue, "the person keeps its grants; the rules decide what a managed device leaves")
 		})
 	}
 }

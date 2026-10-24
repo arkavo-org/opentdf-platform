@@ -290,9 +290,13 @@ func (s *Service) resolveToken(ctx context.Context, raw string, q source.Query) 
 	var device *sealedDevice
 	if source.KindOf(claims) == source.KindDevice {
 		// Seal only what deviceFromClaims read, so the class is one the PDP
-		// knows.
-		d := deviceFromClaims(claims, true)
+		// knows, and an attested device's attestation expiry, so it lapses
+		// when the evidence is opened after it.
+		d := deviceFromClaims(claims, true, s.now())
 		device = &sealedDevice{Class: d.Class, AppIDHash: d.AppIDHash, AppEnv: d.AppEnv}
+		if d.Class == chaindevice.ClassAttested {
+			device.AttestationExpiry = attestationExpiry(claims)
+		}
 		claims = personClaims(claims)
 	}
 	accountID, _ := claims[claimAccountID].(string)
@@ -354,7 +358,7 @@ func (s *Service) resolveEntity(ctx context.Context, id string, e *entity.Entity
 	claims := st.AsMap()
 	if sealed, carried := claims[evidenceClaim]; carried {
 		ev := s.openSealed(ctx, id, sealed)
-		return ev, sealedDeviceOf(ev), nil
+		return ev, sealedDeviceOf(ev, s.now()), nil
 	}
 	// A token that is present but not a string is an unverified device, never
 	// a PEP's claims.
@@ -374,7 +378,7 @@ func (s *Service) resolveEntity(ctx context.Context, id string, e *entity.Entity
 	// A PEP's word for a device's class is not trusted.
 	var device *chaindevice.Device
 	if source.KindOf(claims) == source.KindDevice {
-		d := deviceFromClaims(claims, false)
+		d := deviceFromClaims(claims, false, s.now())
 		device = &d
 	}
 	accountID, _ := claims[claimAccountID].(string)

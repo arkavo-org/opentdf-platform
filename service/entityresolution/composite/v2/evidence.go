@@ -52,6 +52,10 @@ type sealedDevice struct {
 	Class     string `json:"class"`
 	AppIDHash string `json:"app_id_hash,omitempty"`
 	AppEnv    string `json:"app_env,omitempty"`
+	// AttestationExpiry is, for a device sealed attested, the token's
+	// attestation_expiry in unix seconds. The device reads managed once it
+	// has passed, or when it is unset (see sealedDeviceOf).
+	AttestationExpiry int64 `json:"attestation_expiry,omitempty"`
 }
 
 type sealedGrant struct {
