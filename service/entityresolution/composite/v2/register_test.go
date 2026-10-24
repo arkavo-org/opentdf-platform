@@ -138,10 +138,7 @@ func TestExampleConfigsValidate(t *testing.T) {
 	for name, wantErr := range map[string]string{
 		"opentdf-patreon-prod.yaml":       "",
 		"opentdf-patreon-local-test.yaml": "",
-		// Its device-class source was removed. Until Task 7 drops it from the
-		// example, the example fails startup, pointing to device_rules; then
-		// this case validates again.
-		"opentdf-arkavo-local-test.yaml": "device_rules",
+		"opentdf-arkavo-local-test.yaml":  "",
 	} {
 		t.Run(name, func(t *testing.T) {
 			path := filepath.Join("..", "..", "..", "..", "examples", "config", name)

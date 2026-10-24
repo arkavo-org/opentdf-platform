@@ -32,8 +32,11 @@ const (
 	ClassAttested = "attested"
 	// ClassManaged is a managed device.
 	ClassManaged = "managed"
-	// ClassUnverified is a device that could not be verified. It has no app and
-	// is never bound.
+	// ClassUnverified is the class of a device whose class was not verified.
+	// A device from a PEP's claims, or from a token that did not verify, reads
+	// as unverified with no app, and never binds. A verified token that names
+	// an unknown class, or none, reads as unverified too, yet can bind and
+	// keep its app.
 	ClassUnverified = "unverified"
 
 	// EnvProduction is the app environment of a production build.
