@@ -137,18 +137,35 @@ func TestDeviceToken_FromAnyCaller(t *testing.T) {
 	assert.Empty(t, reps[0].GetDirectEntitlements())
 }
 
-// A device token is a device whatever the category of the entity it comes
-// in. Sent as a subject it still holds no grants, so the PDP, which needs
-// every subject entitled, denies the chain.
-func TestDeviceToken_AsSubjectHoldsNoGrants(t *testing.T) {
-	svc, _ := deviceService(t, &fakeVerifier{})
-	token := signCWT(t, deviceTokenClaims(svc.now().Add(time.Hour)))
+// A device token travels only in an environment entity. In any other
+// category the PDP would read it as a co-subject holding no grants, so
+// GetDecision would deny while GetEntitlements still reported the person's
+// grants. The request is refused before anything is resolved, on both routes
+// alike.
+func TestDeviceToken_AsSubjectIsRefused(t *testing.T) {
+	for _, category := range []entity.Entity_Category{entity.Entity_CATEGORY_SUBJECT, entity.Entity_CATEGORY_UNSPECIFIED} {
+		t.Run(category.String(), func(t *testing.T) {
+			verifier := &fakeVerifier{}
+			svc, buf := deviceService(t, verifier)
+			token := signCWT(t, deviceTokenClaims(svc.now().Add(time.Hour)))
+			device := claimsEntity(t, "e1", map[string]any{chaindevice.TokenClaim: token})
+			device.Category = category
 
-	reps := resolveAs(callerContext(t.Context(), testPEP), t, svc,
-		claimsEntity(t, "e0", catalogCreatorClaims()), claimsEntity(t, "e1", map[string]any{chaindevice.TokenClaim: token}))
+			_, err := svc.ResolveEntities(callerContext(t.Context(), testPEP), connect.NewRequest(&entityresolutionV2.ResolveEntitiesRequest{
+				Entities: []*entity.Entity{claimsEntity(t, "e0", catalogCreatorClaims()), device},
+			}))
 
-	assert.Equal(t, attestedIOS(true), deviceOf(t, reps[1]))
-	requireMarkerOnly(t, reps[1])
+			require.Error(t, err)
+			assert.Equal(t, connect.CodeInvalidArgument, connect.CodeOf(err))
+			assert.Contains(t, err.Error(), `"e1"`)
+			assert.Zero(t, verifier.calls.Load(), "nothing is resolved: the device token is never verified")
+			rec := logRecord(t, buf, "composite: a device token in an entity that is not an environment entity; the request is refused")
+			assert.Equal(t, "WARN", rec["level"])
+			assert.Equal(t, "e1", rec["entity_id"])
+			assert.Equal(t, category.String(), rec["category"])
+			assert.NotContains(t, buf.String(), token, "the raw token is never logged")
+		})
+	}
 }
 
 // The PDP reads an ID that both categories use as a subject's, so binding

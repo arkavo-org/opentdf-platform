@@ -146,7 +146,11 @@ func (s *Service) CreateEntityChainsFromTokens(
 //     that does not open grants nothing and is never read as a PEP's claims.
 //   - A claims entity carrying arkavo_device_token is a device, judged by
 //     the token's signature alone, whoever the caller (see
-//     deviceTokenEntity). It holds no grants.
+//     deviceTokenEntity). It holds no grants. It must be an environment
+//     entity: the PDP would read one of any other category as a co-subject
+//     with no grants, which denies every decision while the person's
+//     entitlements still list its grants, so such a request is refused
+//     before anything is resolved.
 //   - Any other claims entity is a PEP's assertion. It counts only from a
 //     client ID on claims_chain_peps, and only pep_assertable sources read
 //     it.
@@ -172,6 +176,15 @@ func (s *Service) ResolveEntities(
 			slog.String("entity_id", dup),
 		)
 		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("composite: entity ID %q is used by two entities", dup))
+	}
+	if id, category := misplacedDeviceToken(req.Msg.GetEntities(), ids); id != "" {
+		s.logger.WarnContext(
+			ctx, "composite: a device token in an entity that is not an environment entity; the request is refused",
+			slog.String("entity_id", id),
+			slog.String("category", category.String()),
+		)
+		return nil, connect.NewError(connect.CodeInvalidArgument,
+			fmt.Errorf("composite: entity %q carries %s but is not an environment entity", id, chaindevice.TokenClaim))
 	}
 	// The request names no resources, so sources answer subject-wide.
 	q := source.Query{Action: defaultAction}
@@ -234,6 +247,26 @@ func entityIDs(entities []*entity.Entity) ([]string, string) {
 		ids[i] = id
 	}
 	return ids, ""
+}
+
+// misplacedDeviceToken returns the ID, as entityIDs names it, and the
+// category of the first entity that carries chaindevice.TokenClaim in its
+// claims but is not an environment entity, whatever else it carries, or "".
+// Claims that do not unpack are left to resolveEntity to refuse.
+func misplacedDeviceToken(entities []*entity.Entity, ids []string) (string, entity.Entity_Category) {
+	for i, e := range entities {
+		if e.GetCategory() == entity.Entity_CATEGORY_ENVIRONMENT || e.GetClaims() == nil {
+			continue
+		}
+		var st structpb.Struct
+		if err := e.GetClaims().UnmarshalTo(&st); err != nil {
+			continue
+		}
+		if _, carried := st.GetFields()[chaindevice.TokenClaim]; carried {
+			return ids[i], e.GetCategory()
+		}
+	}
+	return "", entity.Entity_CATEGORY_UNSPECIFIED
 }
 
 // subjectEntity seals ev into a chain's subject entity.

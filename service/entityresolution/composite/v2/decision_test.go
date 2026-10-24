@@ -629,3 +629,21 @@ func TestDeviceRules_NoRulesDecidesAsBefore(t *testing.T) {
 		})
 	}
 }
+
+// A device token sent in a subject entity would be a co-subject with no
+// grants: GetDecision would deny while GetEntitlements reported the person's
+// grants. The composite refuses it, so both routes fail alike.
+func TestDeviceRules_DeviceTokenAsSubjectFailsBothRoutes(t *testing.T) {
+	pdp := deviceRulesPDP(t, deviceRulesPolicy)
+	token := signCWT(t, deviceTokenClaims(time.Now().Add(time.Hour)))
+	chain := chainIdentifier(claimsEntity(t, "e0", catalogCreatorClaims()), claimsEntity(t, "e1", map[string]any{chaindevice.TokenClaim: token}))
+	ctx := callerContext(audit.ContextWithActorID(t.Context(), testPEP), testPEP)
+
+	decision, err := pdp.GetDecision(ctx, chain, &policy.Action{Name: "read"}, resourceOf(creatorCampaign), nil, nil)
+	require.ErrorContains(t, err, "is not an environment entity", "GetDecision")
+	assert.Nil(t, decision)
+
+	entitlements, err := pdp.GetEntitlements(ctx, chain, false)
+	require.ErrorContains(t, err, "is not an environment entity", "GetEntitlements")
+	assert.Nil(t, entitlements)
+}
