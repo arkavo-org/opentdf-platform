@@ -65,7 +65,7 @@ func TestSelectResolver_RemovedKeys(t *testing.T) {
 		"infer_unknown_as_free":      "sources[].infer_unknown_as_free",
 		"entitlements_namespace":     "sources[].entitlements_namespace",
 		"agent_status":               "constraints.agent_status",
-		"device_class_ceilings":      "constraints.device_class_caps",
+		"device_class_ceilings":      "device_rules in the policy file",
 		"client_id_claim":            "server.auth.policy.client_id_claim",
 		"direct_entitlement_actions": "sources[].actions",
 	}

@@ -53,8 +53,8 @@ func TestTokenRoute_CreatorGetsOwnCampaignTiers(t *testing.T) {
 	assert.Equal(t, creatorSub, ev.Sub)
 }
 
-// token-claims and device-class grants carry no actions; they take the
-// source's configured ones, not read.
+// token-claims grants carry no actions; they take the source's configured
+// ones, not read.
 func TestTokenRoute_ActionlessGrantTakesSourceActions(t *testing.T) {
 	defaulted := SourceConfig{ID: "defaulted", Issuer: testIssuer, Grants: []string{exampleDef}}
 	svc := newTestService(t, testConfig(), verifiersFor(&fakeVerifier{}), []configuredSource{
@@ -383,7 +383,8 @@ func TestTokenRoute_QueryCarriesRequestedResources(t *testing.T) {
 	}), exampleDef)
 	svc := newTestService(t, testConfig(), verifiersFor(&fakeVerifier{}), []configuredSource{recorder}, nil)
 
-	tokenEvidence(t, svc, signCWT(t, creatorClaims(time.Now().Add(time.Hour))),
+	tokenEvidence(
+		t, svc, signCWT(t, creatorClaims(time.Now().Add(time.Hour))),
 		&authzV2.Resource{Resource: &authzV2.Resource_AttributeValues_{AttributeValues: &authzV2.Resource_AttributeValues{
 			Fqns: []string{"https://Patreon.arkavo.com/attr/campaign/value/13167240", creatorSupporter},
 		}}},
@@ -425,31 +426,6 @@ func TestTokenRoute_SubjectEphemeralIDNamesTheViewer(t *testing.T) {
 	assert.Equal(t, "composite-subject-did:key:z6Mkcreator", chains[0].GetEntities()[0].GetEphemeralId())
 	assert.Equal(t, "composite-subject-anonymous", chains[1].GetEntities()[0].GetEphemeralId())
 	assert.Equal(t, "composite-subject-anonymous", chains[2].GetEntities()[0].GetEphemeralId())
-}
-
-// A subject with no trust keeps no claims, so claims that were discarded
-// cannot make it a device and earn it device-class grants (Task 8 routes
-// such subjects here).
-func TestResolveSubject_TrustNoneNeverGetsDeviceClassGrants(t *testing.T) {
-	devices := SourceConfig{ID: "device-class", Issuer: testIssuer, Grants: []string{"https://arkavo.ai/attr/classification"}}
-	svc := newTestService(t, testConfig(), nil, []configuredSource{
-		sourceOf(devices, newDeviceClassSource(map[string][]string{
-			"unverified": {classInternal},
-			"managed":    {classConfidential},
-		})),
-	}, nil)
-	discarded := map[string]any{"iss": testIssuer, "arkavo_npe": map[string]any{"type": "device", "class": "managed"}}
-
-	for name, subj := range map[string]source.Subject{
-		"empty claims":                      {Trust: source.TrustNone, Kind: source.KindPerson, Claims: map[string]any{}},
-		"discarded device claims":           {Trust: source.TrustNone, Kind: source.KindDevice, Claims: discarded},
-		"discarded claims, device kind set": {Trust: source.TrustNone, Kind: source.KindDevice},
-	} {
-		t.Run(name, func(t *testing.T) {
-			ev := svc.resolveSubject(t.Context(), subj, source.Query{Action: "read"}, svc.now().Add(time.Minute))
-			assert.Empty(t, ev.Grants)
-		})
-	}
 }
 
 func TestNew_SealKeys(t *testing.T) {

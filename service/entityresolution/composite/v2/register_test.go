@@ -33,12 +33,6 @@ var registerBody = `    evidence:
         issuer: https://identity.arkavo.net
         claim: arkavo_entitlements
         grants: [https://patreon.arkavo.com/attr/arkavo-creator]
-      - id: device-class
-        type: device-class
-        issuer: https://identity.arkavo.net
-        grants: [https://arkavo.ai/attr/classification]
-        classes:
-          managed: [https://arkavo.ai/attr/classification/value/confidential]
 `
 
 func TestRegister_BuildsComposite(t *testing.T) {
@@ -46,13 +40,13 @@ func TestRegister_BuildsComposite(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, svc)
 
-	require.Len(t, svc.sources, 3)
+	require.Len(t, svc.sources, 2)
 	ids := make([]string, 0, len(svc.sources))
 	for _, s := range svc.sources {
 		ids = append(ids, s.id)
 		assert.NotNil(t, s.src, s.id)
 	}
-	assert.Equal(t, []string{"patreon", "identity-core", "device-class"}, ids)
+	assert.Equal(t, []string{"patreon", "identity-core"}, ids)
 	assert.Equal(t, "patreon", svc.sources[0].propsKey)
 	assert.True(t, svc.sources[0].cap.pepAssertable)
 
@@ -96,8 +90,27 @@ func TestRegister_RejectsInvalidConfig(t *testing.T) {
 			want: "one source owns a definition",
 		},
 		"unknown source type": {
-			in:   loadServiceConfig(t, replaceOnce(t, registerBody, "type: device-class", "type: live-http")),
+			in:   loadServiceConfig(t, replaceOnce(t, registerBody, "type: token-claims", "type: live-http")),
 			want: "live-http",
+		},
+		// Devices narrow grants by the policy file's device_rules and never
+		// grant, so what they replaced fails startup, pointing there.
+		"a device-class source": {
+			in: loadServiceConfig(t, registerBody+`      - id: devices
+        type: device-class
+        issuer: https://identity.arkavo.net
+        grants: [https://arkavo.ai/attr/classification]
+        classes:
+          managed: [https://arkavo.ai/attr/classification/value/confidential]
+`),
+			want: "device_rules",
+		},
+		"constraints.device_class_caps": {
+			in: loadServiceConfig(t, registerBody+`    constraints:
+      device_class_caps:
+        managed: [https://patreon.arkavo.com/attr/campaign/value/13167240]
+`),
+			want: "device_rules",
 		},
 		"unknown patreon option": {
 			in:   loadServiceConfig(t, replaceOnce(t, registerBody, "infer_unknown_as_free: true", "claims: [arkavo_patreon]")),
@@ -122,10 +135,13 @@ func TestRegister_RejectsInvalidConfig(t *testing.T) {
 // each shipped example config. The seal key is a secret the deployment
 // supplies, so the tests set one.
 func TestExampleConfigsValidate(t *testing.T) {
-	for _, name := range []string{
-		"opentdf-patreon-prod.yaml",
-		"opentdf-patreon-local-test.yaml",
-		"opentdf-arkavo-local-test.yaml",
+	for name, wantErr := range map[string]string{
+		"opentdf-patreon-prod.yaml":       "",
+		"opentdf-patreon-local-test.yaml": "",
+		// Its device-class source was removed. Until Task 7 drops it from the
+		// example, the example fails startup, pointing to device_rules; then
+		// this case validates again.
+		"opentdf-arkavo-local-test.yaml": "device_rules",
 	} {
 		t.Run(name, func(t *testing.T) {
 			path := filepath.Join("..", "..", "..", "..", "examples", "config", name)
@@ -141,6 +157,12 @@ func TestExampleConfigsValidate(t *testing.T) {
 			require.True(t, present, "sources selects the composite")
 			assert.Empty(t, cfg.Evidence.SealKey, "the deployment supplies the seal key")
 			cfg.Evidence.SealKey = testSealKey
+			if wantErr != "" {
+				err = cfg.Validate()
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), wantErr)
+				return
+			}
 			require.NoError(t, cfg.Validate())
 		})
 	}

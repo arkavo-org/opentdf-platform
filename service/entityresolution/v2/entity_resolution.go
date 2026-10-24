@@ -45,7 +45,7 @@ var removedKeys = []struct{ key, movedTo string }{
 	{"infer_unknown_as_free", "set it on the patreon-token source as sources[].infer_unknown_as_free"},
 	{"entitlements_namespace", "set it on the patreon-token source as sources[].entitlements_namespace"},
 	{"agent_status", "it moved to constraints.agent_status"},
-	{"device_class_ceilings", "device grants moved to a device-class source's sources[].classes, and caps to constraints.device_class_caps"},
+	{"device_class_ceilings", "device rules moved to device_rules in the policy file"},
 	{"client_id_claim", "the subject's account is always arkavo_account_id, and a PEP's client ID comes from server.auth.policy.client_id_claim"},
 	{"direct_entitlement_actions", "it moved to sources[].actions"},
 }

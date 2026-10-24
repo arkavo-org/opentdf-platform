@@ -77,10 +77,8 @@ type Service struct {
 	peps map[string]bool
 	// agentStatus judges agent subjects; nil withholds every one.
 	agentStatus agentstatus.Checker
-	// caps maps a device class to the value FQNs it is capped to.
-	caps   map[string]map[string]bool
-	now    func() time.Time
-	logger *logger.Logger
+	now         func() time.Time
+	logger      *logger.Logger
 }
 
 // New builds the resolver from the sources and verifiers already built from
@@ -105,16 +103,6 @@ func New(cfg Config, verifiers map[string]claimsVerifier, sources []configuredSo
 	for _, id := range cfg.Evidence.ClaimsChainPEPs {
 		peps[id] = true
 	}
-	caps := make(map[string]map[string]bool, len(cfg.Constraints.DeviceClassCaps))
-	for class, fqns := range cfg.Constraints.DeviceClassCaps {
-		allowed := make(map[string]bool, len(fqns))
-		for _, raw := range fqns {
-			if fqn, ok := source.ParseFQN(raw); ok {
-				allowed[fqn.String()] = true
-			}
-		}
-		caps[class] = allowed
-	}
 	return &Service{
 		cfg:         cfg,
 		verifiers:   verifiers,
@@ -122,7 +110,6 @@ func New(cfg Config, verifiers map[string]claimsVerifier, sources []configuredSo
 		sealKeys:    keys,
 		peps:        peps,
 		agentStatus: checker,
-		caps:        caps,
 		now:         time.Now,
 		logger:      log,
 	}, nil
@@ -132,7 +119,8 @@ func New(cfg Config, verifiers map[string]claimsVerifier, sources []configuredSo
 // rewrap routes and returns one chain per token, holding one subject entity:
 // the resolution, sealed as arkavo_evidence. A token that is not a verified
 // CWT seals an evidence with no grants, so it is denied rather than failing
-// the decision.
+// the decision. A device token is split into its person and the person's
+// device (see resolveToken), still one subject entity.
 func (s *Service) CreateEntityChainsFromTokens(
 	ctx context.Context,
 	req *connect.Request[entityresolutionV2.CreateEntityChainsFromTokensRequest],
@@ -280,6 +268,15 @@ func subjectEphemeralID(sub string) string {
 // resolveToken verifies raw and resolves its subject until the token
 // expires. Anything but a verified CWT with an exp still ahead resolves to
 // no grants, recorded as an invalid token, for invalidEvidenceTTL.
+//
+// A verified token that KindOf judges a device's (a DeviceCheck token, which
+// iOS presents at KAS rewrap) carries a person and the person's device, and is
+// split. The sources resolve the person from personClaims, as any person
+// token. The device, as deviceFromClaims reads it, is sealed beside the
+// person's grants; ResolveEntities binds it as it binds any device, so in a
+// chain of its subject alone it is that subject's own. A device never grants:
+// device rules in the policy file narrow the person's grants by it. A token
+// with an agent marker is an agent's, never a device's, so it is not split.
 func (s *Service) resolveToken(ctx context.Context, raw string, q source.Query) evidence {
 	claims, exp, err := s.verifyToken(ctx, raw)
 	if err != nil {
@@ -290,12 +287,21 @@ func (s *Service) resolveToken(ctx context.Context, raw string, q source.Query) 
 			Outcomes: map[string]source.Outcome{tokenOutcome: source.OutcomeInvalid},
 		}
 	}
+	var device *sealedDevice
+	if source.KindOf(claims) == source.KindDevice {
+		// Seal only what deviceFromClaims read, so the class is one the PDP
+		// knows.
+		d := deviceFromClaims(claims, true)
+		device = &sealedDevice{Class: d.Class, AppIDHash: d.AppIDHash, AppEnv: d.AppEnv}
+		claims = personClaims(claims)
+	}
 	accountID, _ := claims[claimAccountID].(string)
 	ev := s.resolveSubject(ctx, source.Subject{
 		Claims:    claims,
 		AccountID: accountID,
 		Trust:     source.TrustVerified,
 	}, q, exp)
+	ev.Device = device
 	ev.Outcomes[tokenOutcome] = source.OutcomeComplete
 	return ev
 }
@@ -404,8 +410,8 @@ func (s *Service) logSealRefusal(ctx context.Context, id string, err error, extr
 	s.logger.LogAttrs(ctx, slog.LevelWarn, "composite: arkavo_evidence does not open; it grants nothing", attrs...)
 }
 
-// resolveSubject runs every source that admits subj, keeps what each
-// source's capability allows, unions it and applies the constraints. The
+// resolveSubject runs every source that admits subj, unless the agent gate
+// withholds it, keeps what each source's capability allows and unions it. The
 // evidence expires at exp and records the subject's iss and account ID. A
 // subject with no trust keeps no claims, so it records neither. The kind
 // is always judged from the claims the sources see, never taken from the
@@ -456,7 +462,7 @@ func (s *Service) resolveSubject(ctx context.Context, subj source.Subject, q sou
 			ev.Props[cs.propsKey] = safeProperties(run.res.Properties)
 		}
 	}
-	ev.Grants = capGrants(s.caps, subj, sortedGrants(merged))
+	ev.Grants = sortedGrants(merged)
 	return ev
 }
 

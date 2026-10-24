@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"slices"
 	"strings"
 
@@ -13,6 +14,10 @@ import (
 	"github.com/opentdf/platform/service/internal/agentstatus"
 	"github.com/opentdf/platform/service/internal/chaindevice"
 )
+
+// claimCnf is the RFC 7800 confirmation claim. On a device token it binds the
+// device's key.
+const claimCnf = "cnf"
 
 // Why a device does not bind, as logged.
 const (
@@ -60,6 +65,52 @@ func deviceFromClaims(claims map[string]any, verified bool) chaindevice.Device {
 		AppIDHash: strings.ToLower(appIDHash),
 		AppEnv:    appEnv,
 	}
+}
+
+// personClaims are the claims of the person a device token used as the
+// subject carries: a copy of claims without arkavo_npe and cnf, which are the
+// device's, and with DeviceCheckAudience removed from aud, so KindOf judges
+// them a person's. aud goes when nothing is left in it. claims is not
+// modified.
+func personClaims(claims map[string]any) map[string]any {
+	person := maps.Clone(claims)
+	delete(person, agentstatus.ClaimNpe)
+	delete(person, claimCnf)
+	if aud, kept := withoutAudience(person["aud"], source.DeviceCheckAudience); kept {
+		person["aud"] = aud
+	} else {
+		delete(person, "aud")
+	}
+	return person
+}
+
+// withoutAudience returns aud, a string or a list as KindOf reads it, without
+// drop, in a new list, and false when nothing is left. A list keeps the
+// entries that are not strings. Any other aud is returned as it is.
+func withoutAudience(aud any, drop string) (any, bool) {
+	switch v := aud.(type) {
+	case nil:
+		return nil, false
+	case string:
+		return v, v != drop
+	case []any:
+		kept := make([]any, 0, len(v))
+		for _, a := range v {
+			if s, isString := a.(string); !isString || s != drop {
+				kept = append(kept, a)
+			}
+		}
+		return kept, len(kept) > 0
+	case []string:
+		kept := make([]string, 0, len(v))
+		for _, s := range v {
+			if s != drop {
+				kept = append(kept, s)
+			}
+		}
+		return kept, len(kept) > 0
+	}
+	return aud, true
 }
 
 // deviceTokenEntity resolves the claims entity id that carries token under
