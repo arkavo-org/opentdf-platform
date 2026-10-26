@@ -185,9 +185,14 @@ DEBUG.
   entitlements, and `campaign` has no subject mapping either.
 - **`examples/config/opentdf-patreon-prod.yaml`:**
   - on source `identity-core`, set `pep_assertable: true`, so the node's
-    claims chain can carry the publish grant. Leave its `actions` at the
-    default `read`: the node asks for action `read` on resource type
-    `publisher`, and the attribute value carries the meaning (#59).
+    claims chain can carry the publish grant. Set its `actions: [publish]`.
+    The node asks for action `publish`, not `read` as #59 first planned
+    (owner decision, 2026-10-25), so the grant can only satisfy a publish
+    decision, and decisions and logs name the action. arks's facade passes
+    the custom action through lowercased (`map_action`); the tdf-iroh-s3
+    node must send `publish`. Verify that the decision path accepts a custom
+    action with policy loaded from config. If it requires the action to be
+    declared, declare `publish` in the policy file in this change.
     `capability.admits` also needs `iss` and `arkavo_entitlements` in the
     claims entity. arks's `pe_claims` forwards both; `arkavo_entitlements`
     is filtered to the Patreon definitions plus the publish entitlement
