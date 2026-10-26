@@ -268,12 +268,16 @@ func TestPublishing_TypedNilDenialWithholds(t *testing.T) {
 // the AUDIT records it wrote.
 func auditedDecision(t *testing.T, svc *Service) ([]map[string]any, string) {
 	t.Helper()
+	return auditedDecisionFor(t, svc, creatorClaims(time.Now().Add(time.Hour)))
+}
+
+func auditedDecisionFor(t *testing.T, svc *Service, claims map[string]any) ([]map[string]any, string) {
+	t.Helper()
 	pdp := pdpFor(t, svc, patreonPolicy)
 	var out bytes.Buffer
 	interceptor := audit.ContextServerInterceptor(slog.New(slog.NewJSONHandler(&out, &slog.HandlerOptions{
 		Level: audit.LevelAudit, ReplaceAttr: audit.ReplaceAttrAuditLevel,
 	})))
-	claims := creatorClaims(time.Now().Add(time.Hour))
 	next := connect.UnaryFunc(func(ctx context.Context, _ connect.AnyRequest) (connect.AnyResponse, error) {
 		// The creator holds publishValue: only the constraint can deny it.
 		_, err := pdp.GetDecision(callerContext(ctx, "arks-media"), tokenIdentifier(signCWT(t, claims)),
@@ -352,4 +356,38 @@ func TestPublishing_NoAuditWhenKept(t *testing.T) {
 	recs, _ := auditedDecision(t, svc)
 	assert.Empty(t, auditEvents(t, recs, "entitlementWithheld-publishing_status"))
 	assert.NotEmpty(t, auditEvents(t, recs, "decisionRequest-publish"))
+}
+
+// A creator with no sub is withheld and audited under a placeholder; arks
+// is never asked (the client denies an empty sub itself).
+func TestPublishing_MissingSubAuditPlaceholder(t *testing.T) {
+	var gotSub string
+	svc := publishingService(t, fakePublishing{err: denied(publishingstatus.ReasonMissingSubject), gotSub: &gotSub})
+	claims := creatorClaims(time.Now().Add(time.Hour))
+	delete(claims, "sub")
+	recs, _ := auditedDecisionFor(t, svc, claims)
+
+	withheld := auditEvents(t, recs, "entitlementWithheld-publishing_status")
+	require.Len(t, withheld, 1)
+	assert.Equal(t, "(none)", field(t, withheld[0], "actor")["id"])
+	assert.Equal(t, "(none)-publishing_status", field(t, withheld[0], "object")["id"])
+	assert.Empty(t, gotSub, "the checker still receives the empty sub")
+}
+
+// Not suspended is logged at DEBUG with the sub, and is neither a warning,
+// an error nor an audit event.
+func TestPublishing_NotSuspendedLogsDebug(t *testing.T) {
+	log, buf := bufferLogger()
+	svc := publishingService(t, fakePublishing{})
+	svc.logger = log
+	recs, _ := auditedDecision(t, svc)
+
+	rec := logRecord(t, buf, "composite: publishing status not suspended")
+	assert.Equal(t, "DEBUG", rec["level"])
+	assert.Equal(t, creatorSub, rec["sub"])
+	for _, line := range bytes.Split(buf.Bytes(), []byte("\n")) {
+		assert.NotContains(t, string(line), `"level":"WARN"`)
+		assert.NotContains(t, string(line), `"level":"ERROR"`)
+	}
+	assert.Empty(t, auditEvents(t, recs, "entitlementWithheld-publishing_status"))
 }

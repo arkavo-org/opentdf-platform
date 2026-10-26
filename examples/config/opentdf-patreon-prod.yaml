@@ -113,3 +113,6 @@ services:
       #   identity_url: https://identity.arkavo.net
       #   client_id: opentdf-platform
       #   client_secret: ""
+      #   # Optional; each at most 5s. A suspension takes effect within about 5s.
+      #   timeout: 3s     # per call to arks
+      #   cache_ttl: 5s   # how long a not-suspended answer is reused

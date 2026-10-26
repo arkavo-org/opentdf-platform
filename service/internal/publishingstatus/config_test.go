@@ -234,6 +234,12 @@ func TestTransport_DialAddressVerifiesURLHost(t *testing.T) {
 
 // Proxy variables in the environment must never carry calls to arks.
 func TestTransport_IgnoresProxyEnv(t *testing.T) {
+	// Structural layer: http.ProxyFromEnvironment caches the environment once
+	// per process, so t.Setenv below cannot be relied on in a full package run.
+	require.Nil(t, Config{URL: "https://example.test"}.transport().Proxy)
+	require.Nil(t, Config{URL: "https://example.test", DialAddress: "127.0.0.1:443"}.transport().Proxy)
+	require.Nil(t, Config{URL: "https://example.test", DialSocket: "/run/arks.sock"}.transport().Proxy)
+
 	proxy, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	defer proxy.Close()

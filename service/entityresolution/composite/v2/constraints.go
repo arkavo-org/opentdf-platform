@@ -80,6 +80,7 @@ func (s *Service) withholdSuspendedPublishing(ctx context.Context, subj source.S
 	sub, _ := subj.Claims["sub"].(string)
 	err := checkPublishing(ctx, s.publishing, sub)
 	if err == nil {
+		s.logger.DebugContext(ctx, "composite: publishing status not suspended", slog.String("sub", sub))
 		return grants
 	}
 	var denial *publishingstatus.DenialError
@@ -109,9 +110,15 @@ func (s *Service) withholdSuspendedPublishing(ctx context.Context, subj source.S
 		level = slog.LevelError
 	}
 	s.logger.LogAttrs(ctx, level, publishingWithheldMsg, attrs...)
+	// The client already denies an empty sub without calling arks; the audit
+	// event just needs a non-empty subject.
+	auditSub := sub
+	if auditSub == "" {
+		auditSub = "(none)"
+	}
 	s.logger.Audit.EntitlementWithheld(ctx, audit.EntitlementWithheldEventParams{
 		Constraint:   publishingConstraint,
-		Subject:      sub,
+		Subject:      auditSub,
 		Reason:       denial.Reason,
 		Since:        denial.Since,
 		ReportID:     denial.ReportID,

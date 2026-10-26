@@ -1,7 +1,8 @@
-// Package publishingstatus asks arks whether a subject's publishing is
-// suspended. The arkavo entity resolver consults it so a suspended subject
-// resolves with no entitlements. Contract: arks
-// GET /moderation/v1/suspensions/{sub}.
+// Package publishingstatus asks arks whether an account is suspended from
+// publishing. The composite entity resolver's constraints.publishing_status
+// consults it and withholds only the account's
+// https://patreon.arkavo.com/attr/arkavo-creator grants on a suspension or any
+// unclear answer. Contract: arks GET /moderation/v1/suspensions/{sub}.
 package publishingstatus
 
 import (
@@ -19,8 +20,8 @@ import (
 	"github.com/opentdf/platform/service/internal/servicetoken"
 )
 
-// maxDuration bounds timeout and cache_ttl: a cached answer is never older
-// than a live one could be stale.
+// maxDuration caps both timeout and cache_ttl at 5 s, so a new suspension
+// takes effect within about 5 s.
 const maxDuration = 5 * time.Second
 
 // Config is services.entityresolution.constraints.publishing_status (the
@@ -45,7 +46,7 @@ type Config struct {
 	ClientSecret servicetoken.Secret `mapstructure:"client_secret" json:"client_secret"`
 	// Timeout bounds each call to arks; zero means 3 s. At most 5 s.
 	Timeout time.Duration `mapstructure:"timeout" json:"timeout"`
-	// CacheTTL is how long an answer is reused; zero means 5 s. At most 5 s.
+	// CacheTTL is how long a not-suspended answer is reused; zero means 5 s. At most 5 s.
 	CacheTTL time.Duration `mapstructure:"cache_ttl" json:"cache_ttl"`
 }
 
