@@ -207,7 +207,7 @@ composite v2 resolver, the v2 JIT PDP over `filestore`.
   - `TestPublishing_NoGrantNoCall`: campaign only → calls == 0.
   - `TestPublishing_NotSuspendedKeeps`: nil → both kept, and `gotSub` == the token's `sub`.
   - `TestPublishing_PEPChainSendsPrefixedSub`: a claims entity with `sub: "arkavo:abc"` via `claimsEntity` + `callerContext` → `gotSub == "arkavo:abc"`.
-  - `TestPublishing_AllValuesOfDefinition` (Review Focus 1): grants `.../arkavo-creator/value/publish`, `.../arkavo-creator/value/admin` and `.../arkavo-creator-pro/value/x` (from a fake source owning both) → suspended leaves only `arkavo-creator-pro`.
+  - `TestPublishing_AllValuesOfDefinition` (Review Focus 1): grants `.../arkavo-creator/value/publish`, `.../arkavo-creator/value/admin`, `.../arkavo-creator-pro/value/x` and the per-creator `https://arkavo.net/attr/creator/value/<uuid>` (opentdf-platform#64; from fake sources owning them) → suspended leaves `arkavo-creator-pro` and the per-creator attribute, both untouched.
   - `TestPublishing_CancelledContext` (Review Focus 2): a real `publishingstatus.Client` against an `httptest` server, with an already-cancelled ctx → the creator grant is withheld, other grants are kept, and there's no error.
   - `TestPublishing_UnsetKeepsGrant` (Review Focus 5): `svc.publishing` nil → `publishValue` is kept.
   - `TestPublishing_PanicWithholds`.
