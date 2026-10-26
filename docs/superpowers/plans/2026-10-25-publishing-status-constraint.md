@@ -167,7 +167,8 @@ composite v2 resolver, the v2 JIT PDP over `filestore`.
 ### Task 4: The composite constraint
 
 **Files:**
-- Modify: `service/entityresolution/composite/v2/config.go` (adds `PublishingStatus` to `ConstraintsConfig`, validates it, and logs `publishing_status_url` in `LogValue`), `constraints.go` (new function), `composite.go` (`Service` field; call after `capGrants`), `register.go` (build the client)
+- Create: `service/logger/audit/entitlementWithheld.go`, `service/logger/audit/entitlementWithheld_test.go`
+- Modify: `service/logger/audit/logger.go` (non-panicking transaction check), `service/entityresolution/composite/v2/config.go` (adds `PublishingStatus` to `ConstraintsConfig`, validates it, and logs `publishing_status_url` in `LogValue`), `constraints.go` (new function), `composite.go` (`Service` field; call after `capGrants`), `register.go` (build the client)
 - Test: `service/entityresolution/composite/v2/publishing_test.go` (new), `config_test.go`
 
 **Interfaces:**
@@ -181,6 +182,18 @@ composite v2 resolver, the v2 JIT PDP over `filestore`.
   const publishingDefinition = "https://patreon.arkavo.com/attr/arkavo-creator"
   func (s *Service) withholdSuspendedPublishing(ctx context.Context, subj source.Subject, grants []sealedGrant) []sealedGrant
   ```
+- Audit (in `service/logger/audit`):
+  ```go
+  type EntitlementWithheldEventParams struct {
+      Constraint, Subject, Reason, Since, ReportID string
+      WithheldFQNs []string
+  }
+  func CreateEntitlementWithheldEvent(ctx context.Context, p EntitlementWithheldEventParams) (*EventObject, error)
+  func (a *Logger) EntitlementWithheld(ctx context.Context, p EntitlementWithheldEventParams) // no-op without a transaction
+  func HasTransaction(ctx context.Context) bool
+  ```
+  Event shape: verb `VerbDecision`; object `{ID: sub+"-"+constraint, Type: ObjectTypeEntityObject, Name: "entitlementWithheld-"+constraint}`; action `{Type: ActionTypeRead, Result: ActionResultFailure}`; actor ID = sub; metadata `constraint`, `reason`, `since`, `report_id`, `withheld_fqns`; `ClientInfo.Platform` `entityresolution.composite`; `RequestID`/`UserAgent`/`RequestIP` from `GetAuditDataFromContext`. The `cause` text is never included.
+- The composite calls `s.logger.Audit.EntitlementWithheld(...)` on every withholding, after the WARN/ERROR log line.
 - `New`'s signature is unchanged. `Register` sets `svc.publishing` after `New`, only from a successful `publishingstatus.New` (a typed nil must not land in the interface). This keeps the rebase with PR #61 to the call site and to `register.go`.
 - Behavior:
   - `s.publishing == nil` → grants unchanged.
@@ -199,9 +212,15 @@ composite v2 resolver, the v2 JIT PDP over `filestore`.
   - `TestPublishing_UnsetKeepsGrant` (Review Focus 5): `svc.publishing` nil → `publishValue` is kept.
   - `TestPublishing_PanicWithholds`.
   - `TestPublishing_LogsWithoutSecret`: `bufferLogger`, a denial → the log has `sub`, `reason`, `withheld`, and no client secret.
+  - In `entitlementWithheld_test.go`:
+    - `TestEntitlementWithheldEvent_Shape`: the fields above, exactly.
+    - `TestEntitlementWithheld_NoTransactionNoPanic`: `t.Context()` → no panic, nothing logged.
+    - `TestEntitlementWithheld_EmittedOnClose`: with a transaction opened as the interceptor does, closing it logs one `AUDIT` line with verb `decision`, plus `report_id` and `withheld_fqns`.
+  - `TestPublishing_AuditEventOnWithhold`: the decision path through `pdpFor` with an audit transaction in ctx, suspended → the audit output holds both the deny decision event and the `entitlementWithheld-publishing_status` event, with the same `request_id`, `reason` = `ReasonSuspended` and `report_id` `r1`.
+  - `TestPublishing_NoAuditWhenKept`: not suspended → no `entitlementWithheld` event.
   - In `config_test.go`: a partial `publishing_status` block → a `Validate` error mentioning `constraints.publishing_status`; a full block decodes from YAML (`url`, `dial_address`, `identity_url`, `client_id`, `client_secret`, `timeout`, `cache_ttl`).
 - [ ] **Step 2: Run** `go test ./entityresolution/composite/...` → FAIL.
-- [ ] **Step 3: Implement** the config field and validation (mirroring `AgentStatus`), the `Service` field, `withholdSuspendedPublishing`, the call `ev.Grants = s.withholdSuspendedPublishing(ctx, subj, capGrants(...))`, and the `Register` wiring.
+- [ ] **Step 3: Implement** the audit event and `HasTransaction`, the config field and validation (mirroring `AgentStatus`), the `Service` field, `withholdSuspendedPublishing`, the call `ev.Grants = s.withholdSuspendedPublishing(ctx, subj, capGrants(...))`, and the `Register` wiring.
 - [ ] **Step 4: Run** `go test ./entityresolution/... ./internal/...` → PASS.
 - [ ] **Step 5: Lint, format and commit:** `feat(ers): constraints.publishing_status withholds arkavo-creator for suspended creators (#59)`.
 

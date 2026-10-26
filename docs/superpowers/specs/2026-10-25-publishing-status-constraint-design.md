@@ -177,6 +177,45 @@ Each withholding logs at WARN with `sub`, the reason, the dropped FQNs, and
 `LogAgentDenial` does for its configuration reasons. "Not suspended" logs at
 DEBUG.
 
+### Audit (owner decision, 2026-10-25)
+
+Every withholding also emits an `AUDIT`-level event on the platform's
+existing audit logger (`service/logger/audit`). From the audit stream alone,
+a denied publish can then be traced to the moderation report behind it, and
+an outage denial told apart from a moderation one.
+
+- **New audit method:**
+  `func (a *Logger) EntitlementWithheld(ctx, EntitlementWithheldEventParams)`
+  in `service/logger/audit`. Its params are `Constraint` (here
+  `"publishing_status"`), `Subject` (the `sub` as sent), `Reason`, `Since`,
+  `ReportID` and `WithheldFQNs`. It is named generically so the agent gate
+  can adopt it later. Not in this change.
+- **Event shape**, following `CreateV2GetDecisionEvent`:
+  - verb `decision`;
+  - object type `entity_object`, ID `<sub>-<constraint>`, name
+    `entitlementWithheld-<constraint>`;
+  - action type `read`, result `failure`;
+  - actor ID `<sub>`;
+  - metadata `constraint`, `reason`, `since`, `report_id`,
+    `withheld_fqns`;
+  - client platform `entityresolution.composite`;
+  - request ID, user agent and IP from the audit context.
+
+  It shares the request ID with the decision's own audit event, so the two
+  correlate.
+- **Never panics.** `audit.LogAuditEvent` panics when the context has no
+  audit transaction. Resolution can run without one (an ERS call outside
+  the server interceptor, or tests), so the composite emits only when a
+  transaction is present. Add a non-panicking check to the audit package for
+  this. Without a transaction, the WARN/ERROR log line above is the only
+  record.
+- **Never carries** the client secret, the service CWT or the `cause`
+  error text. Causes can echo URLs.
+- **Stored** wherever the platform's audit log stream goes; that is
+  unchanged. Audit events are log lines at level `AUDIT`, not database rows.
+  arks's report record remains the moderation audit (who suspended, when,
+  response time).
+
 ### Prod config and policy (in this change)
 
 - **`examples/config/policy.patreon.yaml`:** define the attribute
