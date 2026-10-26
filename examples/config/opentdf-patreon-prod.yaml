@@ -65,7 +65,8 @@ services:
       # it as a secret (this file is committed); startup fails while it is empty.
       seal_key: ""
       # Client IDs of the PEPs whose unsealed claims chains are accepted.
-      # The catalog node's client ID, confirmed on a catalog AuthZEN decision.
+      # The catalog node's client ID, confirmed on 2026-10-25 from the production
+      # launch template ([catalog.authz] client_id) and by authnz-rs.
       # Empty accepts no PEP chain, so the second call finds no claims.
       # Each entry is the exact value the platform derives through
       # server.auth.policy.client_id_claim (arkavo_account_id above), which
