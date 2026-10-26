@@ -56,6 +56,8 @@ func TestValidate(t *testing.T) {
 		{name: "http loopback with off-host dial_address", mutate: func(c *Config) { c.URL = "http://127.0.0.1:9000"; c.DialAddress = "10.0.0.5:9000" }, wantErr: true},
 		{name: "http loopback with loopback dial_address", mutate: func(c *Config) { c.URL = "http://localhost:9000"; c.DialAddress = "127.0.0.1:9000" }},
 		{name: "dial_address without port", mutate: func(c *Config) { c.DialAddress = "127.0.0.1" }, wantErr: true, notContain: "127.0.0.1"},
+		{name: "dial_address non-numeric port", mutate: func(c *Config) { c.DialAddress = "127.0.0.1:abc" }, wantErr: true},
+		{name: "dial_address port zero", mutate: func(c *Config) { c.DialAddress = "127.0.0.1:0" }, wantErr: true},
 		{name: "dial_address empty port", mutate: func(c *Config) { c.DialAddress = "127.0.0.1:" }, wantErr: true},
 		{name: "dial_socket relative", mutate: func(c *Config) { c.DialAddress = ""; c.DialSocket = "arks.sock" }, wantErr: true, notContain: "arks.sock"},
 		{name: "dial_address and dial_socket", mutate: func(c *Config) { c.DialSocket = "/run/arks.sock" }, wantErr: true},
@@ -203,17 +205,31 @@ func TestTransport_NoOverrideDialsNormally(t *testing.T) {
 	resp.Body.Close()
 }
 
-// A server whose certificate does not cover the URL host must fail the
-// handshake even though the dial is redirected.
-func TestTransport_DialAddressRejectsWrongCert(t *testing.T) {
-	_, pool := testCert(t)
-	srv := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+// The server presents a certificate the client trusts and that covers
+// example.test only. Dialing it for another URL host must fail on hostname
+// verification, proving the dial override does not relax it.
+func TestTransport_DialAddressVerifiesURLHost(t *testing.T) {
+	cert, pool := testCert(t)
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	srv.TLS = &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}
+	srv.StartTLS()
 	defer srv.Close()
-	c := Config{URL: "https://example.test", DialAddress: srv.Listener.Addr().String()}
-	tr := c.transport()
-	tr.TLSClientConfig = &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
-	_, err := (&http.Client{Transport: tr}).Get(c.URL)
-	require.Error(t, err)
+
+	get := func(rawURL string) error {
+		tr := Config{URL: rawURL, DialAddress: srv.Listener.Addr().String()}.transport()
+		tr.TLSClientConfig = &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
+		resp, err := (&http.Client{Transport: tr}).Get(rawURL)
+		if err == nil {
+			resp.Body.Close()
+		}
+		return err
+	}
+	require.NoError(t, get("https://example.test"))
+
+	err := get("https://other.test")
+	var hostErr x509.HostnameError
+	require.ErrorAs(t, err, &hostErr)
+	assert.Equal(t, "other.test", hostErr.Host)
 }
 
 // Proxy variables in the environment must never carry calls to arks.
@@ -248,6 +264,8 @@ func TestTransport_IgnoresProxyEnv(t *testing.T) {
 	over := Config{URL: "https://example.test", DialAddress: srv.Listener.Addr().String()}.transport()
 	over.TLSClientConfig = &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
 	for url, tr := range map[string]*http.Transport{
+		// No override: the server's own address, never the proxy.
+		plain.URL:              Config{URL: plain.URL}.transport(),
 		"https://example.test": over,
 		// 127.0.0.1 is exempt from ProxyFromEnvironment, so use a name.
 		"http://arks.test:" + strings.Split(plain.Listener.Addr().String(), ":")[1]: Config{

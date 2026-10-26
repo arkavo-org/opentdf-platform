@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	"github.com/opentdf/platform/service/internal/servicetoken"
@@ -74,8 +75,9 @@ func (c Config) validate() error {
 		return errors.New("publishing_status.dial_address and publishing_status.dial_socket are mutually exclusive")
 	}
 	if c.DialAddress != "" {
-		if _, port, err := net.SplitHostPort(c.DialAddress); err != nil || port == "" {
-			return errors.New("publishing_status.dial_address must be host:port")
+		_, port, err := net.SplitHostPort(c.DialAddress)
+		if n, convErr := strconv.Atoi(port); err != nil || convErr != nil || n < 1 || n > 65535 {
+			return errors.New("publishing_status.dial_address must be host:port with a numeric port")
 		}
 	}
 	if c.DialSocket != "" && !filepath.IsAbs(c.DialSocket) {
@@ -83,13 +85,13 @@ func (c Config) validate() error {
 	}
 	// Plain http must never leave the host: a socket, or loopback on both the
 	// URL and the dial address.
-	plainOK, noPlain := c.DialSocket != "", false
+	// noPlain: the dial target is off-host, so plain http is forbidden outright.
+	noPlain := false
 	if c.DialAddress != "" {
 		host, _, _ := net.SplitHostPort(c.DialAddress)
-		if !isLoopback(host) {
-			plainOK, noPlain = false, true
-		}
+		noPlain = !isLoopback(host)
 	}
+	plainOK := c.DialSocket != ""
 	// No error names a URL: it may carry credentials.
 	if err := checkURL("publishing_status.url", c.URL, plainOK, noPlain); err != nil {
 		return err
