@@ -85,6 +85,9 @@ func (s *Service) withholdSuspendedPublishing(ctx context.Context, subj source.S
 	var denial *publishingstatus.DenialError
 	if !errors.As(err, &denial) {
 		denial = &publishingstatus.DenialError{Reason: publishingstatus.ReasonUnreachable, Subject: sub, Cause: err}
+	} else if denial == nil {
+		// A typed nil *DenialError: its fields and methods would panic.
+		denial = &publishingstatus.DenialError{Reason: publishingstatus.ReasonUnreachable, Subject: sub, Cause: errors.New("checker returned a nil denial")}
 	}
 
 	attrs := []slog.Attr{
