@@ -227,7 +227,7 @@ composite v2 resolver, the v2 JIT PDP over `filestore`.
 ### Task 5: Policy, prod config and the end-to-end `publish` decision
 
 **Files:**
-- Modify: `examples/config/policy.patreon.yaml` (attribute `arkavo-creator`, rule `anyOf`, value `publish`, in the `patreon.arkavo.com` namespace, with no subject mapping), `examples/config/opentdf-patreon-prod.yaml` (`identity-core`: `pep_assertable: true`, `actions: [publish]`; a commented-out `publishing_status` block), `examples/config/opentdf-patreon-local-test.yaml` (mirror `pep_assertable` and `actions`)
+- Modify: `examples/config/policy.patreon.yaml` (attribute `arkavo-creator`, rule `anyOf`, value `publish`, in the `patreon.arkavo.com` namespace, with no subject mapping), `examples/config/opentdf-patreon-prod.yaml` (`identity-core`: `pep_assertable: true`, `actions: [publish]`; `evidence.claims_chain_peps: ["client:catalog-node"]`, replacing `[]` and keeping the comment's never-an-account-UUID warning; a commented-out `publishing_status` block), `examples/config/opentdf-patreon-local-test.yaml` (mirror `pep_assertable` and `actions`)
 - Test: `service/entityresolution/composite/v2/decision_test.go`
 
 **Interfaces:**

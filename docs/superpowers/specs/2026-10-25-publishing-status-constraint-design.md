@@ -34,9 +34,6 @@ consulted, and the node keeps no suspension records of its own.
   `arkavo-creator` grant until that evidence expires (at most the token's
   `exp`). The node's claims-mode path is unaffected, because it resolves
   unsealed claims on every call. Document this limit; do not fix it here.
-- Recording the catalog node's client ID in `claims_chain_peps`. That is the
-  #59 pre-check, which is measured in production and isn't known yet. Leave
-  the existing placeholder comment in place.
 - Turning the constraint on in production.
 
 ## Anti-goals (failure even if it "works")
@@ -238,6 +235,11 @@ an outage denial told apart from a moderation one.
     claims entity. arks's `pe_claims` forwards both; `arkavo_entitlements`
     is filtered to the Patreon definitions plus the publish entitlement
     (arkavo-rs#95);
+  - set `evidence.claims_chain_peps: ["client:catalog-node"]`. This is the
+    catalog node's PEP client ID, confirmed on 2026-10-25 from the production
+    launch template (`[catalog.authz] client_id = "catalog-node"`) and by
+    authnz-rs. Keep the existing comment's warning never to list an account
+    UUID;
   - add a commented-out `publishing_status` block with the prod values above.
     Its comment must say not to enable it until arks serves
     `GET /moderation/v1/suspensions/{subject}` with moderation on (arkavo-rs#93):
