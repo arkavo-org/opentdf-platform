@@ -138,6 +138,13 @@ func (a *Logger) GetDecisionV2(ctx context.Context, eventParams GetDecisionV2Eve
 	LogAuditEvent(ctx, VerbDecision, event)
 }
 
+// HasTransaction reports whether ctx carries an audit transaction, which
+// LogAuditEvent requires.
+func HasTransaction(ctx context.Context) bool {
+	tx, ok := ctx.Value(contextKey{}).(*auditTransaction)
+	return ok && tx != nil
+}
+
 func LogAuditEvent(ctx context.Context, verb Verb, event *EventObject) {
 	tx, ok := ctx.Value(contextKey{}).(*auditTransaction)
 	if !ok {

@@ -11,6 +11,7 @@ import (
 
 	"github.com/opentdf/platform/service/entityresolution/source"
 	"github.com/opentdf/platform/service/internal/agentstatus"
+	"github.com/opentdf/platform/service/internal/publishingstatus"
 	"github.com/opentdf/platform/service/pkg/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -117,6 +118,9 @@ func TestValidate(t *testing.T) {
 		{"agent_status half filled", func(c *Config) {
 			c.Constraints.AgentStatus = agentstatus.Config{URL: "https://identity.example.com", ClientID: "c"}
 		}, []string{"agent_status"}},
+		{"publishing_status half filled", func(c *Config) {
+			c.Constraints.PublishingStatus = publishingstatus.Config{URL: "https://platform.example.com", ClientID: "c"}
+		}, []string{"constraints.publishing_status"}},
 		// A bare YAML integer decodes as nanoseconds: every source would time
 		// out, which denies everything silently.
 		{"deadline under 1ms", func(c *Config) { c.Deadline = 300 }, []string{"deadline", "1ms", "300ms"}},
@@ -363,4 +367,32 @@ func TestDecodeConfig_AgentStatusTimeout(t *testing.T) {
 		cfg := decode(t, "        url: https://identity.example.com\n        client_id: opentdf\n        client_secret: s\n        timeout: 6s\n")
 		assert.Error(t, cfg.Validate())
 	})
+}
+
+func TestDecodeConfig_PublishingStatus(t *testing.T) {
+	const body = "    sources: []\n    constraints:\n      publishing_status:\n" +
+		"        url: https://platform.example.com\n" +
+		"        dial_address: 127.0.0.1:443\n" +
+		"        identity_url: https://identity.example.com\n" +
+		"        client_id: opentdf\n" +
+		"        client_secret: s\n" +
+		"        timeout: 2s\n" +
+		"        cache_ttl: 3s\n"
+	cfg, present, err := DecodeConfig(loadServiceConfig(t, body))
+	require.NoError(t, err)
+	require.True(t, present)
+	ps := cfg.Constraints.PublishingStatus
+	assert.True(t, ps.Enabled())
+	assert.Equal(t, "https://platform.example.com", ps.URL)
+	assert.Equal(t, "127.0.0.1:443", ps.DialAddress)
+	assert.Equal(t, "https://identity.example.com", ps.IdentityURL)
+	assert.Equal(t, "opentdf", ps.ClientID)
+	assert.Equal(t, 2*time.Second, ps.Timeout)
+	assert.Equal(t, 3*time.Second, ps.CacheTTL)
+	assert.Contains(t, cfg.LogValue().String(), "https://platform.example.com")
+	assert.NotContains(t, cfg.LogValue().String(), "client_secret")
+
+	none, _, err := DecodeConfig(loadServiceConfig(t, "    sources: []\n"))
+	require.NoError(t, err)
+	assert.False(t, none.Constraints.PublishingStatus.Enabled())
 }
