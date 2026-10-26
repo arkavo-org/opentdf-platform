@@ -177,26 +177,27 @@ func TestCheck_FailClosed(t *testing.T) {
 	}
 	cases := []struct {
 		name    string
+		reason  string
 		handler func(http.ResponseWriter, *http.Request, int)
 	}{
-		{"404", status(http.StatusNotFound)},
-		{"400", status(http.StatusBadRequest)},
-		{"503", status(http.StatusServiceUnavailable)},
-		{"500", status(http.StatusInternalServerError)},
-		{"not json", body("not json")},
-		{"empty object", body("{}")},
-		{"suspended is a string", body(`{"suspended":"false","subject":"` + testSub + `"}`)},
-		{"suspended is null", body(`{"suspended":null,"subject":"` + testSub + `"}`)},
-		{"other subject", body(`{"suspended":false,"subject":"other"}`)},
-		{"oversized body", body(bigBody)},
+		{"404", ReasonUnreachable, status(http.StatusNotFound)},
+		{"400", ReasonUnreachable, status(http.StatusBadRequest)},
+		{"503", ReasonUnreachable, status(http.StatusServiceUnavailable)},
+		{"500", ReasonUnreachable, status(http.StatusInternalServerError)},
+		{"not json", ReasonMalformedAnswer, body("not json")},
+		{"empty object", ReasonMalformedAnswer, body("{}")},
+		{"suspended is a string", ReasonMalformedAnswer, body(`{"suspended":"false","subject":"` + testSub + `"}`)},
+		{"suspended is null", ReasonMalformedAnswer, body(`{"suspended":null,"subject":"` + testSub + `"}`)},
+		{"other subject", ReasonMalformedAnswer, body(`{"suspended":false,"subject":"other"}`)},
+		{"oversized body", ReasonMalformedAnswer, body(bigBody)},
+		{"trailing data", ReasonMalformedAnswer, body(`{"subject":"` + testSub + `","suspended":false}garbage`)},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			e := newEnv(t, nil)
 			e.arks.handler = tc.handler
 			d := denial(t, e.client.Check(t.Context(), testSub))
-			assert.NotEqual(t, ReasonSuspended, d.Reason)
-			assert.NotEmpty(t, d.Reason)
+			assert.Equal(t, tc.reason, d.Reason)
 		})
 	}
 
@@ -334,21 +335,18 @@ func TestCheck_CachesOnlyNotSuspended(t *testing.T) {
 		require.Error(t, e.client.Check(t.Context(), testSub))
 		assert.Equal(t, 2, e.arks.count())
 	})
-	t.Run("a later failure keeps the entry until it expires", func(t *testing.T) {
+	t.Run("a failure for another sub leaves an entry alone and adds none", func(t *testing.T) {
 		e := newEnv(t, nil)
-		now := time.Unix(1_000_000, 0)
-		e.client.now = func() time.Time { return now }
 		require.NoError(t, e.client.Check(t.Context(), testSub))
 		e.client.mu.Lock()
 		before := e.client.cache[testSub]
 		e.client.mu.Unlock()
 		e.arks.handler = func(w http.ResponseWriter, _ *http.Request, _ int) { w.WriteHeader(http.StatusServiceUnavailable) }
-		now = now.Add(defaultCacheTTL + time.Millisecond)
-		require.Error(t, e.client.Check(t.Context(), testSub))
+		require.Error(t, e.client.Check(t.Context(), "other"))
 		e.client.mu.Lock()
-		after := e.client.cache[testSub]
-		e.client.mu.Unlock()
-		assert.Equal(t, before, after)
+		defer e.client.mu.Unlock()
+		assert.Equal(t, before, e.client.cache[testSub])
+		assert.NotContains(t, e.client.cache, "other")
 	})
 }
 
@@ -396,4 +394,88 @@ func TestDenialError_Strings(t *testing.T) {
 	assert.Contains(t, d.Error(), ReasonUnreachable)
 	assert.Contains(t, d.Error(), "HTTP 503")
 	require.ErrorIs(t, d, cause)
+}
+
+func TestCheck_CancelledCtxDeniesOnCacheHit(t *testing.T) {
+	e := newEnv(t, nil)
+	require.NoError(t, e.client.Check(t.Context(), testSub))
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	d := denial(t, e.client.Check(ctx, testSub))
+	assert.Equal(t, ReasonUnreachable, d.Reason)
+	require.ErrorIs(t, d, context.Canceled)
+}
+
+func TestCheck_ExpiredEntryEvicted(t *testing.T) {
+	e := newEnv(t, nil)
+	now := time.Unix(1_000_000, 0)
+	e.client.now = func() time.Time { return now }
+	require.NoError(t, e.client.Check(t.Context(), testSub))
+	now = now.Add(defaultCacheTTL + time.Millisecond)
+	e.arks.handler = func(w http.ResponseWriter, _ *http.Request, _ int) { w.WriteHeader(http.StatusServiceUnavailable) }
+	require.Error(t, e.client.Check(t.Context(), testSub))
+	e.client.mu.Lock()
+	defer e.client.mu.Unlock()
+	assert.NotContains(t, e.client.cache, testSub)
+}
+
+func TestCheck_SweepsExpiredOnWrite(t *testing.T) {
+	e := newEnv(t, nil)
+	now := time.Unix(1_000_000, 0)
+	e.client.now = func() time.Time { return now }
+	e.client.mu.Lock()
+	for i := range sweepThreshold {
+		e.client.cache[fmt.Sprintf("old-%d", i)] = now.Add(-time.Second)
+	}
+	e.client.mu.Unlock()
+	require.NoError(t, e.client.Check(t.Context(), testSub))
+	e.client.mu.Lock()
+	defer e.client.mu.Unlock()
+	assert.Len(t, e.client.cache, 1)
+}
+
+func TestCheck_TokenErrorHidesURLAndSubject(t *testing.T) {
+	assertClean := func(t *testing.T, err error) {
+		t.Helper()
+		d := denial(t, err)
+		require.Error(t, d.Cause)
+		assert.NotContains(t, d.Cause.Error(), "://")
+		assert.NotContains(t, d.Cause.Error(), testSub)
+	}
+	t.Run("cancelled", func(t *testing.T) {
+		e := newEnv(t, nil)
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+		assertClean(t, e.client.Check(ctx, testSub))
+	})
+	t.Run("identity unreachable", func(t *testing.T) {
+		dead := httptest.NewServer(http.NotFoundHandler())
+		dead.Close()
+		e := newEnv(t, func(c *Config) { c.IdentityURL = dead.URL })
+		err := e.client.Check(t.Context(), testSub)
+		assertClean(t, err)
+		assert.Equal(t, ReasonUnreachable, denial(t, err).Reason)
+	})
+}
+
+func TestCheck_IdentityRedirectRefused(t *testing.T) {
+	var mu sync.Mutex
+	hits := 0
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		mu.Lock()
+		hits++
+		mu.Unlock()
+		_, _ = w.Write([]byte(`{"access_token":"x","expires_in":3600}`))
+	}))
+	defer other.Close()
+	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, other.URL+"/oauth/token", http.StatusTemporaryRedirect)
+	}))
+	defer redirector.Close()
+	e := newEnv(t, func(c *Config) { c.IdentityURL = redirector.URL })
+	require.Error(t, e.client.Check(t.Context(), testSub))
+	assert.Zero(t, e.arks.count())
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Zero(t, hits)
 }

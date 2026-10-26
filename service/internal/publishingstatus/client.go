@@ -22,6 +22,7 @@ const (
 	defaultTimeout   = 3 * time.Second
 	defaultCacheTTL  = 5 * time.Second
 	maxBodyBytes     = 64 << 10
+	sweepThreshold   = 1024
 	checkTimeouts    = 2 // a token call and a suspension call
 	bearerAuthPrefix = "Bearer "
 )
@@ -142,6 +143,11 @@ func (c *Client) Check(ctx context.Context, sub string) error {
 	if sub == "" {
 		return &DenialError{Reason: ReasonMissingSubject}
 	}
+	// An already-cancelled ctx denies whatever the cache holds, so the
+	// result does not depend on cache state.
+	if err := ctx.Err(); err != nil {
+		return &DenialError{Reason: ReasonUnreachable, Subject: sub, Cause: err}
+	}
 	if c.cached(sub) {
 		return nil
 	}
@@ -157,7 +163,11 @@ func (c *Client) cached(sub string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	exp, ok := c.cache[sub]
-	return ok && c.now().Before(exp)
+	if ok && !c.now().Before(exp) {
+		delete(c.cache, sub)
+		return false
+	}
+	return ok
 }
 
 // httpStatusError is a non-200 answer from arks.
@@ -206,7 +216,16 @@ func (c *Client) decide(ctx context.Context, sub string) *DenialError {
 	// Only this branch writes the cache. A suspended or failed answer
 	// neither creates an entry nor removes an existing one early.
 	c.mu.Lock()
-	c.cache[sub] = c.now().Add(c.cacheTTL)
+	now := c.now()
+	if len(c.cache) >= sweepThreshold {
+		// Memory stays bounded by the subjects seen within one TTL.
+		for k, exp := range c.cache {
+			if !now.Before(exp) {
+				delete(c.cache, k)
+			}
+		}
+	}
+	c.cache[sub] = now.Add(c.cacheTTL)
 	c.mu.Unlock()
 	return nil
 }
@@ -225,6 +244,11 @@ func (c *Client) fetch(ctx context.Context, sub string) (answer, error) {
 func (c *Client) fetchOnce(ctx context.Context, sub string, freshToken bool) (answer, error) {
 	token, err := c.minter.Token(ctx, freshToken)
 	if err != nil {
+		// servicetoken wraps a *url.Error, which carries the identity URL.
+		var ue *url.Error
+		if !errors.Is(err, servicetoken.ErrCredentialsRejected) && errors.As(err, &ue) {
+			err = fmt.Errorf("service token: %w", ue.Err)
+		}
 		return answer{}, err
 	}
 	endpoint := strings.TrimRight(c.cfg.URL, "/") + suspensionsPath + url.PathEscape(sub)
@@ -248,8 +272,12 @@ func (c *Client) fetchOnce(ctx context.Context, sub string, freshToken bool) (an
 		return answer{}, &httpStatusError{code: resp.StatusCode}
 	}
 	var a answer
-	if err := json.NewDecoder(io.LimitReader(resp.Body, maxBodyBytes)).Decode(&a); err != nil {
+	dec := json.NewDecoder(io.LimitReader(resp.Body, maxBodyBytes))
+	if err := dec.Decode(&a); err != nil {
 		return answer{}, &malformedError{why: "body does not decode"}
+	}
+	if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return answer{}, &malformedError{why: "trailing data after the answer"}
 	}
 	if a.Suspended == nil {
 		return answer{}, &malformedError{why: "no boolean suspended"}
