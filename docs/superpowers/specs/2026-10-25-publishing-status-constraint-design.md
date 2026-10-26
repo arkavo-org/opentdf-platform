@@ -71,9 +71,12 @@ every `arkavo-creator` grant and logs why.
   `sub` string is withheld (fail closed), with no call.
 - **The chain carries `sub`.** arks's facade (`pe_claims` in arkavo-rs
   `src/modules/authzen/translate.rs`) always sets the claims entity's `sub`
-  to the AuthZEN `subject.id`. Per the AuthZEN CWT profile, that is the
-  verified person CWT's `sub`, the same key arks stores suspensions under.
-  The integration test in rollout step 4 confirms they match.
+  to the AuthZEN `subject.id`. That is the person's CWT `sub` with an
+  `arkavo:` prefix. arks keys suspensions on the `sub` with any `arkavo:`
+  prefix removed, so the prefixed form (from a PEP chain) and the bare form
+  (from a verified token) both find the same record (arkavo-rs#93,
+  PR #123). Send `sub` as the subject carries it, unchanged; the response
+  echoes it as sent.
 - **Applies to every subject kind** that holds the grant. In practice only
   persons do. A device's or agent's `sub` will simply not be suspended unless
   arks says so.
