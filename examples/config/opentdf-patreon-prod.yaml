@@ -65,15 +65,14 @@ services:
       # it as a secret (this file is committed); startup fails while it is empty.
       seal_key: ""
       # Client IDs of the PEPs whose unsealed claims chains are accepted.
-      # Set this to the catalog node's client ID, from the platform plan's
-      # Task 1 pre-check (measured on a catalog AuthZEN decision), before the
-      # cutover. Empty accepts no PEP chain, so the second call finds no claims.
+      # The catalog node's client ID, confirmed on a catalog AuthZEN decision.
+      # Empty accepts no PEP chain, so the second call finds no claims.
       # Each entry is the exact value the platform derives through
       # server.auth.policy.client_id_claim (arkavo_account_id above), which
       # for the catalog node's client_credentials service token is
       # "client:<id>". Never an account UUID: every token of that account,
       # its agents' tokens included, carries it and would be admitted.
-      claims_chain_peps: []
+      claims_chain_peps: ["client:catalog-node"]
 
     sources:
       - id: patreon
@@ -96,8 +95,21 @@ services:
         claim: arkavo_entitlements
         grants:
           - https://patreon.arkavo.com/attr/arkavo-creator   # the publish entitlement
-        pep_assertable: false
+        actions: [publish]
+        pep_assertable: true
 
     constraints:
       # agent_status is unset, so every agent subject is withheld.
       device_class_caps: {}
+      # Do not enable until arks serves GET /moderation/v1/suspensions/{subject}
+      # with moderation on (arkavo-rs#93, PR #124). It fails closed, so enabling
+      # it early refuses publishing for every creator. The identity client must
+      # be registered with aud = [opentdf-platform, https://platform.arkavo.net].
+      # Known limit: sealed arkavo_evidence is not re-checked, so a token's
+      # sealed grant lasts until that evidence expires.
+      # publishing_status:
+      #   url: https://platform.arkavo.net
+      #   dial_address: 127.0.0.1:443
+      #   identity_url: https://identity.arkavo.net
+      #   client_id: opentdf-platform
+      #   client_secret: ""

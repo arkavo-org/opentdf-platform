@@ -277,7 +277,7 @@ func auditedDecision(t *testing.T, svc *Service) ([]map[string]any, string) {
 	next := connect.UnaryFunc(func(ctx context.Context, _ connect.AnyRequest) (connect.AnyResponse, error) {
 		// The creator holds publishValue: only the constraint can deny it.
 		_, err := pdp.GetDecision(callerContext(ctx, "arks-media"), tokenIdentifier(signCWT(t, claims)),
-			&policy.Action{Name: "read"},
+			&policy.Action{Name: "publish"},
 			[]*authzV2.Resource{{EphemeralId: "r0", Resource: &authzV2.Resource_AttributeValues_{
 				AttributeValues: &authzV2.Resource_AttributeValues{Fqns: []string{publishValue}},
 			}}}, nil, nil)
@@ -330,7 +330,7 @@ func TestPublishing_AuditEventOnWithhold(t *testing.T) {
 	}
 	withheld := auditEvents(t, recs, "entitlementWithheld-publishing_status")
 	require.Len(t, withheld, 1)
-	decision := auditEvents(t, recs, "decisionRequest-read")
+	decision := auditEvents(t, recs, "decisionRequest-publish")
 	require.Len(t, decision, 1)
 	assert.Equal(t, "failure", field(t, decision[0], "action")["result"], "the decision is a deny")
 
@@ -351,5 +351,5 @@ func TestPublishing_NoAuditWhenKept(t *testing.T) {
 	svc := publishingService(t, fakePublishing{})
 	recs, _ := auditedDecision(t, svc)
 	assert.Empty(t, auditEvents(t, recs, "entitlementWithheld-publishing_status"))
-	assert.NotEmpty(t, auditEvents(t, recs, "decisionRequest-read"))
+	assert.NotEmpty(t, auditEvents(t, recs, "decisionRequest-publish"))
 }
