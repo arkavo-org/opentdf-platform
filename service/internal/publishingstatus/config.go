@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"time"
 
 	"github.com/opentdf/platform/service/internal/servicetoken"
@@ -31,9 +32,9 @@ type Config struct {
 	// DialAddress (host:port) sends every connection to arks there instead of
 	// resolving URL's host, e.g. 127.0.0.1:443 when arks is on this host.
 	DialAddress string `mapstructure:"dial_address" json:"dial_address"`
-	// DialSocket is a Unix socket path doing the same job. It excludes
-	// DialAddress, and is the only case where URL may be plain http on a
-	// non-loopback host name, since the request never leaves the host.
+	// DialSocket is an absolute Unix socket path doing the same job. It
+	// excludes DialAddress. It is the only case where URL may be plain http
+	// on a non-loopback host name, because the request cannot leave the host.
 	DialSocket string `mapstructure:"dial_socket" json:"dial_socket"`
 	// IdentityURL is the authnz-rs base URL that mints the service CWT. It is
 	// never dialed through the override above.
@@ -72,13 +73,30 @@ func (c Config) validate() error {
 	if c.DialAddress != "" && c.DialSocket != "" {
 		return errors.New("publishing_status.dial_address and publishing_status.dial_socket are mutually exclusive")
 	}
+	if c.DialAddress != "" {
+		if _, port, err := net.SplitHostPort(c.DialAddress); err != nil || port == "" {
+			return errors.New("publishing_status.dial_address must be host:port")
+		}
+	}
+	if c.DialSocket != "" && !filepath.IsAbs(c.DialSocket) {
+		return errors.New("publishing_status.dial_socket must be an absolute path")
+	}
+	// Plain http must never leave the host: a socket, or loopback on both the
+	// URL and the dial address.
+	plainOK, noPlain := c.DialSocket != "", false
+	if c.DialAddress != "" {
+		host, _, _ := net.SplitHostPort(c.DialAddress)
+		if !isLoopback(host) {
+			plainOK, noPlain = false, true
+		}
+	}
 	// No error names a URL: it may carry credentials.
-	if err := checkURL("publishing_status.url", c.URL, c.DialSocket != ""); err != nil {
+	if err := checkURL("publishing_status.url", c.URL, plainOK, noPlain); err != nil {
 		return err
 	}
 	// The identity endpoint is not dialed through the override, so only
 	// loopback may be plain http.
-	if err := checkURL("publishing_status.identity_url", c.IdentityURL, false); err != nil {
+	if err := checkURL("publishing_status.identity_url", c.IdentityURL, false, false); err != nil {
 		return err
 	}
 	if c.ClientID == "" || c.ClientSecret == "" {
@@ -94,8 +112,9 @@ func (c Config) validate() error {
 }
 
 // checkURL validates a base URL. Plain http is allowed on loopback, and also
-// when plainOK says the connection stays on this host regardless of the name.
-func checkURL(field, raw string, plainOK bool) error {
+// when plainOK says the connection stays on this host regardless of the name;
+// noPlain forbids it outright (the dial target is off-host).
+func checkURL(field, raw string, plainOK, noPlain bool) error {
 	if raw == "" {
 		return fmt.Errorf("%s is required", field)
 	}
@@ -113,7 +132,7 @@ func checkURL(field, raw string, plainOK bool) error {
 	if u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
 		return fmt.Errorf("%s must not carry a query or fragment", field)
 	}
-	if u.Scheme != "https" && (u.Scheme != "http" || (!plainOK && !isLoopback(u.Hostname()))) {
+	if u.Scheme != "https" && (u.Scheme != "http" || noPlain || (!plainOK && !isLoopback(u.Hostname()))) {
 		return fmt.Errorf("%s must be https (plain http only on loopback or with dial_socket)", field)
 	}
 	return nil
@@ -136,6 +155,9 @@ func (c Config) transport() *http.Transport {
 		t = &http.Transport{}
 	}
 	t = t.Clone()
+	// arks is reached directly: a proxy from the environment would misroute
+	// the call and could carry the service CWT.
+	t.Proxy = nil
 	network, target := "", ""
 	switch {
 	case c.DialSocket != "":
