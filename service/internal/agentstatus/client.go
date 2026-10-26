@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/opentdf/platform/service/internal/servicetoken"
 )
 
 const (
@@ -22,22 +24,13 @@ const (
 	// caller's service CWT.
 	serviceTokenHeader = "X-Auth-Token" //nolint:gosec // G101 false positive: a header name, not a credential
 	maxStatusTTL       = 5 * time.Second
-	tokenRefreshSlack  = time.Minute
-	// maxTokenLifetime caps a service CWT's reuse whatever expires_in says;
-	// authnz-rs issues them for an hour.
-	maxTokenLifetime = time.Hour
-	maxBodyBytes     = 64 << 10
+	maxBodyBytes       = 64 << 10
 	// checkTimeouts is how many per-call timeouts one Check may take: a
 	// token call and a status call.
 	checkTimeouts = 2
 )
 
-var (
-	errMalformedDID = errors.New("sub is not a did:key")
-	// errCredentialsRejected is the token endpoint answering 401 or 403:
-	// identity refuses this platform's client_id/client_secret.
-	errCredentialsRejected = errors.New("service token: identity rejected the client credentials")
-)
+var errMalformedDID = errors.New("sub is not a did:key")
 
 // Client checks agent identities against authnz-rs. A status that allows the
 // agent is cached for min(valid_until-now, 5 s); a denying one never is. The
@@ -49,9 +42,9 @@ type Client struct {
 	now     func() time.Time
 	timeout time.Duration
 
+	minter *servicetoken.Minter
+
 	mu        sync.Mutex
-	token     Secret
-	tokenExp  time.Time
 	cache     map[string]cachedStatus
 	highWater map[string]uint64
 }
@@ -66,7 +59,7 @@ func New(cfg Config) (*Client, error) {
 	if timeout <= 0 {
 		timeout = defaultTimeout
 	}
-	return &Client{
+	c := &Client{
 		cfg: cfg,
 		// Redirects are not followed: Go forwards custom headers such as
 		// X-Auth-Token to the redirect target, even on another host.
@@ -78,7 +71,13 @@ func New(cfg Config) (*Client, error) {
 		timeout:   timeout,
 		cache:     make(map[string]cachedStatus),
 		highWater: make(map[string]uint64),
-	}, nil
+	}
+	c.minter = servicetoken.New(servicetoken.Config{
+		TokenURL:     c.endpoint(tokenPath),
+		ClientID:     cfg.ClientID,
+		ClientSecret: cfg.ClientSecret,
+	}, c.http)
+	return c, nil
 }
 
 // Format renders only the endpoint and client id. fmt does not call Secret's
@@ -116,11 +115,6 @@ type cachedStatus struct {
 	expires time.Time
 }
 
-type tokenResponse struct {
-	AccessToken string `json:"access_token"`
-	ExpiresIn   int64  `json:"expires_in"`
-}
-
 // httpStatusError is a non-200 answer from the status endpoint.
 type httpStatusError struct{ code int }
 
@@ -133,7 +127,7 @@ func (e *httpStatusError) Error() string { return fmt.Sprintf("identity returned
 // timeout, another token-endpoint failure or a 401 that survived the retry,
 // is "unreachable".
 func fetchFailureReason(err error) string {
-	if errors.Is(err, errCredentialsRejected) {
+	if errors.Is(err, servicetoken.ErrCredentialsRejected) {
 		return ReasonStatusCredentialsRejected
 	}
 	var hse *httpStatusError
@@ -228,7 +222,7 @@ func (c *Client) fetchOnce(ctx context.Context, did string, freshToken bool) (St
 	if !validAgentDID(did) {
 		return Status{}, errMalformedDID
 	}
-	token, err := c.serviceToken(ctx, freshToken)
+	token, err := c.minter.Token(ctx, freshToken)
 	if err != nil {
 		return Status{}, err
 	}
@@ -243,53 +237,6 @@ func (c *Client) fetchOnce(ctx context.Context, did string, freshToken bool) (St
 		return Status{}, fmt.Errorf("agent status: %w", err)
 	}
 	return st, nil
-}
-
-func (c *Client) serviceToken(ctx context.Context, fresh bool) (Secret, error) {
-	c.mu.Lock()
-	if !fresh && c.token != "" && c.now().Before(c.tokenExp) {
-		token := c.token
-		c.mu.Unlock()
-		return token, nil
-	}
-	issued := c.now()
-	c.mu.Unlock()
-
-	form := url.Values{"grant_type": {"client_credentials"}}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint(tokenPath), strings.NewReader(form.Encode()))
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.SetBasicAuth(c.cfg.ClientID, string(c.cfg.ClientSecret))
-	var body tokenResponse
-	if err := c.doJSON(req, &body); err != nil {
-		var hse *httpStatusError
-		if errors.As(err, &hse) {
-			// Dropped as a type: the token endpoint's 404 or 403 says nothing
-			// about the agent, and its 401 must not look like a stale CWT
-			// (fetch would retry it).
-			if hse.code == http.StatusUnauthorized || hse.code == http.StatusForbidden {
-				return "", fmt.Errorf("%w (HTTP %d)", errCredentialsRejected, hse.code)
-			}
-			return "", fmt.Errorf("service token: identity returned HTTP %d", hse.code)
-		}
-		return "", fmt.Errorf("service token: %w", err)
-	}
-	if body.AccessToken == "" {
-		return "", errors.New("service token: empty access_token")
-	}
-	// Only a positive expires_in below the cap is used: a negative one would
-	// overflow to a lifetime of centuries once multiplied out.
-	lifetime := maxTokenLifetime
-	if body.ExpiresIn > 0 && body.ExpiresIn < int64(maxTokenLifetime/time.Second) {
-		lifetime = time.Duration(body.ExpiresIn) * time.Second
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.token = Secret(body.AccessToken)
-	c.tokenExp = issued.Add(lifetime - tokenRefreshSlack)
-	return c.token, nil
 }
 
 func (c *Client) doJSON(req *http.Request, into any) error {

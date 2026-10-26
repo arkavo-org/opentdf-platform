@@ -19,6 +19,7 @@ import (
 	"github.com/opentdf/platform/service/entityresolution/source"
 	"github.com/opentdf/platform/service/internal/agentstatus"
 	"github.com/opentdf/platform/service/internal/auth"
+	"github.com/opentdf/platform/service/internal/publishingstatus"
 	"github.com/opentdf/platform/service/logger"
 	ctxAuth "github.com/opentdf/platform/service/pkg/auth"
 	"go.opentelemetry.io/otel/trace"
@@ -76,6 +77,8 @@ type Service struct {
 	peps map[string]bool
 	// agentStatus judges agent subjects; nil withholds every one.
 	agentStatus agentstatus.Checker
+	// publishing withholds arkavo-creator from suspended creators; nil is off.
+	publishing publishingstatus.Checker
 	// caps maps a device class to the value FQNs it is capped to.
 	caps   map[string]map[string]bool
 	now    func() time.Time
@@ -375,7 +378,7 @@ func (s *Service) resolveSubject(ctx context.Context, subj source.Subject, q sou
 			ev.Props[cs.propsKey] = safeProperties(run.res.Properties)
 		}
 	}
-	ev.Grants = capGrants(s.caps, subj, sortedGrants(merged))
+	ev.Grants = s.withholdSuspendedPublishing(ctx, subj, capGrants(s.caps, subj, sortedGrants(merged)))
 	return ev
 }
 

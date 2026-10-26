@@ -61,6 +61,9 @@ func ContextServerInterceptor(logger *slog.Logger) connect.UnaryInterceptorFunc 
 				tx.UserAgent = userAgent[0]
 			}
 			ctx = context.WithValue(ctx, contextKey{}, &tx)
+			// Outgoing SDK calls made while handling this request (the PDP's
+			// to ERS over IPC) carry the id, so their transactions share it.
+			ctx = context.WithValue(ctx, sdkAudit.RequestIDContextKey, requestID)
 
 			defer func() {
 				if r := recover(); r != nil {

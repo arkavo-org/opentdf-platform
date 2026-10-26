@@ -168,6 +168,7 @@ func newTestClient(t *testing.T, f http.Handler) (*Client, *clock, *httptest.Ser
 	require.NoError(t, err)
 	clk := &clock{now: time.Unix(1_790_000_000, 0)}
 	c.now = clk.get
+	c.minter.WithClock(clk.get)
 	return c, clk, srv
 }
 
@@ -660,7 +661,7 @@ func TestCheck_ServiceToken(t *testing.T) {
 			clk.advance(48 * time.Hour)
 			f.set(wireStatus(clk.get().Add(5 * time.Second)))
 			require.NoError(t, c.Check(t.Context(), subject()))
-			assert.Equal(t, 2, f.tokens(), "a token is never trusted past maxTokenLifetime")
+			assert.Equal(t, 2, f.tokens(), "a token is never trusted past the one-hour cap")
 		})
 	}
 }
@@ -794,9 +795,9 @@ func TestSecretsNeverRendered(t *testing.T) {
 	c, clk, _ := newTestClient(t, f)
 	f.set(wireStatus(clk.get().Add(5 * time.Second)))
 	require.NoError(t, c.Check(t.Context(), subject()))
-	c.mu.Lock()
-	require.Equal(t, fakeTokenPrefix+"1", string(c.token), "the client holds a token to leak")
-	c.mu.Unlock()
+	held, err := c.minter.Token(t.Context(), false)
+	require.NoError(t, err)
+	require.Equal(t, fakeTokenPrefix+"1", string(held), "the client holds a token to leak")
 
 	var rendered []string
 	for _, err := range errs {
@@ -809,7 +810,8 @@ func TestSecretsNeverRendered(t *testing.T) {
 	}
 	var buf bytes.Buffer
 	for _, h := range []slog.Handler{slog.NewTextHandler(&buf, nil), slog.NewJSONHandler(&buf, nil)} {
-		slog.New(h).Info("checker",
+		slog.New(h).Info(
+			"checker",
 			slog.Any("client", c),
 			slog.Any("err", errs[0]),
 		)
