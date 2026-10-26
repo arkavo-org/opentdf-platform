@@ -75,7 +75,7 @@ every `arkavo-creator` grant and logs why.
   `arkavo:` prefix. arks keys suspensions on the `sub` with any `arkavo:`
   prefix removed, so the prefixed form (from a PEP chain) and the bare form
   (from a verified token) both find the same record (arkavo-rs#93,
-  PR #123). Send `sub` as the subject carries it, unchanged; the response
+  PR #124). Send `sub` as the subject carries it, unchanged; the response
   echoes it as sent.
 - **Applies to every subject kind** that holds the grant. In practice only
   persons do. A device's or agent's `sub` will simply not be suspended unless
