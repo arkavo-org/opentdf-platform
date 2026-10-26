@@ -8,11 +8,11 @@ package agentstatus
 import (
 	"errors"
 	"fmt"
-	"io"
-	"log/slog"
 	"net"
 	"net/url"
 	"time"
+
+	"github.com/opentdf/platform/service/internal/servicetoken"
 )
 
 const (
@@ -36,29 +36,9 @@ type Config struct {
 	Timeout time.Duration `mapstructure:"timeout" json:"timeout"`
 }
 
-// Secret keeps the client secret out of every rendering:
-// server.Config.LogValue logs the whole auth block.
-type Secret string
-
-func (Secret) String() string       { return redacted }
-func (Secret) LogValue() slog.Value { return slog.StringValue(redacted) }
-
-// Format covers the verbs String does not, such as %#v and %d, also for a
-// Config embedded in a larger struct. It cannot cover %p: fmt handles that
-// verb before consulting any Formatter, and on a non-pointer (a Secret, or a
-// Config holding one) prints a bad-verb marker followed by the raw value.
-// go vet flags %p on a non-pointer; never silence it for these types.
-func (Secret) Format(f fmt.State, _ rune) { _, _ = io.WriteString(f, redacted) }
-
-// MarshalJSON renders an unset secret as "": a config seeded from the JSON
-// of a zero config must not carry "[REDACTED]" as a default, which would
-// stand in for a missing client_secret and get past validate().
-func (s Secret) MarshalJSON() ([]byte, error) {
-	if s == "" {
-		return []byte(`""`), nil
-	}
-	return []byte(`"` + redacted + `"`), nil
-}
+// Secret keeps the client secret out of every rendering; see
+// servicetoken.Secret.
+type Secret = servicetoken.Secret
 
 // Enabled reports whether any of url, client_id or client_secret is set.
 // A partial block is enabled too, so validate() fails it at startup rather
