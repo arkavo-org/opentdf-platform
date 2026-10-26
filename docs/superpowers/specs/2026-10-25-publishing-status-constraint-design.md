@@ -91,9 +91,11 @@ every `arkavo-creator` grant and logs why.
   `client_credentials` at the identity token endpoint, minted the way
   `agentstatus` mints its token today. The request is a bare
   `grant_type=client_credentials` with HTTP Basic client auth and no
-  audience or scope. identity puts the client ID in `aud`, which is what
-  arks requires; the catalog node's service tokens already pass the same
-  check in arks's facade. The minting details: `{identity_url}/oauth/token`, cached until shortly before it
+  audience or scope. arks's read route requires `aud` to contain both
+  `opentdf-platform` and `https://platform.arkavo.net`
+  (`MODERATION_SUSPENSION_READER_AUD`, from arkavo-rs#124). identity sets
+  both from the client's registration, not from the request, as it does for
+  `arkavo-moderation`. A token missing either gets 401, which withholds. The minting details: `{identity_url}/oauth/token`, cached until shortly before it
   expires, capped at one hour, and re-minted once after a 401.
 - **"Not suspended"** is exactly: 200, a JSON body, `suspended == false`, and
   `subject` equal to the requested `sub`.
@@ -269,7 +271,9 @@ an outage denial told apart from a moderation one.
 
 1. arks ships the route with moderation on, and adds `opentdf-platform` to
    `MODERATION_SUSPENSION_READER_IDS` (arkavo-rs#93).
-2. The owner registers the `opentdf-platform` client at identity.arkavo.net.
+2. The owner registers the `opentdf-platform` client at identity.arkavo.net
+   as a `client_credentials` client with
+   `aud = [opentdf-platform, https://platform.arkavo.net]`.
 3. The platform deploys this change with the constraint off.
 4. The owner enables `publishing_status` in the prod config and checks #59's
    acceptance: allowed, then denied within about 5 s of a suspend, and a
