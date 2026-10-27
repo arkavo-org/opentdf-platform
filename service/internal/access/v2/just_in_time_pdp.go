@@ -524,9 +524,10 @@ func (p *JustInTimePDP) resolveEntitiesFromRequestToken(
 	return p.resolveEntitiesFromToken(ctx, token, resources)
 }
 
-// narrowEntityEntitlements removes from each entity's entitlements the value
-// FQNs the rules do not let it keep given the devices of its chain, none
-// included: a requirement drops what it guards when no device meets it. What
+// narrowEntityEntitlements removes from each entity's entitlements the actions
+// on value FQNs the rules do not let it keep given the devices of its chain,
+// none included, and the FQNs left with no action: a requirement drops what it
+// guards when no device meets it. What
 // is dropped is logged at Info, per entity.
 func narrowEntityEntitlements(
 	ctx context.Context,
@@ -539,7 +540,18 @@ func narrowEntityEntitlements(
 		return
 	}
 	for _, e := range entitlements {
-		dropped := narrowGrants(e.GetActionsPerAttributeValueFqn(), rules, devices)
+		var dropped map[string]string
+		perFQN := e.GetActionsPerAttributeValueFqn()
+		for fqn, list := range perFQN {
+			kept, ok := narrowActions(rules, devices, fqn, list.GetActions(), &dropped)
+			if !ok {
+				delete(perFQN, fqn)
+				continue
+			}
+			if list != nil {
+				list.Actions = kept
+			}
+		}
 		logDroppedGrants(ctx, l.With("entity_id", e.GetEphemeralId()).Logger, dropped, len(devices))
 	}
 }

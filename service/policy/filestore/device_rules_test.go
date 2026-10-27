@@ -190,6 +190,28 @@ func TestDeviceRules_OptionalListsStayUnset(t *testing.T) {
 	req := store.DeviceRules().Requirements[0]
 	assert.Empty(t, req.AppIDHashes)
 	assert.Empty(t, req.AppEnvs)
+	assert.Nil(t, req.ExemptActions)
+}
+
+func TestDeviceRules_ExemptActionsLoadLowercase(t *testing.T) {
+	store, err := storeWithDeviceRules(t, requirementYAML("["+publishGrant+"]", "[attested]", "exempt_actions: [Push, re-check_2]"))
+	require.NoError(t, err)
+	rules := store.DeviceRules()
+	assert.Equal(t, []string{"push", "re-check_2"}, rules.Requirements[0].ExemptActions)
+
+	assert.True(t, rules.KeepsAction(nil, publishGrant, "push"), "an exempt action needs no device")
+	assert.False(t, rules.KeepsAction(nil, publishGrant, "publish"), "a guarded action does")
+	assert.False(t, rules.Keeps(nil, publishGrant), "Keeps counts no exemption")
+}
+
+// A misspelled exemption guards the action it meant to exempt: the mistake
+// denies, which someone notices, rather than leaving publish unguarded.
+func TestDeviceRules_MisspelledExemptionFailsClosed(t *testing.T) {
+	store, err := storeWithDeviceRules(t, requirementYAML("["+publishGrant+"]", "[attested]", "exempt_actions: [pussh]"))
+	require.NoError(t, err)
+	rules := store.DeviceRules()
+	assert.False(t, rules.KeepsAction(nil, publishGrant, "push"))
+	assert.False(t, rules.KeepsAction(nil, publishGrant, "publish"))
 }
 
 func TestDeviceRules_RejectsAtLoad(t *testing.T) {
@@ -255,6 +277,12 @@ func TestDeviceRules_RejectsAtLoad(t *testing.T) {
 		{"app env prod", requirementYAML(validGrant, "[attested]", "app_envs: [prod]"), "prod"},
 		{"present but empty apps", requirementYAML(validGrant, "[attested]", "apps: []"), "apps"},
 		{"present but empty app_envs", requirementYAML(validGrant, "[attested]", "app_envs: []"), "app_envs"},
+		{"present but empty exempt_actions", requirementYAML(validGrant, "[attested]", "exempt_actions: []"), "exempt_actions"},
+		{"exempt action with a dot", requirementYAML(validGrant, "[attested]", "exempt_actions: [a.b]"), "a.b"},
+		{"exempt action with a slash", requirementYAML(validGrant, "[attested]", `exempt_actions: ["tools/call"]`), "tools/call"},
+		{"empty exempt action", requirementYAML(validGrant, "[attested]", `exempt_actions: [""]`), "exempt_actions[0]"},
+		{"exempt action starting with _", requirementYAML(validGrant, "[attested]", "exempt_actions: [_push]"), "_push"},
+		{"misspelled exempt_actions", requirementYAML(validGrant, "[attested]", "exempt_action: [push]"), `unknown key "exempt_action"`},
 		// A misspelled optional key must not load as "any app" or "any
 		// environment", nor drop the section.
 		{"misspelled apps", requirementYAML(validGrant, "[attested]", "app: [M8GS7ZT95Y.com.arkavo.Arkavo]"), `unknown key "app"`},
@@ -355,6 +383,7 @@ func TestDeviceRules_JSONRejectsUnknownKeys(t *testing.T) {
 	}{
 		{"misspelled apps", `{"requirements": [{` + grants + `, "app": ["M8GS7ZT95Y.com.arkavo.Arkavo"]}]}`, `"app"`},
 		{"misspelled app_envs", `{"requirements": [{` + grants + `, "app_env": ["production"]}]}`, `"app_env"`},
+		{"misspelled exempt_actions", `{"requirements": [{` + grants + `, "exempt_action": ["push"]}]}`, `"exempt_action"`},
 		{"misspelled requirements", `{"requirement": [{` + grants + `}]}`, `"requirement"`},
 		{"unknown key in a cap", `{"caps": [{"device_class": "managed", "keep": ["` + campaignDefinition + `"]}]}`, `"keep"`},
 	} {

@@ -180,6 +180,10 @@ type DeviceRequirementDef struct {
 	// AppEnvs lists production and/or development. Absent means any
 	// environment; present, it must not be empty.
 	AppEnvs []string `yaml:"app_envs" json:"app_envs"`
+	// ExemptActions lists action names the requirement does not guard, such
+	// as push for a push re-decision that carries no device. Absent means it
+	// guards every action; present, it must not be empty.
+	ExemptActions []string `yaml:"exempt_actions" json:"exempt_actions"`
 }
 
 // DeviceCapDef limits a person to the grants it keeps while a device of one

@@ -593,22 +593,63 @@ func (p *PolicyDecisionPoint) getDecision(
 	return decision, entitledFQNsToActions, nil
 }
 
-// narrowGrants deletes from grants, keyed by value FQN, every FQN that
-// rules.Keeps drops given devices, and returns why each was dropped (see
-// chaindevice.Rules.Why), nil when none was.
-func narrowGrants[V any](grants map[string]V, rules *chaindevice.Rules, devices []chaindevice.Device) map[string]string {
+// narrowGrants removes from grants, keyed by value FQN, every action that
+// rules.KeepsAction drops given devices, deleting an FQN left with no action,
+// and returns why each was dropped (see narrowActions), nil when none was.
+func narrowGrants(grants map[string][]*policy.Action, rules *chaindevice.Rules, devices []chaindevice.Device) map[string]string {
 	var dropped map[string]string
-	for fqn := range grants {
-		if rules.Keeps(devices, fqn) {
+	for fqn, actions := range grants {
+		kept, ok := narrowActions(rules, devices, fqn, actions, &dropped)
+		if !ok {
+			delete(grants, fqn)
 			continue
 		}
-		if dropped == nil {
-			dropped = make(map[string]string)
-		}
-		dropped[fqn] = rules.Why(devices, fqn)
-		delete(grants, fqn)
+		grants[fqn] = kept
 	}
 	return dropped
+}
+
+// narrowActions returns the actions on the grant fqn that rules.KeepsAction
+// keeps given devices, and false when none is left, so the grant goes. It
+// records each drop in *dropped (allocated on first use) with why (see
+// chaindevice.Rules.WhyAction): under fqn when the whole grant goes, else
+// under "fqn [action]" per dropped action. A grant with no actions is kept or
+// dropped whole, by rules.Keeps.
+func narrowActions(rules *chaindevice.Rules, devices []chaindevice.Device, fqn string, actions []*policy.Action, dropped *map[string]string) ([]*policy.Action, bool) {
+	record := func(key, why string) {
+		if *dropped == nil {
+			*dropped = make(map[string]string)
+		}
+		(*dropped)[key] = why
+	}
+	if len(actions) == 0 {
+		if rules.Keeps(devices, fqn) {
+			return actions, true
+		}
+		record(fqn, rules.Why(devices, fqn))
+		return nil, false
+	}
+	var kept []*policy.Action
+	whys := make(map[string]string)
+	for _, a := range actions {
+		if rules.KeepsAction(devices, fqn, a.GetName()) {
+			kept = append(kept, a)
+			continue
+		}
+		whys[a.GetName()] = rules.WhyAction(devices, fqn, a.GetName())
+	}
+	switch {
+	case len(whys) == 0:
+		return actions, true
+	case len(kept) == 0:
+		record(fqn, rules.WhyAction(devices, fqn, actions[0].GetName()))
+		return nil, false
+	default:
+		for name, why := range whys {
+			record(fqn+" ["+name+"]", why)
+		}
+		return kept, true
+	}
 }
 
 // logDroppedGrants logs at Info the grants the device rules dropped, by value

@@ -321,6 +321,128 @@ func TestNarrowEntityEntitlements_Rules(t *testing.T) {
 	})
 }
 
+// An exempt action is narrowed per action: with no device the grant keeps
+// push and loses publish, and goes only when every action on it is dropped.
+func TestNarrowEntityEntitlements_ExemptAction(t *testing.T) {
+	publishFQN := createAttrValueFQN(testBaseNamespace, "capability", "publish")
+	rules := publishRule(publishFQN)
+	rules.Requirements[0].ExemptActions = []string{"push"}
+	attested := chaindevice.Device{Class: chaindevice.ClassAttested, Verified: true, Bound: true}
+	unbound := chaindevice.Device{Class: chaindevice.ClassAttested, Verified: true}
+	entitlementsWith := func(names ...string) []*authzV2.EntityEntitlements {
+		var acts []*policy.Action
+		for _, n := range names {
+			acts = append(acts, &policy.Action{Name: n})
+		}
+		return []*authzV2.EntityEntitlements{{
+			EphemeralId:                 "person",
+			ActionsPerAttributeValueFqn: map[string]*authzV2.EntityEntitlements_ActionsList{publishFQN: {Actions: acts}},
+		}}
+	}
+	actionsOf := func(e []*authzV2.EntityEntitlements) []string {
+		list, ok := e[0].GetActionsPerAttributeValueFqn()[publishFQN]
+		if !ok {
+			return nil
+		}
+		var names []string
+		for _, a := range list.GetActions() {
+			names = append(names, a.GetName())
+		}
+		return names
+	}
+
+	e := entitlementsWith("publish", "push")
+	narrowEntityEntitlements(t.Context(), logger.CreateTestLogger(), e, rules, nil)
+	assert.Equal(t, []string{"push"}, actionsOf(e), "no device keeps only the exempt action")
+
+	e = entitlementsWith("publish", "push")
+	narrowEntityEntitlements(t.Context(), logger.CreateTestLogger(), e, rules, []chaindevice.Device{attested})
+	assert.Equal(t, []string{"publish", "push"}, actionsOf(e))
+
+	e = entitlementsWith("publish")
+	narrowEntityEntitlements(t.Context(), logger.CreateTestLogger(), e, rules, nil)
+	assert.Empty(t, e[0].GetActionsPerAttributeValueFqn(), "a grant left with no action goes")
+
+	e = entitlementsWith("publish", "push")
+	narrowEntityEntitlements(t.Context(), logger.CreateTestLogger(), e, rules, []chaindevice.Device{unbound})
+	assert.Empty(t, e[0].GetActionsPerAttributeValueFqn(), "an unbound device drops the exempt action too")
+}
+
+// On both routes of the JIT PDP, a requirement that exempts push lets a push
+// decision through with no device, while publish still needs one.
+func TestJustInTimePDP_ExemptActionBothRoutes(t *testing.T) {
+	publishFQN := createAttrValueFQN(testBaseNamespace, "capability", "publish")
+	campaignFQN := createAttrValueFQN(testBaseNamespace, "campaign", "13167240")
+	actionPublish := &policy.Action{Name: "publish"}
+	actionPush := &policy.Action{Name: "push"}
+	attested := chaindevice.Device{Class: chaindevice.ClassAttested, Verified: true, Bound: true}
+	rules := publishRule(publishFQN)
+	rules.Requirements[0].ExemptActions = []string{"push"}
+
+	buf := &bytes.Buffer{}
+	bufLog := &logger.Logger{
+		Logger: slog.New(slog.NewJSONHandler(buf, &slog.HandlerOptions{Level: slog.LevelInfo})),
+		Audit:  logger.CreateTestLogger().Audit,
+	}
+	store := &ruleStore{
+		attributes: []*policy.Attribute{{
+			Fqn:    createAttrFQN(testBaseNamespace, "capability"),
+			Rule:   policy.AttributeRuleTypeEnum_ATTRIBUTE_RULE_TYPE_ENUM_ANY_OF,
+			Values: []*policy.Value{{Fqn: publishFQN, Value: "publish"}},
+		}, {
+			Fqn:    createAttrFQN(testBaseNamespace, "campaign"),
+			Rule:   policy.AttributeRuleTypeEnum_ATTRIBUTE_RULE_TYPE_ENUM_ANY_OF,
+			Values: []*policy.Value{{Fqn: campaignFQN, Value: "13167240"}},
+		}},
+		mappings: []*policy.SubjectMapping{
+			createSimpleSubjectMapping(publishFQN, "publish", []*policy.Action{actionPublish, actionPush}, ".properties.role", []string{"creator"}, nil),
+		},
+		rules: rules,
+	}
+	ers := &stubERS{}
+	pdp, err := NewJustInTimePDP(t.Context(), bufLog, &otdfSDK.SDK{EntityResolutionV2: ers}, store, false, false)
+	require.NoError(t, err)
+
+	permitted := func(t *testing.T, id *authzV2.EntityIdentifier, action *policy.Action) bool {
+		t.Helper()
+		decision, err := pdp.GetDecision(audit.ContextWithActorID(t.Context(), "pep"), id, action, createResourcePerFqn(publishFQN), nil, nil)
+		require.NoError(t, err)
+		return decision.AllPermitted
+	}
+	entitledActions := func(t *testing.T, id *authzV2.EntityIdentifier) []string {
+		t.Helper()
+		got, err := pdp.GetEntitlements(t.Context(), id, false)
+		require.NoError(t, err)
+		require.Len(t, got, 1)
+		var names []string
+		for _, a := range got[0].GetActionsPerAttributeValueFqn()[publishFQN].GetActions() {
+			names = append(names, a.GetName())
+		}
+		return names
+	}
+
+	t.Run("no device: push permitted, publish denied", func(t *testing.T) {
+		id := personChain(t, ers)
+		assert.True(t, permitted(t, id, actionPush))
+		assert.False(t, permitted(t, id, actionPublish))
+		assert.ElementsMatch(t, []string{"push"}, entitledActions(t, id))
+	})
+	t.Run("an attested device: both permitted", func(t *testing.T) {
+		id := personChain(t, ers, attested)
+		assert.True(t, permitted(t, id, actionPush))
+		assert.True(t, permitted(t, id, actionPublish))
+		assert.ElementsMatch(t, []string{"publish", "push"}, entitledActions(t, id))
+	})
+	t.Run("a partial drop is logged per action", func(t *testing.T) {
+		buf.Reset()
+		id := personChain(t, ers)
+		entitledActions(t, id)
+		recs := droppedRecords(t, buf)
+		require.Len(t, recs, 1)
+		assert.Equal(t, map[string]any{publishFQN + " [publish]": chaindevice.WhyRequirement}, recs[0]["dropped"])
+	})
+}
+
 // ruleStore is an entitlement policy store that serves subject mappings
 // locally and declares device rules, as the file-backed store does.
 type ruleStore struct {

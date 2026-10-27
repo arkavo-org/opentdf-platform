@@ -20,6 +20,17 @@ type Requirement struct {
 	// AppEnvs lists the app environments that meet the requirement. Nil or
 	// empty means any environment, including an unknown one.
 	AppEnvs []string
+	// ExemptActions holds lowercased action names the requirement does not
+	// guard: a grant keeps those actions with no device. Nil means it guards
+	// every action. It is an exemption rather than a list of guarded actions
+	// so that a misspelled name guards more, never less.
+	ExemptActions []string
+}
+
+// guards reports whether the requirement guards the action on the grant fqn.
+// The action "" is never exempt.
+func (q Requirement) guards(fqn, action string) bool {
+	return matchesAny(q.Grants, fqn) && (action == "" || !slices.Contains(q.ExemptActions, strings.ToLower(action)))
 }
 
 // metBy reports whether d meets the requirement. A device with no app, or an
@@ -59,8 +70,16 @@ type Rules struct {
 //   - for every cap on the class of a device in the chain, the cap must keep
 //     fqn, so caps intersect.
 //
-// A nil r has no rules, so only an unbound device drops anything.
+// A nil r has no rules, so only an unbound device drops anything. Keeps counts
+// no exemption: it is KeepsAction for an action no requirement exempts.
 func (r *Rules) Keeps(devices []Device, fqn string) bool {
+	return r.KeepsAction(devices, fqn, "")
+}
+
+// KeepsAction reports whether a person keeps the action on the grant fqn when
+// devices ride in the chain. It is Keeps, except that a requirement that
+// exempts the action does not apply to it. Action names compare ignoring case.
+func (r *Rules) KeepsAction(devices []Device, fqn, action string) bool {
 	if slices.ContainsFunc(devices, func(d Device) bool { return !d.Bound }) {
 		return false
 	}
@@ -68,7 +87,7 @@ func (r *Rules) Keeps(devices []Device, fqn string) bool {
 		return true
 	}
 	for _, req := range r.Requirements {
-		if matchesAny(req.Grants, fqn) && !slices.ContainsFunc(devices, req.metBy) {
+		if req.guards(fqn, action) && !slices.ContainsFunc(devices, req.metBy) {
 			return false
 		}
 	}
@@ -96,7 +115,12 @@ const (
 // WhyRequirement or WhyCap. Keeps decides; Why only explains, for logs, and
 // consults Keeps first, so it never disagrees with it.
 func (r *Rules) Why(devices []Device, fqn string) string {
-	if r.Keeps(devices, fqn) {
+	return r.WhyAction(devices, fqn, "")
+}
+
+// WhyAction is Why for KeepsAction.
+func (r *Rules) WhyAction(devices []Device, fqn, action string) string {
+	if r.KeepsAction(devices, fqn, action) {
 		return ""
 	}
 	if slices.ContainsFunc(devices, func(d Device) bool { return !d.Bound }) {
@@ -104,7 +128,7 @@ func (r *Rules) Why(devices []Device, fqn string) string {
 	}
 	if r != nil {
 		for _, req := range r.Requirements {
-			if matchesAny(req.Grants, fqn) && !slices.ContainsFunc(devices, req.metBy) {
+			if req.guards(fqn, action) && !slices.ContainsFunc(devices, req.metBy) {
 				return WhyRequirement
 			}
 		}

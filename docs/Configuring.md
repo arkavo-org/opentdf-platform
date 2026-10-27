@@ -659,6 +659,7 @@ device_rules:
         - M8GS7ZT95Y.com.arkavo.Arkavo        # iOS
         - M8GS7ZT95Y.com.arkavo.ArkavoCreator # macOS
       app_envs: [production]                 # optional
+      exempt_actions: [push]                 # optional; actions this requirement does not guard
   caps:
     - device_class: managed
       keeps:
@@ -672,14 +673,16 @@ device_rules:
 | `requirements[].device_classes` | Classes (`attested`, `managed`, `unverified`) that meet the requirement. Required, not empty. |
 | `requirements[].apps` | Optional. `<TeamID>.<BundleID>` of the apps that meet it (a 10-character Team ID, a dot, a bundle ID). The policy names apps readably; the loader hashes them and the token carries the hash. A device with no app never meets a requirement that sets `apps`. |
 | `requirements[].app_envs` | Optional. `production` or `development`. A device with no known environment never meets a requirement that sets `app_envs`. |
+| `requirements[].exempt_actions` | Optional. Action names the requirement does not guard: a person keeps those actions on the guarded grants with no device. Absent, it guards every action. Names are compared ignoring case. |
 | `caps[].device_class` | The class the cap applies to; at most one cap per class. |
 | `caps[].keeps` | Value or definition FQNs a person keeps while a device of that class is in the decision. |
 
 - **Requirement:** a guarded grant is kept only if the decision has at least one device that meets all of the requirement. A decision with no device drops it, on every route, including a direct `GetDecisionMultiResource` claims call that sends none.
 - **Cap:** for each device whose class has a cap, the person keeps only what its `keeps` matches. Several devices intersect. A class with no cap narrows nothing.
+- **Exempt actions:** a requirement narrows per action. With no device that meets it, the grant loses every action except its `exempt_actions`, and goes only when none is left. A push re-decision asks for `push`, carries no device, and keeps passing while `publishing_status` withholds the whole grant from a suspended creator. Session open asks for `publish` with the device. An unbound device and caps still drop exempt actions. The list names exemptions rather than guarded actions so that a misspelled name guards the action, which denies and gets noticed, instead of leaving `publish` unguarded. Action names are not declared in the policy file, so only their form is checked at load.
 - **Both apply:** a grant survives only if it passes every requirement and every cap.
 - **Matching** is case-insensitive and exact: a value FQN matches that value, a definition FQN every value under it (campaign and tier values are synthetic, so they need definition matching). A hierarchy value does not cover the values below it.
-- **Validation at load.** Any failure fails the policy load rather than load a rule that allows by accident. Every FQN must parse and name an attribute definition the file declares (a value FQN under a definition with declared values must name one of them), and no rule may name an attribute whose rule is `hierarchy`. `apps` and `app_envs` may be omitted, but a present and empty `apps: []` or `app_envs: []` fails the load rather than allow any app or environment. `device_rules` rejects keys it does not know, so a misspelled `app_envs` cannot widen a rule.
+- **Validation at load.** Any failure fails the policy load rather than load a rule that allows by accident. Every FQN must parse and name an attribute definition the file declares (a value FQN under a definition with declared values must name one of them), and no rule may name an attribute whose rule is `hierarchy`. `apps` and `app_envs` may be omitted, but a present and empty `apps: []` or `app_envs: []` fails the load rather than allow any app or environment. `exempt_actions: []` fails the load too, and each name must be a letter or digit followed by letters, digits, `_` or `-`. `device_rules` rejects keys it does not know, so a misspelled `app_envs` cannot widen a rule.
 - **Logs.** When it loads the policy file, the authorization service logs at Info `device_rules loaded` with the number of `requirements` and `caps`, or that the file declares none. Each grant a rule drops is logged at Info (`device rules dropped grants`) with the entity and why: `unbound_device`, `requirement` or `cap`.
 
 The requirement above is the one this was built for: publishing needs an attested device running a production Arkavo app. That blocks a re-signed app, a simulator and a direct API script. It does not detect a jailbroken device, and a locally signed macOS developer build reports `production`, so there it means signed by the Arkavo team. In the shipped Patreon configs the `identity-core` source is `pep_assertable: false`, so `publish` is only ever held on the token route, from a verified token (a DeviceCheck token split into person and device, for one). A person whose claims come from a PEP on the chain route never holds it.

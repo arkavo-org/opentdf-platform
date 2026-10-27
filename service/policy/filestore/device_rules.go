@@ -51,7 +51,7 @@ func (d *DeviceRulesDef) UnmarshalYAML(n *yaml.Node) error {
 
 // UnmarshalYAML implements yaml.Unmarshaler, rejecting unknown keys.
 func (d *DeviceRequirementDef) UnmarshalYAML(n *yaml.Node) error {
-	if err := rejectUnknownKeys(n, "a requirement", "grants", "device_classes", "apps", "app_envs"); err != nil {
+	if err := rejectUnknownKeys(n, "a requirement", "grants", "device_classes", "apps", "app_envs", "exempt_actions"); err != nil {
 		return err
 	}
 	return n.Decode((*deviceRequirementFields)(d))
@@ -164,7 +164,33 @@ func (b *builder) deviceRequirement(def *DeviceRequirementDef) (chaindevice.Requ
 		}
 		req.AppEnvs = append([]string(nil), def.AppEnvs...)
 	}
+	// A misspelled exemption guards the action it meant to exempt, which
+	// fails closed, so names are checked for form only.
+	if def.ExemptActions != nil {
+		if len(def.ExemptActions) == 0 {
+			return chaindevice.Requirement{}, errors.New("exempt_actions is present but empty; omit it to guard every action")
+		}
+		for i, action := range def.ExemptActions {
+			name := strings.ToLower(action)
+			if !validActionName(name) {
+				return chaindevice.Requirement{}, fmt.Errorf("exempt_actions[%d]: %q is not an action name (a letter or digit, then letters, digits, _ or -)", i, action)
+			}
+			req.ExemptActions = append(req.ExemptActions, name)
+		}
+	}
 	return req, nil
+}
+
+// validActionName reports whether name, lowercased, is an action name: a
+// letter or digit, then letters, digits, _ or -.
+func validActionName(name string) bool {
+	for i, c := range name {
+		alnum := (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
+		if !alnum && (i == 0 || (c != '_' && c != '-')) {
+			return false
+		}
+	}
+	return name != ""
 }
 
 func (b *builder) deviceCap(def *DeviceCapDef) (chaindevice.Cap, error) {

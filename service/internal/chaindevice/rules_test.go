@@ -258,3 +258,34 @@ func TestWhy_AgreesWithKeeps(t *testing.T) {
 		}
 	}
 }
+
+// A requirement's exemptions let the actions they name through with no
+// device, and only those: the other actions on the grant stay guarded, an
+// unbound device still drops everything, and a cap still applies.
+func TestKeepsAction_Exemptions(t *testing.T) {
+	const (
+		publish  = "https://patreon.arkavo.com/attr/arkavo-creator/value/publish"
+		campaign = "https://patreon.arkavo.com/attr/campaign/value/13167240"
+	)
+	attested := Device{Class: ClassAttested, Verified: true, Bound: true}
+	managed := Device{Class: ClassManaged, Verified: true, Bound: true}
+	unbound := Device{Class: ClassAttested, Verified: true}
+	rules := &Rules{
+		Requirements: []Requirement{{Grants: []string{publish}, DeviceClasses: []string{ClassAttested}, ExemptActions: []string{"push"}}},
+		Caps:         []Cap{{DeviceClass: ClassManaged, Keeps: []string{campaign}}},
+	}
+
+	assert.True(t, rules.KeepsAction(nil, publish, "push"))
+	assert.True(t, rules.KeepsAction(nil, publish, "PUSH"), "names compare ignoring case")
+	assert.False(t, rules.KeepsAction(nil, publish, "publish"))
+	assert.False(t, rules.KeepsAction(nil, publish, ""), "no action is never exempt")
+	assert.False(t, rules.Keeps(nil, publish))
+	assert.True(t, rules.KeepsAction([]Device{attested}, publish, "publish"))
+	assert.False(t, rules.KeepsAction([]Device{attested, unbound}, publish, "push"), "an unbound device drops an exempt action too")
+	assert.False(t, rules.KeepsAction([]Device{managed}, publish, "push"), "a cap still applies to an exempt action")
+
+	assert.Empty(t, rules.WhyAction(nil, publish, "push"))
+	assert.Equal(t, WhyRequirement, rules.WhyAction(nil, publish, "publish"))
+	assert.Equal(t, WhyUnboundDevice, rules.WhyAction([]Device{unbound}, publish, "push"))
+	assert.Equal(t, WhyCap, rules.WhyAction([]Device{managed}, publish, "push"))
+}
