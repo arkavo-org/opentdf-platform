@@ -17,9 +17,10 @@ import (
 )
 
 const (
-	// defaultTimeout covers identity's wait on a cold Patreon snapshot (up to
-	// 3 s, PATREON_MATERIALIZE_DEADLINE_SECONDS) with room for the call.
-	defaultTimeout = 3500 * time.Millisecond
+	// defaultTimeout covers a cold lookup on identity: an account read, up to
+	// 3 s of Patreon work (PATREON_MATERIALIZE_DEADLINE_SECONDS), then a
+	// publishing-state read.
+	defaultTimeout = 4 * time.Second
 	maxTimeout     = 10 * time.Second
 	// defaultCacheTTL is how long an answer is reused without asking again.
 	// Identity caches Patreon snapshots for 300 s, so this is never staler
@@ -48,7 +49,7 @@ type Config struct {
 	// The client must be on identity's ENTITY_CLIENT_IDS.
 	ClientID     string              `mapstructure:"client_id" json:"client_id"`
 	ClientSecret servicetoken.Secret `mapstructure:"client_secret" json:"client_secret"`
-	// Timeout bounds each call to identity; zero means 3.5 s. A lookup that
+	// Timeout bounds each call to identity; zero means 4 s. A lookup that
 	// first mints the service CWT may take two calls.
 	Timeout time.Duration `mapstructure:"timeout" json:"timeout"`
 	// CacheTTL is how long an answer is reused; zero means 60 s, the most allowed.

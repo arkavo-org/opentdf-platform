@@ -40,6 +40,7 @@ func (f *fakeEntities) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	campaign, known := f.backs[account]
 	if !known {
 		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte("Entity not found"))
 		return
 	}
 	_ = json.NewEncoder(w).Encode(map[string]any{"id": "arkavo:" + account, "claims": patronOf(account, campaign, "supporter")})

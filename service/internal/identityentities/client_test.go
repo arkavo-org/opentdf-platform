@@ -163,11 +163,22 @@ func TestLookup_CachesForCacheTTL(t *testing.T) {
 
 func TestLookup_UnknownAccountIsAFreshAnswer(t *testing.T) {
 	c, f, _ := newClient(t, nil)
-	f.handler = status(http.StatusNotFound, "")
+	f.handler = status(http.StatusNotFound, entityNotFound)
 	a, err := c.Lookup(t.Context(), testAccount)
 	require.NoError(t, err)
 	assert.Nil(t, a.Claims)
 	assert.False(t, a.Stale)
+}
+
+// A 404 that is not identity's "Entity not found" (a wrong base URL, a
+// proxy) is a failure, not a quiet "no such account".
+func TestLookup_Other404IsAFailure(t *testing.T) {
+	for _, body := range []string{"", "404 page not found", `{"error":"not found"}`} {
+		c, f, _ := newClient(t, nil)
+		f.handler = status(http.StatusNotFound, body)
+		_, err := c.Lookup(t.Context(), testAccount)
+		assert.Equal(t, ReasonUnavailable, lookupErr(t, err).Reason, body)
+	}
 }
 
 func TestLookup_Failures(t *testing.T) {

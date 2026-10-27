@@ -15,12 +15,12 @@
   - `identity`: grants from the lookup. Unavailable with no usable stale answer gives `OutcomeUnavailable`, so those grants are withheld.
 - **Grant derivation is delegated** to `patreon.NewTokenSource(cfg).Resolve` over the fetched claims, so there is no new parsing and the output has the same shape.
 - **Persons only;** an empty `AccountID` is not applicable.
-- **The client config is a top-level block** `services.entityresolution.identity_entities` (not inside `sources[]`, which env vars cannot reach), so `OPENTDF_SERVICES_ENTITYRESOLUTION_IDENTITY_ENTITIES_CLIENT_SECRET` works with `client_secret: ""` present. Fields: `url`, `client_id`, `client_secret`, `timeout` (default 3.5 s), `cache_ttl` (default 60 s, max 60 s), `stale_max_age` (default 3600 s, max 3600 s), `failure_backoff` (default 30 s).
+- **The client config is a top-level block** `services.entityresolution.identity_entities` (not inside `sources[]`, which env vars cannot reach), so `OPENTDF_SERVICES_ENTITYRESOLUTION_IDENTITY_ENTITIES_CLIENT_SECRET` works with `client_secret: ""` present. Fields: `url`, `client_id`, `client_secret`, `timeout` (default 4 s), `cache_ttl` (default 60 s, max 60 s), `stale_max_age` (default 3600 s, max 3600 s), `failure_backoff` (default 30 s).
 - **Client `service/internal/identityentities`:**
   - Per-account cache of the last good answer; single-flight per account.
   - Failure memo: during `failure_backoff`, serve a stale answer or report unavailable immediately.
   - Response handling: a mismatched `arkavo_account_id`, a 401/403 (WARN, misconfiguration), and 5xx/503/timeouts are unavailable. 404, and a 200 without `arkavo_patreon`, are fresh negatives.
-- **Per-source `deadline`** override in `SourceConfig` (default: the global one), needed for `serve: identity` at about 3.5 s.
+- **Per-source `deadline`** override in `SourceConfig` (default: the global one), needed for `serve: identity` at about 4 s.
 
 ## Files
 - `service/internal/identityentities/{config,client}.go` + tests

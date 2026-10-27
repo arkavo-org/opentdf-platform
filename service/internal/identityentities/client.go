@@ -23,6 +23,8 @@ const (
 	entitiesPath = "/entities/arkavo:"
 	// authHeader is where identity reads a service CWT on /entities.
 	authHeader = "X-Auth-Token"
+	// entityNotFound is identity's whole body for an unknown account.
+	entityNotFound = "Entity not found"
 	// maxBodyBytes bounds an answer: a creator with many tiers is a few KiB.
 	maxBodyBytes   = 256 << 10
 	sweepThreshold = 4096
@@ -315,7 +317,13 @@ func (c *Client) fetchOnce(ctx context.Context, accountID string, freshToken boo
 	switch resp.StatusCode {
 	case http.StatusOK:
 	case http.StatusNotFound:
-		// An unknown or deleted account: a fresh answer with no claims.
+		// Only identity's own answer means an unknown or deleted account. Any
+		// other 404 (a wrong base URL, a proxy) is a failure, so it shows in
+		// the logs instead of quietly caching "no such account".
+		raw, _ := io.ReadAll(io.LimitReader(body, int64(len(entityNotFound))+1))
+		if strings.TrimSpace(string(raw)) != entityNotFound {
+			return nil, &httpStatusError{code: resp.StatusCode}
+		}
 		return nil, nil //nolint:nilnil // a definite "no such account", not a failure
 	case http.StatusServiceUnavailable:
 		var eb errorBody
