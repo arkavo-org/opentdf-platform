@@ -18,6 +18,7 @@ import (
 	"github.com/opentdf/platform/service/entityresolution/source"
 	"github.com/opentdf/platform/service/internal/agentstatus"
 	"github.com/opentdf/platform/service/internal/chaindevice"
+	"github.com/opentdf/platform/service/internal/identityentities"
 	"github.com/opentdf/platform/service/internal/publishingstatus"
 	"github.com/opentdf/platform/service/pkg/config"
 )
@@ -34,8 +35,9 @@ const (
 	redacted        = "[REDACTED]"
 
 	// Source types.
-	typePatreonToken = "patreon-token"
-	typeTokenClaims  = "token-claims"
+	typePatreonToken    = "patreon-token"
+	typeTokenClaims     = "token-claims"
+	typePatreonIdentity = "patreon-identity"
 	// removedTypeDeviceClass was a source granting by device class. Devices
 	// never grant, so Validate refuses it by name.
 	removedTypeDeviceClass = "device-class"
@@ -43,6 +45,12 @@ const (
 	// optionClaim is the key in SourceConfig.Options naming the claim a
 	// token-claims source reads.
 	optionClaim = "claim"
+	// optionServe is the key in a patreon-identity source's options choosing
+	// what it grants from: serveToken (the default: the token, comparing with
+	// identity on the side) or serveIdentity.
+	optionServe   = "serve"
+	serveToken    = "token"
+	serveIdentity = "identity"
 
 	// movedToDeviceRules is where device rules went, for the refusals of
 	// what they replaced.
@@ -57,6 +65,10 @@ type Config struct {
 	Evidence    EvidenceConfig    `mapstructure:"evidence"`
 	Sources     []SourceConfig    `mapstructure:"sources"`
 	Constraints ConstraintsConfig `mapstructure:"constraints"`
+	// IdentityEntities is how a patreon-identity source reaches identity's
+	// GET /entities. It sits here rather than in the source so its client
+	// secret can come from the environment, which cannot reach a list item.
+	IdentityEntities identityentities.Config `mapstructure:"identity_entities"`
 }
 
 // EvidenceConfig configures who may issue the tokens the sources read and
@@ -94,6 +106,8 @@ type SourceConfig struct {
 	Subjects      []source.Kind `mapstructure:"subjects"`
 	PEPAssertable bool          `mapstructure:"pep_assertable"`
 	PropertiesKey string        `mapstructure:"properties_key"`
+	// Deadline replaces the global deadline for this source. Zero keeps it.
+	Deadline time.Duration `mapstructure:"deadline"`
 	// Options holds the type-specific keys: claim, and the patreon source's
 	// entitlements_namespace and infer_unknown_as_free.
 	Options map[string]any `mapstructure:",remain"`
@@ -138,6 +152,7 @@ func (c Config) LogValue() slog.Value {
 		slog.Any("sources", sources),
 		slog.String("agent_status_url", c.Constraints.AgentStatus.URL),
 		slog.String("publishing_status_url", c.Constraints.PublishingStatus.URL),
+		slog.String("identity_entities_url", c.IdentityEntities.URL),
 	)
 }
 
@@ -192,6 +207,16 @@ func (c Config) Validate() error {
 	}
 	if err := validateSources(c.Sources, issuers); err != nil {
 		return err
+	}
+	if c.IdentityEntities.Enabled() {
+		if err := c.IdentityEntities.Validate(); err != nil {
+			return err
+		}
+	}
+	for _, sc := range c.Sources {
+		if sc.Type == typePatreonIdentity && !c.IdentityEntities.Enabled() {
+			return fmt.Errorf("source %q: a patreon-identity source needs identity_entities", sc.ID)
+		}
 	}
 	// An empty map is let through: the config loader drops it, so it cannot
 	// be told from an absent key, and it caps nothing.
@@ -306,7 +331,7 @@ func validateSources(sources []SourceConfig, issuers map[string]bool) error {
 
 func (sc SourceConfig) validate(issuers map[string]bool) error {
 	switch sc.Type {
-	case typePatreonToken, typeTokenClaims:
+	case typePatreonToken, typeTokenClaims, typePatreonIdentity:
 	case removedTypeDeviceClass:
 		return fmt.Errorf("type %q was removed: devices never grant; %s", sc.Type, movedToDeviceRules)
 	default:
@@ -314,6 +339,9 @@ func (sc SourceConfig) validate(issuers map[string]bool) error {
 	}
 	if sc.Issuer == "" || !issuers[sc.Issuer] {
 		return fmt.Errorf("issuer %q is not one of evidence.issuers", sc.Issuer)
+	}
+	if sc.Deadline != 0 && sc.Deadline < minDeadline {
+		return fmt.Errorf("deadline must be at least %s, got %s: write a duration string such as 3500ms (a bare number is nanoseconds)", minDeadline, sc.Deadline)
 	}
 	for _, k := range sc.Subjects {
 		switch k {
@@ -331,8 +359,8 @@ func (sc SourceConfig) validate(issuers map[string]bool) error {
 		owned[def] = true
 	}
 	switch sc.Type {
-	case typePatreonToken:
-		opts, err := patreonOptions(sc.Options)
+	case typePatreonToken, typePatreonIdentity:
+		opts, _, err := patreonSourceOptions(sc.Type, sc.Options)
 		if err != nil {
 			return err
 		}
@@ -340,7 +368,7 @@ func (sc SourceConfig) validate(issuers map[string]bool) error {
 		// anything else, or missing one, would drop its grants silently.
 		want := opts.Definitions()
 		if !ownsExactly(owned, want) {
-			return fmt.Errorf("a patreon-token source's grants must be exactly %s and %s, the definitions in its entitlements_namespace", want[0], want[1])
+			return fmt.Errorf("a %s source's grants must be exactly %s and %s, the definitions in its entitlements_namespace", sc.Type, want[0], want[1])
 		}
 	case typeTokenClaims:
 		if err := rejectUnknownOptions(sc.Options, optionClaim); err != nil {
@@ -390,6 +418,31 @@ func patreonOptions(opts map[string]any) (patreon.SourceConfig, error) {
 		return cfg, fmt.Errorf("patreon-token options: %w", err)
 	}
 	return cfg, nil
+}
+
+// patreonSourceOptions decodes the options of a patreon-token or
+// patreon-identity source. A patreon-identity source also reads serve,
+// token (the default) or identity.
+func patreonSourceOptions(typ string, opts map[string]any) (patreon.SourceConfig, string, error) {
+	serve := serveToken
+	if typ == typePatreonIdentity {
+		rest := make(map[string]any, len(opts))
+		for k, v := range opts {
+			if k != optionServe {
+				rest[k] = v
+			}
+		}
+		if raw, set := opts[optionServe]; set {
+			s, _ := raw.(string)
+			if s != serveToken && s != serveIdentity {
+				return patreon.SourceConfig{}, "", fmt.Errorf("serve must be %q or %q", serveToken, serveIdentity)
+			}
+			serve = s
+		}
+		opts = rest
+	}
+	cfg, err := patreonOptions(opts)
+	return cfg, serve, err
 }
 
 // rejectUnknownOptions refuses every option key outside allowed.

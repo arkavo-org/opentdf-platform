@@ -10,6 +10,7 @@ import (
 	"github.com/opentdf/platform/service/entityresolution/source"
 	"github.com/opentdf/platform/service/internal/agentstatus"
 	"github.com/opentdf/platform/service/internal/auth"
+	"github.com/opentdf/platform/service/internal/identityentities"
 	"github.com/opentdf/platform/service/internal/publishingstatus"
 	"github.com/opentdf/platform/service/logger"
 	"github.com/opentdf/platform/service/pkg/config"
@@ -32,6 +33,19 @@ var sourceFactories = map[string]func(SourceConfig) (source.Source, error){
 		}
 		return newTokenClaimsSource(claim, sc.Grants), nil
 	},
+}
+
+// buildPatreonIdentity builds a patreon-identity source over identity.
+// Validate has already required identity_entities for it.
+func buildPatreonIdentity(sc SourceConfig, identity *identityentities.Client, log *logger.Logger) (source.Source, error) {
+	if identity == nil {
+		return nil, errors.New("a patreon-identity source needs identity_entities")
+	}
+	cfg, serve, err := patreonSourceOptions(sc.Type, sc.Options)
+	if err != nil {
+		return nil, err
+	}
+	return newPatreonIdentitySource(patreon.NewTokenSource(cfg), identity, serve, log), nil
 }
 
 // Register builds the composite resolver from the service config: it decodes
@@ -63,17 +77,32 @@ func Register(in config.ServiceConfig, log *logger.Logger) (*Service, error) {
 		verifiers[is.Issuer] = v
 	}
 
+	// One identity client serves every patreon-identity source, so they
+	// share its cache.
+	var identity *identityentities.Client
+	if cfg.IdentityEntities.Enabled() {
+		identity, err = identityentities.New(cfg.IdentityEntities)
+		if err != nil {
+			return nil, fmt.Errorf("identity_entities: %w", err)
+		}
+	}
 	sources := make([]configuredSource, 0, len(cfg.Sources))
 	for _, sc := range cfg.Sources {
-		build, ok := sourceFactories[sc.Type]
-		if !ok {
-			return nil, fmt.Errorf("source %q: unknown type %q", sc.ID, sc.Type)
+		var src source.Source
+		var sErr error
+		if sc.Type == typePatreonIdentity {
+			src, sErr = buildPatreonIdentity(sc, identity, log)
+		} else {
+			build, ok := sourceFactories[sc.Type]
+			if !ok {
+				return nil, fmt.Errorf("source %q: unknown type %q", sc.ID, sc.Type)
+			}
+			src, sErr = build(sc)
 		}
-		src, sErr := build(sc)
 		if sErr != nil {
 			return nil, fmt.Errorf("source %q: %w", sc.ID, sErr)
 		}
-		sources = append(sources, configuredSource{id: sc.ID, propsKey: sc.PropertiesKey, cap: newCapability(sc), src: src})
+		sources = append(sources, configuredSource{id: sc.ID, propsKey: sc.PropertiesKey, cap: newCapability(sc), src: src, deadline: sc.Deadline})
 	}
 
 	// A typed nil *agentstatus.Client in the interface would read as set, so

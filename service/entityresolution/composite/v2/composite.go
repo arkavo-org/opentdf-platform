@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"slices"
 	"strconv"
 	"strings"
@@ -61,6 +62,8 @@ type configuredSource struct {
 	id, propsKey string
 	cap          capability
 	src          source.Source
+	// deadline replaces the global deadline for this source; zero keeps it.
+	deadline time.Duration
 }
 
 // Service is the composite entity resolver.
@@ -555,47 +558,71 @@ func (s *Service) mergeGrants(ctx context.Context, merged map[string]*sealedGran
 	}
 }
 
-// runSources runs every source that admits subj, each in its own goroutine,
-// under one deadline, and returns how each ended, indexed like s.sources. A
-// source not admitted is not applicable. One that has not answered by the
-// deadline is unavailable; its goroutine later finishes into the buffered
-// channel, which nobody reads.
+// deadlineOf is cs's own deadline, or the global one.
+func (s *Service) deadlineOf(cs configuredSource) time.Duration {
+	if cs.deadline > 0 {
+		return cs.deadline
+	}
+	return s.cfg.Deadline
+}
+
+// runSources runs every source that admits subj, each in its own goroutine
+// under its deadline, and returns how each ended, indexed like s.sources. A
+// source not admitted is not applicable. One that has not answered by its
+// deadline, or by the time ctx ends, is unavailable; its goroutine later
+// finishes into the buffered channel, which nobody reads.
 func (s *Service) runSources(ctx context.Context, subj source.Subject, q source.Query) []sourceRun {
-	ctx, cancel := context.WithTimeout(ctx, s.cfg.Deadline)
-	defer cancel()
+	start := time.Now()
 	runs := make([]sourceRun, len(s.sources))
 	done := make(chan sourceRun, len(s.sources))
-	pending := map[int]bool{}
+	pending := map[int]time.Duration{} // source index -> its deadline
 	for i, cs := range s.sources {
 		if !cs.cap.admits(subj) {
 			runs[i] = sourceRun{idx: i, outcome: source.OutcomeNotApplicable}
 			continue
 		}
-		pending[i] = true
+		deadline := s.deadlineOf(cs)
+		pending[i] = deadline
+		srcCtx, cancel := context.WithTimeout(ctx, deadline)
 		go func() {
+			defer cancel()
 			defer func() {
 				if r := recover(); r != nil {
 					done <- sourceRun{idx: i, outcome: source.OutcomeUnavailable, err: fmt.Errorf("source panicked: %v", r)}
 				}
 			}()
-			done <- runSource(ctx, i, cs.src, subj, q)
+			done <- runSource(srcCtx, i, cs.src, subj, q)
 		}()
 	}
+	timedOut := func(i int, d time.Duration, err error) {
+		runs[i] = sourceRun{idx: i, outcome: source.OutcomeUnavailable, err: fmt.Errorf("no answer within %s: %w", d, err)}
+		delete(pending, i)
+	}
 	for len(pending) > 0 {
+		next := time.Duration(math.MaxInt64)
+		for _, d := range pending {
+			next = min(next, d)
+		}
+		timer := time.NewTimer(next - time.Since(start))
 		select {
 		case run := <-done:
-			runs[run.idx] = run
-			delete(pending, run.idx)
-		case <-ctx.Done():
-			for i := range pending {
-				runs[i] = sourceRun{
-					idx:     i,
-					outcome: source.OutcomeUnavailable,
-					err:     fmt.Errorf("no answer within %s: %w", s.cfg.Deadline, ctx.Err()),
+			if _, waiting := pending[run.idx]; waiting {
+				runs[run.idx] = run
+				delete(pending, run.idx)
+			}
+		case <-timer.C:
+			elapsed := time.Since(start)
+			for i, d := range pending {
+				if d <= elapsed {
+					timedOut(i, d, context.DeadlineExceeded)
 				}
 			}
-			return runs
+		case <-ctx.Done():
+			for i, d := range pending {
+				timedOut(i, d, ctx.Err())
+			}
 		}
+		timer.Stop()
 	}
 	return runs
 }

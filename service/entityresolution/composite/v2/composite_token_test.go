@@ -22,6 +22,8 @@ const (
 	exampleValue = "https://example.com/attr/a/value/ok"
 	otherDef     = "https://example.com/attr/b"
 	otherValue   = "https://example.com/attr/b/value/ok"
+	thirdDef     = "https://example.com/attr/c"
+	thirdValue   = "https://example.com/attr/c/value/ok"
 )
 
 func TestTokenRoute_CreatorGetsOwnCampaignTiers(t *testing.T) {
@@ -111,6 +113,30 @@ func TestTokenRoute_SlowSourceIsUnavailable(t *testing.T) {
 	assert.Equal(t, source.OutcomeComplete, ev.Outcomes["patreon"])
 	assert.NotContains(t, grantFQNs(ev), exampleValue)
 	assert.Contains(t, grantFQNs(ev), creatorCampaign)
+}
+
+// A source's own deadline replaces the global one for it alone: it may
+// answer later, and every other source still has to meet the global one.
+func TestTokenRoute_PerSourceDeadline(t *testing.T) {
+	cfg := testConfig()
+	cfg.Deadline = 50 * time.Millisecond
+	patient := fakeSourceOwning("patient", fakeSource{sleep: 150 * time.Millisecond, res: granting(exampleValue)}, exampleDef)
+	patient.deadline = time.Second
+	slow := fakeSourceOwning("slow", fakeSource{sleep: 150 * time.Millisecond, res: granting(otherValue)}, otherDef)
+	tooSlow := fakeSourceOwning("too-slow", fakeSource{sleep: 2 * time.Second, res: granting(thirdValue)}, thirdDef)
+	tooSlow.deadline = 300 * time.Millisecond
+	svc := newTestService(t, cfg, verifiersFor(&fakeVerifier{}), []configuredSource{patient, slow, tooSlow, patreonSource()}, nil)
+
+	start := time.Now()
+	ev := tokenEvidence(t, svc, signCWT(t, creatorClaims(time.Now().Add(time.Hour))))
+	elapsed := time.Since(start)
+
+	assert.Equal(t, source.OutcomeComplete, ev.Outcomes["patient"], "its own deadline lets it answer")
+	assert.Contains(t, grantFQNs(ev), exampleValue)
+	assert.Equal(t, source.OutcomeUnavailable, ev.Outcomes["slow"], "the global deadline still binds the others")
+	assert.NotContains(t, grantFQNs(ev), otherValue)
+	assert.Equal(t, source.OutcomeUnavailable, ev.Outcomes["too-slow"], "its own deadline binds it")
+	assert.Less(t, elapsed, time.Second, "the decision waits only as long as the sources it waits for")
 }
 
 func TestTokenRoute_SourceErrorAndPanicAreUnavailable(t *testing.T) {

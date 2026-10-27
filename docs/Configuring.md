@@ -576,16 +576,19 @@ On the token route (the KAS rewrap and licence decisions) it verifies each token
 | `evidence.previous_seal_keys` | Keys that open but never seal, for rotating `seal_key`. Same format. | `[]` |
 | `evidence.claims_chain_peps` | Client IDs of the PEPs whose unsealed claims chains are accepted. Empty accepts none. Each entry is the exact value the platform derives for the caller through `server.auth.policy.client_id_claim`; see below. | `[]` |
 | `sources[].id` | Unique source name, used in outcomes, provenance and logs. | |
-| `sources[].type` | `patreon-token` or `token-claims`. A `device-class` source fails startup: a device never grants, see [devices in a chain](#composite-resolver-devices-in-a-chain). | |
+| `sources[].type` | `patreon-token`, `patreon-identity` or `token-claims`. A `device-class` source fails startup: a device never grants, see [devices in a chain](#composite-resolver-devices-in-a-chain). | |
 | `sources[].issuer` | The one issuer (from `evidence.issuers`) whose tokens the source reads. | |
-| `sources[].grants` | Attribute definition FQNs (`https://<namespace>/attr/<name>`) the source owns. A grant outside them is dropped, and two sources listing the same definition is a startup error. A `patreon-token` source must list exactly `https://<entitlements_namespace>/attr/campaign` and `https://<entitlements_namespace>/attr/campaign-tier`. | |
+| `sources[].grants` | Attribute definition FQNs (`https://<namespace>/attr/<name>`) the source owns. A grant outside them is dropped, and two sources listing the same definition is a startup error. A `patreon-token` or `patreon-identity` source must list exactly `https://<entitlements_namespace>/attr/campaign` and `https://<entitlements_namespace>/attr/campaign-tier`. | |
 | `sources[].actions` | Actions the source's grants may carry. | `[read]` |
 | `sources[].subjects` | Subject kinds the source serves: `person`, `agent`, `device`. | all three |
 | `sources[].pep_assertable` | Whether the source also reads an allowlisted PEP's claims chain. | `false` |
 | `sources[].properties_key` | Key under which the source's properties appear in the entity representation (`patreon` keeps `.patreon.*` subject mappings). Unset drops them. Properties are not partitioned by capability: whatever a source puts under its key reaches every subject mapping that selects it, whatever definitions the source owns. So two sources sharing a key is a startup error. | |
+| `sources[].deadline` | Replaces `deadline` for this source alone, as a duration string. Every other source keeps the global one. | `deadline` |
 | `sources[].claim` | `token-claims` only: the claim holding attribute value FQNs. | |
-| `sources[].entitlements_namespace` | `patreon-token` only: namespace of the `campaign` and `campaign-tier` definitions. | `patreon.arkavo.com` |
-| `sources[].infer_unknown_as_free` | `patreon-token` only: give a subject with no `arkavo_patreon` claim the free `.patreon` view. | `false` |
+| `sources[].serve` | `patreon-identity` only: `token` grants from the token and compares with identity on the side; `identity` grants from identity. See [Patreon from identity](#composite-resolver-patreon-from-identity). | `token` |
+| `sources[].entitlements_namespace` | `patreon-token` and `patreon-identity` only: namespace of the `campaign` and `campaign-tier` definitions. | `patreon.arkavo.com` |
+| `sources[].infer_unknown_as_free` | `patreon-token` and `patreon-identity` only: give a subject with no `arkavo_patreon` claim the free `.patreon` view. | `false` |
+| `identity_entities` | How a `patreon-identity` source reaches identity; see [Patreon from identity](#composite-resolver-patreon-from-identity). | |
 | `constraints.agent_status` | Where to ask authnz-rs whether an agent is eligible; see [agent status](#composite-resolver-agent-status). Unset withholds every agent subject. | |
 
 **Supplying `seal_key`.** With the default config loader, `OPENTDF_SERVICES_ENTITYRESOLUTION_EVIDENCE_SEAL_KEY` sets `evidence.seal_key`, but only when the key is present in the YAML file (an empty value is enough: `seal_key: ""`), as for every environment variable in this section. Otherwise set it in the config file or a mounted config. Keep it secret: `ResolveEntities` honours whatever a valid seal holds, so anyone with the key can forge evidence that grants any entitlement.
@@ -700,6 +703,54 @@ The requirement above is the one this was built for: publishing needs an atteste
 5. tdf-iroh-s3 sends the device token. Until it does, a device it sends in a chain as claims is `unverified` and unbound, which denies the whole chain, and its direct claims route has no device, so do not add the publish requirement before steps 2 and 5 ship, or publishing is denied.
 
 The device-class source also granted `https://arkavo.ai/attr/classification` by class on the arkavo plane. Nothing grants it now; that waits on a device rule that can name a hierarchy attribute, designed with #63.
+
+#### Composite resolver: Patreon from identity
+
+A `patreon-identity` source grants what a `patreon-token` source grants (the `campaign` and `campaign-tier` values and the `.patreon` properties), but it can read them from identity instead of from the token: `GET /entities/arkavo:<arkavo_account_id>` on identity returns exactly the claims a token freshly minted for that account would carry (authnz-rs 0.26.0). That lets tokens later drop the Patreon data. It replaces the `patreon-token` source, since one source owns a definition.
+
+- `serve: token` (the default) grants from the token, exactly as `patreon-token` does. For each person, at most once a minute, it also asks identity in the background and logs at INFO when the two would grant differently (`patreon-identity: identity and the token grant differently`, with `only_token` and `only_identity`). It never waits for identity and never changes a decision. Run this first and read the log.
+- `serve: identity` grants from identity. While identity is unavailable, the last answer for the account is served, up to `stale_max_age`. With no answer that young, the person gets nothing from this source until identity answers. Give the source its own `deadline` covering `identity_entities.timeout`: on a cold Patreon snapshot identity waits up to 3 s.
+
+Only persons with an `arkavo_account_id` are looked up. On the chain route that is the account the PEP vouches for. Agents and devices get nothing from it when serving identity.
+
+| Field | Description | Default |
+| --- | --- | --- |
+| `identity_entities.url` | Identity's base URL. The service CWT is minted at `<url>/oauth/token` and sent in `X-Auth-Token`. https, or plain http on loopback. | |
+| `identity_entities.client_id` | The client that mints the service CWT. It must be on identity's `ENTITY_CLIENT_IDS`, which allows only the read; do not put it on `ADMIN_CLIENT_IDS`, which also allows writing entitlements. | |
+| `identity_entities.client_secret` | Its secret. Supply it with `OPENTDF_SERVICES_ENTITYRESOLUTION_IDENTITY_ENTITIES_CLIENT_SECRET`, keeping `client_secret: ""` in the file. | |
+| `identity_entities.timeout` | Bound on each lookup. At most `10s`. | `3.5s` |
+| `identity_entities.cache_ttl` | How long an answer is reused. At most `60s`; identity's own snapshot cache is 300 s. | `60s` |
+| `identity_entities.stale_max_age` | How old an answer may be and still be served while identity is unavailable. At most `1h`, the longest a person token lives, so it is never staler than token claims are today. | `1h` |
+| `identity_entities.failure_backoff` | How long a failed lookup is remembered. Meanwhile the account is served stale or, with nothing to serve, gets nothing at once instead of waiting out another timeout. At most `5m`. | `30s` |
+
+One lookup per account is in flight at a time. A 404 (an account identity does not know) and a 200 without `arkavo_patreon` (no Patreon link) are answers, not failures. A 503 `patreon_unavailable`, any other 5xx, a timeout, and an answer naming another account are failures. A 401 after one fresh mint and a 403 are logged at WARN as misconfiguration.
+
+```yaml
+services:
+  entityresolution:
+    identity_entities:
+      url: https://identity.arkavo.net
+      client_id: opentdf-platform
+      client_secret: ""   # OPENTDF_SERVICES_ENTITYRESOLUTION_IDENTITY_ENTITIES_CLIENT_SECRET
+    sources:
+      - id: patreon
+        type: patreon-identity
+        serve: token        # then identity, once the comparison log is quiet
+        deadline: 3500ms
+        issuer: https://identity.arkavo.net
+        grants:
+          - https://patreon.arkavo.com/attr/campaign
+          - https://patreon.arkavo.com/attr/campaign-tier
+        properties_key: patreon
+        pep_assertable: true
+        infer_unknown_as_free: true
+```
+
+Rollout:
+1. Deploy identity 0.26.0 and add the client to `ENTITY_CLIENT_IDS`.
+2. Replace the `patreon-token` source with the block above, set to `serve: token`.
+3. Once the comparison log shows no differences, switch to `serve: identity`.
+4. Only then may tokens drop `arkavo_patreon` and the Patreon values. That also waits on the apps, which read both.
 
 #### Composite resolver: agent status
 
