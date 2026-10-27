@@ -4,8 +4,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/opentdf/platform/service/internal/agentstatus"
+	"github.com/opentdf/platform/service/internal/identityentities"
 	"github.com/opentdf/platform/service/internal/publishingstatus"
 	"github.com/opentdf/platform/service/pkg/config"
 	"github.com/stretchr/testify/assert"
@@ -60,6 +62,32 @@ func TestRegister_BuildsComposite(t *testing.T) {
 	// so the resolver's nil check withholds every agent.
 	assert.True(t, svc.agentStatus == nil, "no agent_status means a nil checker")             //nolint:testifylint // assert.Nil also accepts a typed nil
 	assert.True(t, svc.publishing == nil, "no publishing_status means the constraint is off") //nolint:testifylint // assert.Nil also accepts a typed nil
+}
+
+func TestRegister_PatreonIdentity(t *testing.T) {
+	identityBody := strings.Replace(registerBody, `        type: patreon-token
+`, `        type: patreon-identity
+        serve: identity
+        deadline: 3500ms
+`, 1)
+	require.NotEqual(t, registerBody, identityBody)
+	withClient := identityBody + `    identity_entities:
+      url: https://identity.example.com
+      client_id: opentdf-platform
+      client_secret: s
+`
+	svc, err := Register(loadServiceConfig(t, withClient), testLogger(t))
+	require.NoError(t, err)
+	src, ok := svc.sources[0].src.(*patreonIdentitySource)
+	require.True(t, ok, "the patreon source is a patreon-identity source")
+	assert.Equal(t, serveIdentity, src.serve)
+	_, ok = src.looker.(*identityentities.Client)
+	assert.True(t, ok, "it looks up through the identity_entities client")
+	assert.Equal(t, 3500*time.Millisecond, svc.sources[0].deadline, "its own deadline")
+	assert.Zero(t, svc.sources[1].deadline, "the other source keeps the global one")
+
+	_, err = Register(loadServiceConfig(t, identityBody), testLogger(t))
+	require.ErrorContains(t, err, "identity_entities")
 }
 
 func TestRegister_PublishingStatus(t *testing.T) {

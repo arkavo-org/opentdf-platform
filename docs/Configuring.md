@@ -718,7 +718,7 @@ Only persons with an `arkavo_account_id` are looked up. On the chain route that 
 | `identity_entities.url` | Identity's base URL. The service CWT is minted at `<url>/oauth/token` and sent in `X-Auth-Token`. https, or plain http on loopback. | |
 | `identity_entities.client_id` | The client that mints the service CWT. It must be on identity's `ENTITY_CLIENT_IDS`, which allows only the read; do not put it on `ADMIN_CLIENT_IDS`, which also allows writing entitlements. | |
 | `identity_entities.client_secret` | Its secret. Supply it with `OPENTDF_SERVICES_ENTITYRESOLUTION_IDENTITY_ENTITIES_CLIENT_SECRET`, keeping `client_secret: ""` in the file. | |
-| `identity_entities.timeout` | Bound on each lookup. At most `10s`. | `3.5s` |
+| `identity_entities.timeout` | Bound on each call to identity. The first lookup after a restart also mints the service CWT, so it may take twice this; the source's `deadline` still caps how long a decision waits, and the lookup finishes in the background and fills the cache. At most `10s`. | `3.5s` |
 | `identity_entities.cache_ttl` | How long an answer is reused. At most `60s`; identity's own snapshot cache is 300 s. | `60s` |
 | `identity_entities.stale_max_age` | How old an answer may be and still be served while identity is unavailable. At most `1h`, the longest a person token lives, so it is never staler than token claims are today. | `1h` |
 | `identity_entities.failure_backoff` | How long a failed lookup is remembered. Meanwhile the account is served stale or, with nothing to serve, gets nothing at once instead of waiting out another timeout. At most `5m`. | `30s` |

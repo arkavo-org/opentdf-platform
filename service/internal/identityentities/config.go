@@ -48,7 +48,8 @@ type Config struct {
 	// The client must be on identity's ENTITY_CLIENT_IDS.
 	ClientID     string              `mapstructure:"client_id" json:"client_id"`
 	ClientSecret servicetoken.Secret `mapstructure:"client_secret" json:"client_secret"`
-	// Timeout bounds each lookup; zero means 3.5 s.
+	// Timeout bounds each call to identity; zero means 3.5 s. A lookup that
+	// first mints the service CWT may take two calls.
 	Timeout time.Duration `mapstructure:"timeout" json:"timeout"`
 	// CacheTTL is how long an answer is reused; zero means 60 s, the most allowed.
 	CacheTTL time.Duration `mapstructure:"cache_ttl" json:"cache_ttl"`

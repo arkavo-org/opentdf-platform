@@ -26,6 +26,9 @@ const (
 	// maxBodyBytes bounds an answer: a creator with many tiers is a few KiB.
 	maxBodyBytes   = 256 << 10
 	sweepThreshold = 4096
+	// lookupCalls is how many calls one lookup may make: a token mint and
+	// the read.
+	lookupCalls = 2
 )
 
 // Reasons a lookup failed. Misconfiguration reasons name the setting to fix,
@@ -168,7 +171,9 @@ func (c *Client) Lookup(ctx context.Context, accountID string) (Answer, error) {
 	// a caller giving up does not fail the others; each caller still waits
 	// only as long as its own ctx allows.
 	ch := c.group.DoChan(accountID, func() (any, error) {
-		callCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), c.cfg.Timeout)
+		// Two calls' worth: the first lookup after a restart mints the
+		// service CWT before it asks.
+		callCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), lookupCalls*c.cfg.Timeout)
 		defer cancel()
 		return c.fetch(callCtx, accountID)
 	})
