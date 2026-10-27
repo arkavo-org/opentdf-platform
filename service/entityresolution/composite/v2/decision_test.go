@@ -184,15 +184,18 @@ func TestPatreonDecisions_ThroughTheV2PDP(t *testing.T) {
 
 // creatorSelfSource is the creator source as production configures it: a
 // token-claims source owning https://arkavo.net/attr/creator, with the default
-// read action and pep_assertable unset.
+// read action, pep_assertable like the patreon source so the catalog node's
+// chain carries it.
 func creatorSelfSource() configuredSource {
-	sc := SourceConfig{ID: "creator", Issuer: testIssuer, Grants: []string{creatorSelfDef}}
+	sc := SourceConfig{ID: "creator", Issuer: testIssuer, Grants: []string{creatorSelfDef}, PEPAssertable: true}
 	return sourceOf(sc, newTokenClaimsSource("arkavo_entitlements", sc.Grants))
 }
 
 // TestCreatorAttribute_ThroughTheV2PDP is opentdf-platform#64: a creator with
-// no Patreon campaign opens their own recordings and catalog metadata, tagged
-// with https://arkavo.net/attr/creator/value/<account>, and nobody else does.
+// no Patreon campaign opens their own recordings, catalog metadata and catalog
+// envelope, tagged with https://arkavo.net/attr/creator/value/<account>, and
+// nobody else does: on the KAS route from a token, and on the catalog route
+// from the claims chain the catalog node verified.
 func TestCreatorAttribute_ThroughTheV2PDP(t *testing.T) {
 	svc := newTestService(t, pepConfig(), verifiersFor(&fakeVerifier{}),
 		[]configuredSource{pepPatreonSource(), identityCoreSource(), creatorSelfSource()}, nil)
@@ -234,11 +237,18 @@ func TestCreatorAttribute_ThroughTheV2PDP(t *testing.T) {
 	t.Run("content tagged with both needs both", func(t *testing.T) {
 		require.False(t, viaToken(t, "read", own, creatorCampaign))
 	})
-	// The source is not pep_assertable: a PEP's unsealed chain cannot assert
-	// a creator value.
-	t.Run("a PEP's claims chain does not carry the creator value", func(t *testing.T) {
-		id := chainIdentifier(claimsEntity(t, "catalog-subject", claims))
-		require.False(t, permitted(t, pdp, testPEP, id, own))
+	// The catalog node opens GET /v2/catalogs/<sub> with the claims it
+	// verified, as a chain through arks's AuthZEN facade.
+	viaCatalog := func(t *testing.T, clientID string, fqns ...string) bool {
+		t.Helper()
+		return permitted(t, pdp, clientID, chainIdentifier(claimsEntity(t, "catalog-subject", claims)), fqns...)
+	}
+	t.Run("catalog: the creator's chain from the allowlisted PEP", func(t *testing.T) {
+		require.True(t, viaCatalog(t, testPEP, own))
+		require.False(t, viaCatalog(t, testPEP, other))
+	})
+	t.Run("catalog: the same chain from another client", func(t *testing.T) {
+		require.False(t, viaCatalog(t, "arks-media", own))
 	})
 }
 
