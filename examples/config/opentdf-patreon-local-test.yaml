@@ -72,7 +72,8 @@ services:
         claim: arkavo_entitlements
         grants:
           - https://patreon.arkavo.com/attr/arkavo-creator   # the publish entitlement
-        pep_assertable: false
+        actions: [publish]
+        pep_assertable: true
 
     # constraints: agent_status is unset, so every agent subject is withheld.
     # Device rules (what a device may do for a person) are not set here: they

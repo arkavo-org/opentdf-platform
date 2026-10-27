@@ -18,6 +18,7 @@ import (
 	"github.com/opentdf/platform/service/entityresolution/source"
 	"github.com/opentdf/platform/service/internal/agentstatus"
 	"github.com/opentdf/platform/service/internal/chaindevice"
+	"github.com/opentdf/platform/service/internal/publishingstatus"
 	"github.com/opentdf/platform/service/pkg/config"
 )
 
@@ -106,6 +107,9 @@ type ConstraintsConfig struct {
 	// policy file. It is present only so Validate can refuse a config that
 	// still sets it.
 	DeviceClassCaps map[string][]string `mapstructure:"device_class_caps"`
+	// PublishingStatus unset leaves the constraint off; a partial block is a
+	// startup error.
+	PublishingStatus publishingstatus.Config `mapstructure:"publishing_status"`
 }
 
 // LogValue keeps the seal keys out of every log line.
@@ -133,6 +137,7 @@ func (c Config) LogValue() slog.Value {
 		slog.Attr{Key: "evidence", Value: c.Evidence.LogValue()},
 		slog.Any("sources", sources),
 		slog.String("agent_status_url", c.Constraints.AgentStatus.URL),
+		slog.String("publishing_status_url", c.Constraints.PublishingStatus.URL),
 	)
 }
 
@@ -196,6 +201,11 @@ func (c Config) Validate() error {
 	if c.Constraints.AgentStatus.Enabled() {
 		if _, err := agentstatus.New(c.Constraints.AgentStatus); err != nil {
 			return fmt.Errorf("constraints.agent_status: %w", err)
+		}
+	}
+	if c.Constraints.PublishingStatus.Enabled() {
+		if _, err := publishingstatus.New(c.Constraints.PublishingStatus); err != nil {
+			return fmt.Errorf("constraints.publishing_status: %w", err)
 		}
 	}
 	return nil

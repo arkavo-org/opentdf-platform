@@ -20,6 +20,7 @@ import (
 	"github.com/opentdf/platform/service/internal/agentstatus"
 	"github.com/opentdf/platform/service/internal/auth"
 	"github.com/opentdf/platform/service/internal/chaindevice"
+	"github.com/opentdf/platform/service/internal/publishingstatus"
 	"github.com/opentdf/platform/service/logger"
 	ctxAuth "github.com/opentdf/platform/service/pkg/auth"
 	"go.opentelemetry.io/otel/trace"
@@ -77,8 +78,10 @@ type Service struct {
 	peps map[string]bool
 	// agentStatus judges agent subjects; nil withholds every one.
 	agentStatus agentstatus.Checker
-	now         func() time.Time
-	logger      *logger.Logger
+	// publishing withholds arkavo-creator from suspended creators; nil is off.
+	publishing publishingstatus.Checker
+	now        func() time.Time
+	logger     *logger.Logger
 }
 
 // New builds the resolver from the sources and verifiers already built from
@@ -499,7 +502,7 @@ func (s *Service) resolveSubject(ctx context.Context, subj source.Subject, q sou
 			ev.Props[cs.propsKey] = safeProperties(run.res.Properties)
 		}
 	}
-	ev.Grants = sortedGrants(merged)
+	ev.Grants = s.withholdSuspendedPublishing(ctx, subj, sortedGrants(merged))
 	return ev
 }
 

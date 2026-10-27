@@ -91,6 +91,16 @@ attributes:
     rule: anyOf
     values: []
 
+  # arkavo-creator gates publishing. Its one value is granted directly by the
+  # composite ERS's identity-core source from the token's arkavo_entitlements
+  # claim (action publish), so it has no subject mapping. The ERS withholds it
+  # while arks reports the creator suspended (constraints.publishing_status).
+  - namespace: patreon.arkavo.com
+    name: arkavo-creator
+    rule: anyOf
+    values:
+      - value: publish
+
 subject_mappings:
   # Campaign and campaign-tier gating is NOT done with subject mappings —
   # the composite ERS's patreon source grants those as direct entitlements

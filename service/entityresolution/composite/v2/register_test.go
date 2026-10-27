@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/opentdf/platform/service/internal/agentstatus"
+	"github.com/opentdf/platform/service/internal/publishingstatus"
 	"github.com/opentdf/platform/service/pkg/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -57,7 +58,26 @@ func TestRegister_BuildsComposite(t *testing.T) {
 
 	// An unset agent_status is a nil interface, never a typed nil *Client,
 	// so the resolver's nil check withholds every agent.
-	assert.True(t, svc.agentStatus == nil, "no agent_status means a nil checker") //nolint:testifylint // assert.Nil also accepts a typed nil
+	assert.True(t, svc.agentStatus == nil, "no agent_status means a nil checker")             //nolint:testifylint // assert.Nil also accepts a typed nil
+	assert.True(t, svc.publishing == nil, "no publishing_status means the constraint is off") //nolint:testifylint // assert.Nil also accepts a typed nil
+}
+
+func TestRegister_PublishingStatus(t *testing.T) {
+	body := registerBody + `    constraints:
+      publishing_status:
+        url: https://platform.example.com
+        identity_url: https://identity.example.com
+        client_id: c
+        client_secret: s
+`
+	svc, err := Register(loadServiceConfig(t, body), testLogger(t))
+	require.NoError(t, err)
+	_, ok := svc.publishing.(*publishingstatus.Client)
+	assert.True(t, ok)
+
+	partial := registerBody + "    constraints:\n      publishing_status:\n        url: https://platform.example.com\n"
+	_, err = Register(loadServiceConfig(t, partial), testLogger(t))
+	require.ErrorContains(t, err, "constraints.publishing_status")
 }
 
 func TestRegister_AgentStatus(t *testing.T) {

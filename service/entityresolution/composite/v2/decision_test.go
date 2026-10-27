@@ -17,6 +17,7 @@ import (
 	access "github.com/opentdf/platform/service/internal/access/v2"
 	"github.com/opentdf/platform/service/internal/agentstatus"
 	"github.com/opentdf/platform/service/internal/chaindevice"
+	"github.com/opentdf/platform/service/internal/publishingstatus"
 	"github.com/opentdf/platform/service/logger"
 	"github.com/opentdf/platform/service/logger/audit"
 	"github.com/opentdf/platform/service/policy/filestore"
@@ -64,8 +65,7 @@ func pdpFor(t *testing.T, svc *Service, policyFile string) *access.JustInTimePDP
 }
 
 // permitted asks pdp whether the entity may read every one of fqns, for a
-// caller with clientID. The PDP audits each decision into the request's
-// audit transaction, which the server's interceptor normally opens.
+// caller with clientID.
 func permitted(t *testing.T, pdp *access.JustInTimePDP, clientID string, id *authzV2.EntityIdentifier, fqns ...string) bool {
 	t.Helper()
 	return permittedTo(t, pdp, clientID, "read", id, fqns...)
@@ -179,6 +179,46 @@ func TestPatreonDecisions_ThroughTheV2PDP(t *testing.T) {
 			require.False(t, viaToken(t, patron, content...), status)
 			require.False(t, viaCatalog(t, testPEP, patron, content...), status)
 		}
+	})
+}
+
+// TestPublishDecision_ThroughTheV2PDP is the tdf-iroh-s3 node's publish check:
+// action publish on the arkavo-creator publish value, through arks's AuthZEN
+// facade, which forwards a claims chain whose person entity carries sub, iss
+// and arkavo_entitlements, from the caller client:catalog-node.
+func TestPublishDecision_ThroughTheV2PDP(t *testing.T) {
+	const catalogNode = "client:catalog-node"
+	cfg := testConfig()
+	cfg.Evidence.ClaimsChainPEPs = []string{catalogNode}
+	core := SourceConfig{ID: "identity-core", Issuer: testIssuer, Grants: []string{creatorDef}, Actions: []string{"publish"}, PEPAssertable: true}
+	decide := func(t *testing.T, checker publishingstatus.Checker, action string, fqns ...string) bool {
+		t.Helper()
+		svc := newTestService(t, cfg, verifiersFor(&fakeVerifier{}),
+			[]configuredSource{pepPatreonSource(), sourceOf(core, newTokenClaimsSource("arkavo_entitlements", core.Grants))}, nil)
+		svc.publishing = checker
+		claims := map[string]any{
+			"iss":                 testIssuer,
+			"sub":                 "arkavo:" + creatorAccount,
+			"arkavo_entitlements": []any{publishValue, creatorCampaign},
+		}
+		id := chainIdentifier(claimsEntity(t, "catalog-subject", claims))
+		return permittedTo(t, pdpFor(t, svc, patreonPolicy), catalogNode, action, id, fqns...)
+	}
+
+	t.Run("publish by a creator in good standing is permitted", func(t *testing.T) {
+		require.True(t, decide(t, fakePublishing{}, "publish", publishValue))
+	})
+	t.Run("read does not carry publish", func(t *testing.T) {
+		require.False(t, decide(t, fakePublishing{}, "read", publishValue))
+	})
+	t.Run("suspended creator is denied", func(t *testing.T) {
+		require.False(t, decide(t, fakePublishing{err: suspended()}, "publish", publishValue))
+	})
+	t.Run("unreachable status is denied", func(t *testing.T) {
+		require.False(t, decide(t, fakePublishing{err: denied(publishingstatus.ReasonUnreachable)}, "publish", publishValue))
+	})
+	t.Run("a suspended creator keeps reading the campaign", func(t *testing.T) {
+		require.True(t, decide(t, fakePublishing{err: suspended()}, "read", creatorCampaign))
 	})
 }
 

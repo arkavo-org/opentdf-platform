@@ -10,6 +10,7 @@ import (
 	"github.com/opentdf/platform/service/entityresolution/source"
 	"github.com/opentdf/platform/service/internal/agentstatus"
 	"github.com/opentdf/platform/service/internal/auth"
+	"github.com/opentdf/platform/service/internal/publishingstatus"
 	"github.com/opentdf/platform/service/logger"
 	"github.com/opentdf/platform/service/pkg/config"
 )
@@ -35,7 +36,8 @@ var sourceFactories = map[string]func(SourceConfig) (source.Source, error){
 
 // Register builds the composite resolver from the service config: it decodes
 // and validates it, builds one CWT verifier per issuer, the configured
-// sources, and the agent-status checker when constraints.agent_status is set.
+// sources, and the agent-status and publishing-status checkers when
+// constraints.agent_status and constraints.publishing_status are set.
 // Seal keys are decoded by New alone.
 func Register(in config.ServiceConfig, log *logger.Logger) (*Service, error) {
 	cfg, _, err := DecodeConfig(in)
@@ -85,5 +87,17 @@ func Register(in config.ServiceConfig, log *logger.Logger) (*Service, error) {
 		checker = client
 	}
 
-	return New(cfg, verifiers, sources, checker, log)
+	svc, err := New(cfg, verifiers, sources, checker, log)
+	if err != nil {
+		return nil, err
+	}
+	// Assigned only from a successful New, for the same typed-nil reason.
+	if cfg.Constraints.PublishingStatus.Enabled() {
+		client, pErr := publishingstatus.New(cfg.Constraints.PublishingStatus)
+		if pErr != nil {
+			return nil, fmt.Errorf("constraints.publishing_status: %w", pErr)
+		}
+		svc.publishing = client
+	}
+	return svc, nil
 }
