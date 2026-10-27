@@ -177,23 +177,29 @@ func (c *Client) Lookup(ctx context.Context, accountID string) (Answer, error) {
 		// service CWT before it asks.
 		callCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), lookupCalls*c.cfg.Timeout)
 		defer cancel()
-		return c.fetch(callCtx, accountID)
+		// The flight records its own outcome, so it is kept even when every
+		// caller has already given up.
+		claims, err := c.fetch(callCtx, accountID)
+		if err != nil {
+			c.remember(accountID, nil)
+			return nil, err
+		}
+		a := Answer{Claims: claims, FetchedAt: c.now()}
+		c.remember(accountID, &a)
+		return a, nil
 	})
 	select {
 	case <-ctx.Done():
 		return c.staleOr(accountID, c.now(), &Error{Reason: ReasonUnavailable, Cause: ctx.Err()})
 	case res := <-ch:
 		if res.Err != nil {
-			c.remember(accountID, nil)
 			var lookupErr *Error
 			if !errors.As(res.Err, &lookupErr) {
 				lookupErr = &Error{Reason: ReasonUnavailable, Cause: res.Err}
 			}
 			return c.staleOr(accountID, c.now(), lookupErr)
 		}
-		claims, _ := res.Val.(map[string]any)
-		a := Answer{Claims: claims, FetchedAt: c.now()}
-		c.remember(accountID, &a)
+		a, _ := res.Val.(Answer)
 		return a, nil
 	}
 }

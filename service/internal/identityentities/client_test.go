@@ -344,6 +344,35 @@ func TestLookup_CallerGivingUpDoesNotFailOthers(t *testing.T) {
 	assert.Equal(t, 1, f.count(), "the flight kept going for the caller still waiting")
 }
 
+func TestLookup_FlightOutcomeKeptWhenEveryCallerGaveUp(t *testing.T) {
+	c, f, _ := newClient(t, nil)
+	release := make(chan struct{})
+	f.handler = func(w http.ResponseWriter, r *http.Request, _ int) {
+		<-release
+		writeEntity(w, strings.TrimPrefix(r.URL.Path, entitiesPath))
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() {
+		_, err := c.Lookup(ctx, testAccount)
+		done <- err
+	}()
+	require.Eventually(t, func() bool { return f.count() == 1 }, time.Second, time.Millisecond)
+	cancel()
+	assert.Equal(t, ReasonUnavailable, lookupErr(t, <-done).Reason)
+
+	close(release)
+	require.Eventually(t, func() bool {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		e := c.cache[testAccount]
+		return e != nil && e.good
+	}, time.Second, time.Millisecond, "the flight records its answer with no caller left")
+	_, err := c.Lookup(t.Context(), testAccount)
+	require.NoError(t, err)
+	assert.Equal(t, 1, f.count(), "the next lookup is served from the cache")
+}
+
 func TestLookup_Timeout(t *testing.T) {
 	c, f, _ := newClient(t, func(c *Config) { c.Timeout = 50 * time.Millisecond })
 	f.handler = func(_ http.ResponseWriter, r *http.Request, _ int) {
