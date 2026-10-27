@@ -616,6 +616,17 @@ services:
 
 Complete configs: [`examples/config/opentdf-patreon-prod.yaml`](../examples/config/opentdf-patreon-prod.yaml) and [`examples/config/opentdf-arkavo-local-test.yaml`](../examples/config/opentdf-arkavo-local-test.yaml). What the `patreon-token` source grants: [`service/entityresolution/patreon/v2/README.md`](../service/entityresolution/patreon/v2/README.md).
 
+**A creator's own content.** A creator with no Patreon campaign opens their own recordings and catalog metadata through `https://arkavo.net/attr/creator/value/<arkavo account id>`, which identity.arkavo.net mints into `arkavo_entitlements`. The policy declares the `creator` definition with no values (`values: []`), as for `campaign`, and a `token-claims` source owning it grants the value with the default action `read`. Leave that source's `pep_assertable` unset, so a PEP's claims chain can never assert a creator value; only the creator's own verified token carries it. Definitions combine as AND, so Creator tags a TDF with either the Patreon campaign attributes or the creator attribute, never both; the platform does not check this.
+
+```yaml
+      - id: creator
+        type: token-claims
+        issuer: https://identity.arkavo.net
+        claim: arkavo_entitlements
+        grants:
+          - https://arkavo.net/attr/creator
+```
+
 **Converting a `patreon` or `arkavo` mode config.** Those modes are gone: `mode: patreon` or `mode: arkavo`, in any case, is a startup error. So is any of their top-level keys below, with or without `sources`, and an `evidence` or `constraints` block without `sources` (it would otherwise start Keycloak). `cache_expiration` stays where it is.
 
 | Old top-level key | In the composite |

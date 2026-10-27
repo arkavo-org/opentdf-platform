@@ -16,6 +16,7 @@
 #   mode: core,-policy
 
 namespaces:
+  - name: arkavo.net
   - name: patreon.arkavo.com
 
 key_access_servers:
@@ -100,6 +101,20 @@ attributes:
     rule: anyOf
     values:
       - value: publish
+
+  # creator lets a creator with no Patreon campaign open their own recordings
+  # and catalog metadata (opentdf-platform#64). Values are DYNAMIC, one per
+  # account: creator/value/<arkavo account id>, granted (action read) by the
+  # composite ERS's creator source from the token's arkavo_entitlements claim,
+  # which identity.arkavo.net mints. Definitions combine as AND, so Creator
+  # tags a TDF with either the Patreon campaign attributes or this one, never
+  # both. Viewers reach a creator's content through Patreon only.
+  - namespace: arkavo.net
+    name: creator
+    rule: anyOf
+    grants:
+      - id: kas-arkavo
+    values: []
 
 subject_mappings:
   # Campaign and campaign-tier gating is NOT done with subject mappings —

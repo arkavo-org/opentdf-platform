@@ -182,6 +182,66 @@ func TestPatreonDecisions_ThroughTheV2PDP(t *testing.T) {
 	})
 }
 
+// creatorSelfSource is the creator source as production configures it: a
+// token-claims source owning https://arkavo.net/attr/creator, with the default
+// read action and pep_assertable unset.
+func creatorSelfSource() configuredSource {
+	sc := SourceConfig{ID: "creator", Issuer: testIssuer, Grants: []string{creatorSelfDef}}
+	return sourceOf(sc, newTokenClaimsSource("arkavo_entitlements", sc.Grants))
+}
+
+// TestCreatorAttribute_ThroughTheV2PDP is opentdf-platform#64: a creator with
+// no Patreon campaign opens their own recordings and catalog metadata, tagged
+// with https://arkavo.net/attr/creator/value/<account>, and nobody else does.
+func TestCreatorAttribute_ThroughTheV2PDP(t *testing.T) {
+	svc := newTestService(t, pepConfig(), verifiersFor(&fakeVerifier{}),
+		[]configuredSource{pepPatreonSource(), identityCoreSource(), creatorSelfSource()}, nil)
+	pdp := pdpFor(t, svc, patreonPolicy)
+	exp := time.Now().Add(time.Hour)
+	own := creatorSelfDef + "/value/" + creatorAccount
+	other := creatorSelfDef + "/value/00000000-0000-0000-0000-0000000000ff"
+	// claims are an App Store–only creator's: no Patreon membership, and the
+	// creator value identity.arkavo.net mints last in arkavo_entitlements.
+	claims := map[string]any{
+		"iss":                 testIssuer,
+		"sub":                 creatorAccount,
+		"arkavo_account_id":   creatorAccount,
+		"arkavo_entitlements": []any{publishValue, own},
+	}
+	viaToken := func(t *testing.T, action string, fqns ...string) bool {
+		t.Helper()
+		signed := maps.Clone(claims)
+		signed["exp"] = exp
+		return permittedTo(t, pdp, "arks-media", action, tokenIdentifier(signCWT(t, signed)), fqns...)
+	}
+
+	t.Run("the creator reads their own content", func(t *testing.T) {
+		require.True(t, viaToken(t, "read", own))
+	})
+	t.Run("another creator's content is denied", func(t *testing.T) {
+		require.False(t, viaToken(t, "read", other))
+	})
+	t.Run("the creator value carries read only", func(t *testing.T) {
+		require.False(t, viaToken(t, "publish", own))
+	})
+	t.Run("a Patreon patron cannot read creator-tagged content", func(t *testing.T) {
+		patron := maps.Clone(patronClaims("13167240", "active_patron"))
+		patron["exp"] = exp
+		require.False(t, permitted(t, pdp, "arks-media", tokenIdentifier(signCWT(t, patron)), own))
+	})
+	// Definitions combine as AND, so a TDF tagged with both the creator value
+	// and the campaign needs both: Creator tags one or the other, never both.
+	t.Run("content tagged with both needs both", func(t *testing.T) {
+		require.False(t, viaToken(t, "read", own, creatorCampaign))
+	})
+	// The source is not pep_assertable: a PEP's unsealed chain cannot assert
+	// a creator value.
+	t.Run("a PEP's claims chain does not carry the creator value", func(t *testing.T) {
+		id := chainIdentifier(claimsEntity(t, "catalog-subject", claims))
+		require.False(t, permitted(t, pdp, testPEP, id, own))
+	})
+}
+
 // TestPublishDecision_ThroughTheV2PDP is the tdf-iroh-s3 node's publish check:
 // action publish on the arkavo-creator publish value, through arks's AuthZEN
 // facade, which forwards a claims chain whose person entity carries sub, iss

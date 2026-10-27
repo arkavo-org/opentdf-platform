@@ -38,6 +38,7 @@ const (
 	decryptValue   = "https://arkavo.ai/attr/tdf/value/decrypt"
 	creatorSub     = "did:key:z6Mkcreator"
 	creatorAccount = "00000000-0000-0000-0000-00000000c0de"
+	creatorSelfDef = "https://arkavo.net/attr/creator"
 
 	creatorCampaign  = "https://patreon.arkavo.com/attr/campaign/value/13167240"
 	creatorSupporter = "https://patreon.arkavo.com/attr/campaign-tier/value/13167240_supporter"
