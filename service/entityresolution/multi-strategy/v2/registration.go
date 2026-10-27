@@ -112,21 +112,9 @@ func (ers *ERSV2) ResolveEntities(
 			continue
 		}
 
-		// Convert multi-strategy result to v2 protocol format
-		resultData := make(map[string]interface{})
-
-		// Add resolved claims
-		for claimName, claimValue := range result.Claims {
-			resultData[claimName] = claimValue
-		}
-
-		// Add metadata with "metadata_" prefix
-		for metaKey, metaValue := range result.Metadata {
-			resultData[("metadata_" + metaKey)] = metaValue
-		}
-
-		// Convert to protobuf struct
-		resultStruct, structErr := structpb.NewStruct(resultData)
+		// Convert multi-strategy result to v2 protocol format; a device
+		// marker is never passed through (see RepresentationData)
+		resultStruct, structErr := structpb.NewStruct(multistrategy.RepresentationData(result))
 		if structErr != nil {
 			ers.logger.Error("failed to create result struct",
 				slog.String("entity_id", entityID),

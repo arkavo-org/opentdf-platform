@@ -21,6 +21,7 @@ import (
 	"github.com/opentdf/platform/service/entityresolution/source"
 	"github.com/opentdf/platform/service/internal/agentstatus"
 	"github.com/opentdf/platform/service/internal/auth"
+	"github.com/opentdf/platform/service/internal/chaindevice"
 	"github.com/opentdf/platform/service/logger"
 	ctxAuth "github.com/opentdf/platform/service/pkg/auth"
 	"github.com/stretchr/testify/require"
@@ -329,12 +330,54 @@ func claimsEntity(t *testing.T, id string, claims map[string]any) *entity.Entity
 	}
 }
 
+// environmentEntity is a claims entity a PEP sends as CATEGORY_ENVIRONMENT:
+// a device NPE or the node's environment.
+func environmentEntity(t *testing.T, id string, claims map[string]any) *entity.Entity {
+	t.Helper()
+	e := claimsEntity(t, id, claims)
+	e.Category = entity.Entity_CATEGORY_ENVIRONMENT
+	return e
+}
+
+// iosAppHash is the App Attest rpIdHash of the production iOS app.
+var iosAppHash = chaindevice.AppIDHash("M8GS7ZT95Y.com.arkavo.Arkavo")
+
+// deviceTokenClaims are a DeviceCheck token as authnz-rs mints it for the
+// creator's device: attested, running the iOS app, a production build. Its
+// attestation lasts as long as the token, so attested holds while the token
+// does (authnz-rs mints a shorter one; see TestDeviceToken_AttestationExpiry).
+func deviceTokenClaims(exp time.Time) map[string]any {
+	return map[string]any{
+		"iss":               testIssuer,
+		"sub":               "550e8400-e29b-41d4-a716-446655440000",
+		"exp":               exp,
+		"aud":               []any{source.DeviceCheckAudience, "https://platform.arkavo.net"},
+		"arkavo_account_id": creatorAccount,
+		"arkavo_npe": map[string]any{
+			"type":               "device",
+			"class":              chaindevice.ClassAttested,
+			"device_id":          "d1",
+			"app_id_hash":        iosAppHash,
+			"app_env":            chaindevice.EnvProduction,
+			"attestation_expiry": exp.Unix(),
+		},
+	}
+}
+
+// deviceTokenEnv is the environment claims entity a PEP forwards a device
+// token in: its only claim is the raw token.
+func deviceTokenEnv(t *testing.T, id, token string) *entity.Entity {
+	t.Helper()
+	return environmentEntity(t, id, map[string]any{chaindevice.TokenClaim: token})
+}
+
 // catalogCreatorClaims are the creator's claims as the catalog node forwards
 // them once it has verified the creator's CWT.
 func catalogCreatorClaims() map[string]any {
 	return map[string]any{
 		"iss":                 testIssuer,
 		"sub":                 creatorSub,
+		"arkavo_account_id":   creatorAccount,
 		"arkavo_patreon":      map[string]any{"role": "creator", "campaign_id": "13167240", "memberships": []any{}},
 		"arkavo_entitlements": []any{creatorCampaign, creatorSupporter, publishValue},
 	}

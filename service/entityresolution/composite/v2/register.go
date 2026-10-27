@@ -32,13 +32,6 @@ var sourceFactories = map[string]func(SourceConfig) (source.Source, error){
 		}
 		return newTokenClaimsSource(claim, sc.Grants), nil
 	},
-	typeDeviceClass: func(sc SourceConfig) (source.Source, error) {
-		classes, err := deviceClasses(sc.Options)
-		if err != nil {
-			return nil, err
-		}
-		return newDeviceClassSource(classes), nil
-	},
 }
 
 // Register builds the composite resolver from the service config: it decodes

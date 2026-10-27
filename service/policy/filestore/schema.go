@@ -17,6 +17,9 @@ type Schema struct {
 	KeyAccessServers      []KeyAccessServerDef      `yaml:"key_access_servers" json:"key_access_servers"`
 	RegisteredResources   []RegisteredResourceDef   `yaml:"registered_resources" json:"registered_resources"`
 	Obligations           []ObligationDef           `yaml:"obligations" json:"obligations"`
+	// DeviceRules narrows what a person keeps while devices ride in the same
+	// entity chain. Nil means the file declares none.
+	DeviceRules *DeviceRulesDef `yaml:"device_rules" json:"device_rules"`
 }
 
 type NamespaceDef struct {
@@ -153,4 +156,36 @@ type ObligationTriggerDef struct {
 // Enforcement Point identified by client_id.
 type TriggerContextDef struct {
 	PEPClientID string `yaml:"pep_client_id" json:"pep_client_id"`
+}
+
+// DeviceRulesDef declares how devices in a person's chain narrow the person's
+// grants. A device never grants. See the chaindevice package for the semantics.
+type DeviceRulesDef struct {
+	Requirements []DeviceRequirementDef `yaml:"requirements" json:"requirements"`
+	Caps         []DeviceCapDef         `yaml:"caps" json:"caps"`
+}
+
+// DeviceRequirementDef says that the grants it names are kept only when some
+// device in the chain meets it.
+type DeviceRequirementDef struct {
+	// Grants lists value FQNs (https://<ns>/attr/<def>/value/<v>) and
+	// definition FQNs (https://<ns>/attr/<def>, which cover every value).
+	Grants []string `yaml:"grants" json:"grants"`
+	// DeviceClasses lists the classes that meet the requirement: attested,
+	// managed or unverified. It must not be empty.
+	DeviceClasses []string `yaml:"device_classes" json:"device_classes"`
+	// Apps lists <TeamID>.<BundleID> app IDs. Absent means any app; present,
+	// it must not be empty.
+	Apps []string `yaml:"apps" json:"apps"`
+	// AppEnvs lists production and/or development. Absent means any
+	// environment; present, it must not be empty.
+	AppEnvs []string `yaml:"app_envs" json:"app_envs"`
+}
+
+// DeviceCapDef limits a person to the grants it keeps while a device of one
+// class rides in the chain. A class has at most one cap.
+type DeviceCapDef struct {
+	DeviceClass string `yaml:"device_class" json:"device_class"`
+	// Keeps lists value and definition FQNs, as DeviceRequirementDef.Grants.
+	Keeps []string `yaml:"keeps" json:"keeps"`
 }

@@ -11,6 +11,7 @@ import (
 	authz "github.com/opentdf/platform/protocol/go/authorization/v2"
 	entityresolutionV2 "github.com/opentdf/platform/protocol/go/entityresolution/v2"
 	"github.com/opentdf/platform/protocol/go/policy"
+	"github.com/opentdf/platform/service/internal/chaindevice"
 	"github.com/opentdf/platform/service/logger"
 	"github.com/opentdf/platform/service/policy/actions"
 	"google.golang.org/protobuf/types/known/structpb"
@@ -870,7 +871,8 @@ func (s *PDPTestSuite) TestNewPolicyDecisionPoint() {
 	for _, tc := range tests {
 		s.Run(tc.name, func() {
 			pdp, err := NewPolicyDecisionPoint(
-				s.T().Context(), s.logger, tc.attributes, tc.subjectMappings, tc.registeredResources, allowDirectEntitlements, false)
+				s.T().Context(), s.logger, tc.attributes, tc.subjectMappings, tc.registeredResources, allowDirectEntitlements, false,
+			)
 
 			if tc.expectError {
 				s.Require().Error(err)
@@ -1122,7 +1124,8 @@ func (s *PDPTestSuite) Test_GetDecision_MultipleResources() {
 
 		resources := createResourcePerFqn(
 			testDeptEngineeringFQN, testClassSecretFQN,
-			testDeptEngineeringRegResFQN, testClassSecretRegResFQN)
+			testDeptEngineeringRegResFQN, testClassSecretRegResFQN,
+		)
 
 		// Get decision for delete action (not allowed by either attribute's subject mappings)
 		decision, _, err := pdp.GetDecision(s.T().Context(), entity, testActionDelete, resources)
@@ -1520,6 +1523,113 @@ func (s *PDPTestSuite) Test_GetDecision_NotInMappingGrantsWhenTheSelectorIsMissi
 	decision, _, err = pdp.GetDecision(s.T().Context(), bare, testActionRead, resources)
 	s.Require().NoError(err)
 	s.False(decision.AllPermitted, "a representation without claims evaluates no mapping")
+}
+
+// Device rules in the PDP: a device that rides in a person's chain narrows
+// the person's grants, direct ones included, by the rules the policy file
+// declares. Here publish needs an attested device and campaign needs none.
+func (s *PDPTestSuite) Test_GetDecision_DeviceRules() {
+	publishFQN := createAttrValueFQN(testBaseNamespace, "capability", "publish")
+	campaignFQN := createAttrValueFQN(testBaseNamespace, "campaign", "13167240")
+	pdp, err := NewPolicyDecisionPoint(
+		s.T().Context(),
+		s.logger,
+		[]*policy.Attribute{
+			{
+				Fqn:    createAttrFQN(testBaseNamespace, "capability"),
+				Rule:   policy.AttributeRuleTypeEnum_ATTRIBUTE_RULE_TYPE_ENUM_ANY_OF,
+				Values: []*policy.Value{{Fqn: publishFQN, Value: "publish"}},
+			},
+			{
+				Fqn:    createAttrFQN(testBaseNamespace, "campaign"),
+				Rule:   policy.AttributeRuleTypeEnum_ATTRIBUTE_RULE_TYPE_ENUM_ANY_OF,
+				Values: []*policy.Value{{Fqn: campaignFQN, Value: "13167240"}},
+			},
+		},
+		[]*policy.SubjectMapping{},
+		nil,
+		true,
+		false,
+	)
+	s.Require().NoError(err)
+
+	person := &entityresolutionV2.EntityRepresentation{
+		OriginalId: "person",
+		DirectEntitlements: []*entityresolutionV2.DirectEntitlement{
+			{AttributeValueFqn: publishFQN, Actions: []string{actions.ActionNameRead}},
+			{AttributeValueFqn: campaignFQN, Actions: []string{actions.ActionNameRead}},
+		},
+	}
+	publishNeedsAttested := &chaindevice.Rules{Requirements: []chaindevice.Requirement{{
+		Grants:        []string{strings.ToLower(publishFQN)},
+		DeviceClasses: []string{chaindevice.ClassAttested},
+	}}}
+	attested := chaindevice.Device{Class: chaindevice.ClassAttested, Verified: true, Bound: true, AppEnv: chaindevice.EnvProduction}
+	managed := chaindevice.Device{Class: chaindevice.ClassManaged, Verified: true, Bound: true}
+	unbound := chaindevice.Device{Class: chaindevice.ClassAttested, Verified: true, Bound: false}
+
+	// permits is whether each of publish and campaign is permitted on its own.
+	permits := func(rules *chaindevice.Rules, devices ...chaindevice.Device) (bool, bool) {
+		s.T().Helper()
+		decide := func(fqn string) bool {
+			decision, _, err := pdp.getDecision(s.T().Context(), person, testActionRead, createResourcePerFqn(fqn), rules, devices)
+			s.Require().NoError(err)
+			return decision.AllPermitted
+		}
+		return decide(publishFQN), decide(campaignFQN)
+	}
+
+	s.Run("no devices: a requirement still holds without one", func() {
+		publish, campaign := permits(publishNeedsAttested)
+		s.False(publish, "publish needs an attested device, and there is none")
+		s.True(campaign, "campaign names no requirement")
+	})
+	s.Run("attested bound device meets the requirement", func() {
+		publish, campaign := permits(publishNeedsAttested, attested)
+		s.True(publish)
+		s.True(campaign)
+	})
+	s.Run("a managed device does not meet it", func() {
+		publish, campaign := permits(publishNeedsAttested, managed)
+		s.False(publish)
+		s.True(campaign)
+	})
+	s.Run("any one attested device is enough", func() {
+		publish, campaign := permits(publishNeedsAttested, managed, attested)
+		s.True(publish)
+		s.True(campaign)
+	})
+	s.Run("an unbound device denies everything", func() {
+		publish, campaign := permits(publishNeedsAttested, unbound)
+		s.False(publish)
+		s.False(campaign)
+	})
+	s.Run("an unbound device denies even with attested beside it", func() {
+		publish, campaign := permits(publishNeedsAttested, attested, unbound)
+		s.False(publish)
+		s.False(campaign)
+	})
+	s.Run("nil rules and no devices change nothing", func() {
+		publish, campaign := permits(nil)
+		s.True(publish)
+		s.True(campaign)
+	})
+	s.Run("nil rules still deny an unbound device", func() {
+		publish, campaign := permits(nil, unbound)
+		s.False(publish)
+		s.False(campaign)
+	})
+	s.Run("the returned entitlements are narrowed too", func() {
+		_, entitled, err := pdp.getDecision(s.T().Context(), person, testActionRead, createResourcePerFqn(publishFQN, campaignFQN), publishNeedsAttested, nil)
+		s.Require().NoError(err)
+		s.NotContains(entitled, publishFQN)
+		s.Contains(entitled, campaignFQN)
+	})
+	s.Run("the exported GetDecision applies no rules", func() {
+		decision, _, err := pdp.GetDecision(s.T().Context(), person, testActionRead, createResourcePerFqn(publishFQN, campaignFQN))
+		s.Require().NoError(err)
+		s.True(decision.AllPermitted)
+	})
 }
 
 func (s *PDPTestSuite) Test_GetDecision_ReturnsDecisionRelatedEntitlements() {
@@ -2109,7 +2219,8 @@ func (s *PDPTestSuite) Test_GetDecision_CombinedAttributeRules_SingleResource() 
 		})
 
 		// Resource with attributes from different namespaces and with different rules
-		complexResource := createAttributeValueResource("complex-multi-ns-resource",
+		complexResource := createAttributeValueResource(
+			"complex-multi-ns-resource",
 			testClassSecretFQN,   // HIERARCHY rule
 			testCountryUSAFQN,    // ALL_OF rule
 			testProjectAlphaFQN,  // ANY_OF rule
@@ -2195,7 +2306,8 @@ func (s *PDPTestSuite) Test_GetDecision_CombinedAttributeRules_SingleResource() 
 
 	s.Run("Multiple HIERARCHY of different levels", func() {
 		// Create a resource with multiple classifications (hierarchy rule)
-		cascadingResource := createAttributeValueResource("classification-cascade-resource",
+		cascadingResource := createAttributeValueResource(
+			"classification-cascade-resource",
 			testClassSecretFQN,       // Secret classification
 			testClassConfidentialFQN, // Confidential classification (lower than Secret)
 		)
@@ -2510,7 +2622,8 @@ func (s *PDPTestSuite) Test_GetDecision_AcrossNamespaces() {
 		})
 
 		// A single resource with attribute values from different namespaces
-		combinedResource := createAttributeValueResource("combined-multi-ns-resource",
+		combinedResource := createAttributeValueResource(
+			"combined-multi-ns-resource",
 			testClassConfidentialFQN, // base namespace
 			testCountryUSAFQN,        // base namespace
 			testProjectBetaFQN,       // secondary namespace
@@ -3319,12 +3432,14 @@ func (s *PDPTestSuite) Test_GetEntitlements() {
 		s.ElementsMatch(
 			actionNames(secretActions.GetActions()),
 			actionNames(confidentialActions.GetActions()),
-			"Secret and confidential should have the same actions")
+			"Secret and confidential should have the same actions",
+		)
 
 		s.ElementsMatch(
 			actionNames(secretActions.GetActions()),
 			actionNames(publicActions.GetActions()),
-			"Secret and public should have the same actions")
+			"Secret and public should have the same actions",
+		)
 	})
 
 	s.Run("With filtered subject mappings", func() {

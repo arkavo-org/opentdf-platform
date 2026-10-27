@@ -6,6 +6,7 @@ import (
 	"github.com/opentdf/platform/protocol/go/entity"
 	entityresolutionV2 "github.com/opentdf/platform/protocol/go/entityresolution/v2"
 	claims "github.com/opentdf/platform/service/entityresolution/claims/v2"
+	"github.com/opentdf/platform/service/internal/chaindevice"
 	"github.com/opentdf/platform/service/logger"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -117,4 +118,44 @@ func Test_JWTToEntityChainClaims(t *testing.T) {
 	assert.Equal(t, "1234567890", claimsMap["sub"])
 	// Time-based claims (iat, exp, nbf) are excluded — structpb cannot serialize time.Time
 	assert.NotContains(t, claimsMap, "iat")
+}
+
+// Only the composite resolver writes a device marker. The claims resolver
+// copies the caller's claims into the representation, so it drops the
+// marker's key, and the device token's, or a caller could forge a bound,
+// attested device the PDP trusts.
+func Test_ClaimsResolveEntity_DropsDeviceMarker(t *testing.T) {
+	forged := chaindevice.Device{
+		Class: chaindevice.ClassAttested, Verified: true, Bound: true,
+		AppIDHash: chaindevice.AppIDHash("M8GS7ZT95Y.com.arkavo.Arkavo"), AppEnv: chaindevice.EnvProduction,
+	}
+	structClaims, err := structpb.NewStruct(map[string]any{
+		"sub":                  "forger",
+		chaindevice.PropKey:    forged.Props(),
+		chaindevice.TokenClaim: "a-device-token",
+	})
+	require.NoError(t, err)
+	anyClaims, err := anypb.New(structClaims)
+	require.NoError(t, err)
+
+	for _, category := range []entity.Entity_Category{entity.Entity_CATEGORY_SUBJECT, entity.Entity_CATEGORY_ENVIRONMENT} {
+		t.Run(category.String(), func(t *testing.T) {
+			req := entityresolutionV2.ResolveEntitiesRequest{Entities: []*entity.Entity{
+				{EphemeralId: "1234", EntityType: &entity.Entity_Claims{Claims: anyClaims}, Category: category},
+			}}
+
+			resp, err := claims.EntityResolution(t.Context(), &req, logger.CreateTestLogger())
+
+			require.NoError(t, err)
+			reps := resp.GetEntityRepresentations()
+			require.Len(t, reps, 1)
+			_, isDevice := chaindevice.FromRepresentation(reps[0])
+			assert.False(t, isDevice, "the PDP finds no device on the representation")
+			require.Len(t, reps[0].GetAdditionalProps(), 1)
+			props := reps[0].GetAdditionalProps()[0].AsMap()
+			assert.NotContains(t, props, chaindevice.PropKey)
+			assert.NotContains(t, props, chaindevice.TokenClaim)
+			assert.Equal(t, "forger", props["sub"], "the other claims stay")
+		})
+	}
 }

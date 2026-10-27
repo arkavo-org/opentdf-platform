@@ -11,6 +11,7 @@ import (
 
 	"github.com/opentdf/platform/service/entityresolution/source"
 	"github.com/opentdf/platform/service/internal/agentstatus"
+	"github.com/opentdf/platform/service/internal/chaindevice"
 	"github.com/opentdf/platform/service/internal/publishingstatus"
 	"github.com/opentdf/platform/service/pkg/config"
 	"github.com/stretchr/testify/assert"
@@ -22,8 +23,8 @@ var (
 	oldSealKey  = base64.StdEncoding.EncodeToString([]byte(strings.Repeat("o", 40)))
 )
 
-// validConfig is the spec §7 shape: a patreon source, identity-core and a
-// device-class source, one issuer, no caps.
+// validConfig is the spec §7 shape: a patreon source and identity-core, one
+// issuer.
 func validConfig() Config {
 	return Config{
 		Deadline: 300 * time.Millisecond,
@@ -50,17 +51,6 @@ func validConfig() Config {
 				Actions: []string{"publish"},
 				Options: map[string]any{"claim": "arkavo_entitlements"},
 			},
-			{
-				ID: "device-class", Type: "device-class", Issuer: testIssuer,
-				Grants: []string{"https://arkavo.ai/attr/classification"},
-				Options: map[string]any{"classes": map[string]any{
-					"unverified": []any{classInternal},
-					"managed":    []any{classConfidential},
-				}},
-			},
-		},
-		Constraints: ConstraintsConfig{
-			DeviceClassCaps: map[string][]string{"unverified": {classInternal}},
 		},
 	}
 }
@@ -100,18 +90,6 @@ func TestValidate(t *testing.T) {
 		{"token-claims with a non-string claim", func(c *Config) { c.Sources[1].Options["claim"] = 5 }, []string{"identity-core", "claim"}},
 		{"patreon-token with an unknown option", func(c *Config) { c.Sources[0].Options["claims"] = []any{"arkavo_patreon"} }, []string{"patreon", "claims"}},
 		{"token-claims with an unknown option", func(c *Config) { c.Sources[1].Options["claims"] = "x" }, []string{"identity-core", "claims"}},
-		{"device-class with an unknown option", func(c *Config) { c.Sources[2].Options["claim"] = "x" }, []string{"device-class", "claim"}},
-		{"device-class without classes", func(c *Config) { delete(c.Sources[2].Options, "classes") }, []string{"device-class", "classes"}},
-		{"device-class classes of the wrong shape", func(c *Config) { c.Sources[2].Options["classes"] = []any{"managed"} }, []string{"device-class", "classes"}},
-		{"device-class FQN outside the source's grants", func(c *Config) {
-			c.Sources[2].Options["classes"] = map[string]any{"managed": []any{"https://arkavo.ai/attr/other/value/x"}}
-		}, []string{"device-class", "https://arkavo.ai/attr/other/value/x"}},
-		{"device-class entry that is not a value FQN", func(c *Config) {
-			c.Sources[2].Options["classes"] = map[string]any{"managed": []any{"https://arkavo.ai/attr/classification"}}
-		}, []string{"device-class", "value FQN"}},
-		{"device_class_caps entry that is not a value FQN", func(c *Config) {
-			c.Constraints.DeviceClassCaps = map[string][]string{"unverified": {"https://arkavo.ai/attr/classification"}}
-		}, []string{"device_class_caps", "unverified"}},
 		{"agent_status timeout over the lease", func(c *Config) {
 			c.Constraints.AgentStatus = agentstatus.Config{URL: "https://identity.example.com", ClientID: "c", ClientSecret: "s", Timeout: 6 * time.Second}
 		}, []string{"agent_status"}},
@@ -131,9 +109,9 @@ func TestValidate(t *testing.T) {
 			})
 		}, []string{"evidence.issuers[1]", "duplicate", testIssuer}},
 		{"two sources share a properties_key", func(c *Config) {
+			c.Sources[0].PropertiesKey = "shared"
 			c.Sources[1].PropertiesKey = "shared"
-			c.Sources[2].PropertiesKey = "shared"
-		}, []string{"properties_key", `"shared"`, "identity-core", "device-class"}},
+		}, []string{"properties_key", `"shared"`, "patreon", "identity-core"}},
 		{"patreon-token missing campaign-tier", func(c *Config) { c.Sources[0].Grants = []string{campaignDef} }, []string{"patreon", campaignDef, tierDef}},
 		{"patreon-token with an extra definition", func(c *Config) {
 			c.Sources[0].Grants = []string{campaignDef, tierDef, "https://patreon.arkavo.com/attr/extra"}
@@ -182,6 +160,67 @@ func TestValidate(t *testing.T) {
 		require.Error(t, err)
 		assert.NotContains(t, err.Error(), cfg.Evidence.SealKey)
 	})
+}
+
+// Devices narrow grants by the policy file's device_rules and never grant,
+// so a config still setting device_class_caps, or a device-class source,
+// fails startup, pointing to device_rules.
+func TestValidate_RefusesRemovedDeviceSettings(t *testing.T) {
+	for name, tc := range map[string]struct {
+		mutate func(*Config)
+		want   []string
+	}{
+		"constraints.device_class_caps": {
+			func(c *Config) {
+				c.Constraints.DeviceClassCaps = map[string][]string{"managed": {creatorCampaign}}
+			},
+			[]string{"constraints.device_class_caps", "device_rules"},
+		},
+		"a device-class source": {
+			func(c *Config) {
+				c.Sources = append(c.Sources, SourceConfig{
+					ID: "devices", Type: "device-class", Issuer: testIssuer,
+					Grants: []string{"https://arkavo.ai/attr/classification"},
+					Options: map[string]any{"classes": map[string]any{
+						"managed": []any{"https://arkavo.ai/attr/classification/value/confidential"},
+					}},
+				})
+			},
+			[]string{`source "devices"`, `"device-class"`, "device_rules"},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := validConfig()
+			tc.mutate(&cfg)
+
+			err := cfg.Validate()
+
+			require.Error(t, err)
+			for _, w := range tc.want {
+				assert.Contains(t, err.Error(), w)
+			}
+		})
+	}
+}
+
+// A source's properties land at the top level of a representation, under
+// its properties_key, where the PDP reads a device marker. Only the composite
+// may write the marker, so its key is reserved, as is the device token's
+// claim.
+func TestValidate_ReservedPropertiesKeys(t *testing.T) {
+	for _, key := range []string{chaindevice.PropKey, chaindevice.TokenClaim} {
+		t.Run(key, func(t *testing.T) {
+			cfg := validConfig()
+			cfg.Sources[1].PropertiesKey = key
+
+			err := cfg.Validate()
+
+			require.Error(t, err)
+			for _, w := range []string{"identity-core", "properties_key", `"` + key + `"`, "reserved"} {
+				assert.Contains(t, err.Error(), w)
+			}
+		})
+	}
 }
 
 func TestConfig_LogValueRedactsKeys(t *testing.T) {
@@ -296,15 +335,6 @@ func TestDecodeConfig_SpecShape(t *testing.T) {
         subjects: [person, agent]
         actions: [publish]
         grants: [https://patreon.arkavo.com/attr/arkavo-creator]
-      - id: device-class
-        type: device-class
-        issuer: https://identity.arkavo.net
-        grants: [https://arkavo.ai/attr/classification]
-        classes:
-          managed: [https://arkavo.ai/attr/classification/value/confidential]
-    constraints:
-      device_class_caps:
-        unverified: [https://arkavo.ai/attr/classification/value/internal]
 `)
 	cfg, present, err := DecodeConfig(in)
 	require.NoError(t, err)
@@ -314,17 +344,13 @@ func TestDecodeConfig_SpecShape(t *testing.T) {
 	assert.Equal(t, 250*time.Millisecond, cfg.Deadline)
 	assert.Equal(t, testSealKey, cfg.Evidence.SealKey)
 	assert.Equal(t, []string{"pep-1"}, cfg.Evidence.ClaimsChainPEPs)
-	require.Len(t, cfg.Sources, 3)
+	require.Len(t, cfg.Sources, 2)
 	assert.True(t, cfg.Sources[0].PEPAssertable)
 	assert.Equal(t, "patreon", cfg.Sources[0].PropertiesKey)
 	assert.Equal(t, true, cfg.Sources[0].Options["infer_unknown_as_free"], "type-specific keys land in Options")
 	assert.Equal(t, "arkavo_entitlements", cfg.Sources[1].Options["claim"])
 	assert.Equal(t, []source.Kind{source.KindPerson, source.KindAgent}, cfg.Sources[1].Subjects)
 	assert.Equal(t, []string{"publish"}, cfg.Sources[1].Actions)
-	classes, err := deviceClasses(cfg.Sources[2].Options)
-	require.NoError(t, err)
-	assert.Equal(t, map[string][]string{"managed": {classConfidential}}, classes)
-	assert.Equal(t, map[string][]string{"unverified": {classInternal}}, cfg.Constraints.DeviceClassCaps)
 }
 
 // TestDecodeConfig_AgentStatusTimeout ports the decode cases of arkavo's

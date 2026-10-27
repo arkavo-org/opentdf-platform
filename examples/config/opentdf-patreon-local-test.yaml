@@ -75,6 +75,6 @@ services:
         actions: [publish]
         pep_assertable: true
 
-    constraints:
-      # agent_status is unset, so every agent subject is withheld.
-      device_class_caps: {}
+    # constraints: agent_status is unset, so every agent subject is withheld.
+    # Device rules (what a device may do for a person) are not set here: they
+    # are the policy file's device_rules section.

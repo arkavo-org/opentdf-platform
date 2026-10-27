@@ -17,6 +17,7 @@ import (
 	patreon "github.com/opentdf/platform/service/entityresolution/patreon/v2"
 	"github.com/opentdf/platform/service/entityresolution/source"
 	"github.com/opentdf/platform/service/internal/agentstatus"
+	"github.com/opentdf/platform/service/internal/chaindevice"
 	"github.com/opentdf/platform/service/internal/publishingstatus"
 	"github.com/opentdf/platform/service/pkg/config"
 )
@@ -35,11 +36,17 @@ const (
 	// Source types.
 	typePatreonToken = "patreon-token"
 	typeTokenClaims  = "token-claims"
-	typeDeviceClass  = "device-class"
+	// removedTypeDeviceClass was a source granting by device class. Devices
+	// never grant, so Validate refuses it by name.
+	removedTypeDeviceClass = "device-class"
 
-	// Keys in SourceConfig.Options.
-	optionClaim   = "claim"
-	optionClasses = "classes"
+	// optionClaim is the key in SourceConfig.Options naming the claim a
+	// token-claims source reads.
+	optionClaim = "claim"
+
+	// movedToDeviceRules is where device rules went, for the refusals of
+	// what they replaced.
+	movedToDeviceRules = "device rules moved to device_rules in the policy file"
 )
 
 // Config is services.entityresolution when it selects the composite: the
@@ -76,7 +83,7 @@ type IssuerConfig struct {
 // SourceConfig configures one source and its capability.
 type SourceConfig struct {
 	ID string `mapstructure:"id"`
-	// Type is patreon-token, token-claims or device-class.
+	// Type is patreon-token or token-claims.
 	Type   string `mapstructure:"type"`
 	Issuer string `mapstructure:"issuer"`
 	// Grants are the attribute definition FQNs this source owns.
@@ -87,8 +94,8 @@ type SourceConfig struct {
 	Subjects      []source.Kind `mapstructure:"subjects"`
 	PEPAssertable bool          `mapstructure:"pep_assertable"`
 	PropertiesKey string        `mapstructure:"properties_key"`
-	// Options holds the type-specific keys: claim, classes, and the patreon
-	// source's entitlements_namespace and infer_unknown_as_free.
+	// Options holds the type-specific keys: claim, and the patreon source's
+	// entitlements_namespace and infer_unknown_as_free.
 	Options map[string]any `mapstructure:",remain"`
 }
 
@@ -96,8 +103,9 @@ type SourceConfig struct {
 type ConstraintsConfig struct {
 	// AgentStatus unset withholds every agent subject.
 	AgentStatus agentstatus.Config `mapstructure:"agent_status"`
-	// DeviceClassCaps maps an arkavo_npe.class to the value FQNs a device of
-	// that class is capped to. A class missing from it has no cap.
+	// DeviceClassCaps was removed: device rules moved to device_rules in the
+	// policy file. It is present only so Validate can refuse a config that
+	// still sets it.
 	DeviceClassCaps map[string][]string `mapstructure:"device_class_caps"`
 	// PublishingStatus unset leaves the constraint off; a partial block is a
 	// startup error.
@@ -130,7 +138,6 @@ func (c Config) LogValue() slog.Value {
 		slog.Any("sources", sources),
 		slog.String("agent_status_url", c.Constraints.AgentStatus.URL),
 		slog.String("publishing_status_url", c.Constraints.PublishingStatus.URL),
-		slog.Int("device_class_caps", len(c.Constraints.DeviceClassCaps)),
 	)
 }
 
@@ -186,12 +193,10 @@ func (c Config) Validate() error {
 	if err := validateSources(c.Sources, issuers); err != nil {
 		return err
 	}
-	for class, fqns := range c.Constraints.DeviceClassCaps {
-		for _, fqn := range fqns {
-			if _, ok := source.ParseFQN(fqn); !ok {
-				return fmt.Errorf("constraints.device_class_caps[%q]: %q is not a value FQN", class, fqn)
-			}
-		}
+	// An empty map is let through: the config loader drops it, so it cannot
+	// be told from an absent key, and it caps nothing.
+	if len(c.Constraints.DeviceClassCaps) > 0 {
+		return errors.New("constraints.device_class_caps was removed: " + movedToDeviceRules)
 	}
 	if c.Constraints.AgentStatus.Enabled() {
 		if _, err := agentstatus.New(c.Constraints.AgentStatus); err != nil {
@@ -276,7 +281,13 @@ func validateSources(sources []SourceConfig, issuers map[string]bool) error {
 		}
 		// Properties are not bounded by a capability, so a second source under
 		// a key would replace the first's and drive its subject mappings.
+		// They land at the top level of a representation, where the PDP reads
+		// the composite's device marker, so its key is reserved, as is the
+		// device token's claim.
 		if key := sc.PropertiesKey; key != "" {
+			if key == chaindevice.PropKey || key == chaindevice.TokenClaim {
+				return fmt.Errorf("source %q: properties_key %q is reserved for chain devices", sc.ID, key)
+			}
 			if other, taken := propsOwners[key]; taken {
 				return fmt.Errorf("properties_key %q is set by sources %q and %q: one source owns a properties key", key, other, sc.ID)
 			}
@@ -295,7 +306,9 @@ func validateSources(sources []SourceConfig, issuers map[string]bool) error {
 
 func (sc SourceConfig) validate(issuers map[string]bool) error {
 	switch sc.Type {
-	case typePatreonToken, typeTokenClaims, typeDeviceClass:
+	case typePatreonToken, typeTokenClaims:
+	case removedTypeDeviceClass:
+		return fmt.Errorf("type %q was removed: devices never grant; %s", sc.Type, movedToDeviceRules)
 	default:
 		return fmt.Errorf("unknown type %q", sc.Type)
 	}
@@ -335,25 +348,6 @@ func (sc SourceConfig) validate(issuers map[string]bool) error {
 		}
 		if claim, _ := sc.Options[optionClaim].(string); claim == "" {
 			return errors.New("a token-claims source needs a non-empty string claim")
-		}
-	case typeDeviceClass:
-		if err := rejectUnknownOptions(sc.Options, optionClasses); err != nil {
-			return err
-		}
-		classes, err := deviceClasses(sc.Options)
-		if err != nil {
-			return err
-		}
-		for class, fqns := range classes {
-			for _, fqn := range fqns {
-				parsed, ok := source.ParseFQN(fqn)
-				if !ok {
-					return fmt.Errorf("classes[%q]: %q is not a value FQN", class, fqn)
-				}
-				if !owned[parsed.DefinitionFQN()] {
-					return fmt.Errorf("classes[%q]: %q is outside this source's grants", class, fqn)
-				}
-			}
 		}
 	}
 	return nil

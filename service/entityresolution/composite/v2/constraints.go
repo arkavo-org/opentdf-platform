@@ -27,27 +27,6 @@ func (s *Service) withheldAgent(ctx context.Context, subj source.Subject) bool {
 	return true
 }
 
-// capGrants keeps, of a device subject's grants, only those its class is
-// capped to. The class is arkavo_npe.class, "unverified" when absent; a class
-// with no entry in caps has no cap. A cap intersects and never adds, and
-// other subjects are not capped.
-func capGrants(caps map[string]map[string]bool, subj source.Subject, grants []sealedGrant) []sealedGrant {
-	if subj.Kind != source.KindDevice {
-		return grants
-	}
-	allowed, capped := caps[deviceClass(subj.Claims)]
-	if !capped {
-		return grants
-	}
-	kept := make([]sealedGrant, 0, len(grants))
-	for _, g := range grants {
-		if allowed[g.FQN] {
-			kept = append(kept, g)
-		}
-	}
-	return kept
-}
-
 const (
 	// publishingDefinition is the attribute definition a suspended creator
 	// loses every value of. Matched by parsed definition, so

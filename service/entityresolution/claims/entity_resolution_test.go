@@ -6,6 +6,7 @@ import (
 	"github.com/opentdf/platform/protocol/go/authorization"
 	"github.com/opentdf/platform/protocol/go/entityresolution"
 	claims "github.com/opentdf/platform/service/entityresolution/claims"
+	"github.com/opentdf/platform/service/internal/chaindevice"
 	"github.com/opentdf/platform/service/logger"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -117,4 +118,32 @@ func Test_JWTToEntityChainClaims(t *testing.T) {
 	assert.Equal(t, "1234567890", claimsMap["sub"])
 	// Time-based claims (iat, exp, nbf) are excluded — structpb cannot serialize time.Time
 	assert.NotContains(t, claimsMap, "iat")
+}
+
+// Only the composite resolver writes a device marker. The claims resolver
+// copies the caller's claims into the representation, so it drops the
+// marker's key, and the device token's.
+func Test_ClaimsResolveEntity_DropsDeviceMarker(t *testing.T) {
+	structClaims, err := structpb.NewStruct(map[string]any{
+		"sub":                  "forger",
+		chaindevice.PropKey:    map[string]any{"kind": "device", "class": "attested", "verified": true, "bound": true},
+		chaindevice.TokenClaim: "a-device-token",
+	})
+	require.NoError(t, err)
+	anyClaims, err := anypb.New(structClaims)
+	require.NoError(t, err)
+	req := entityresolution.ResolveEntitiesRequest{Entities: []*authorization.Entity{
+		{Id: "1234", EntityType: &authorization.Entity_Claims{Claims: anyClaims}},
+	}}
+
+	resp, err := claims.EntityResolution(t.Context(), &req, logger.CreateTestLogger())
+
+	require.NoError(t, err)
+	reps := resp.GetEntityRepresentations()
+	require.Len(t, reps, 1)
+	require.Len(t, reps[0].GetAdditionalProps(), 1)
+	props := reps[0].GetAdditionalProps()[0].AsMap()
+	assert.NotContains(t, props, chaindevice.PropKey)
+	assert.NotContains(t, props, chaindevice.TokenClaim)
+	assert.Equal(t, "forger", props["sub"], "the other claims stay")
 }

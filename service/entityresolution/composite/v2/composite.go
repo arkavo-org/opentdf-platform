@@ -19,6 +19,7 @@ import (
 	"github.com/opentdf/platform/service/entityresolution/source"
 	"github.com/opentdf/platform/service/internal/agentstatus"
 	"github.com/opentdf/platform/service/internal/auth"
+	"github.com/opentdf/platform/service/internal/chaindevice"
 	"github.com/opentdf/platform/service/internal/publishingstatus"
 	"github.com/opentdf/platform/service/logger"
 	ctxAuth "github.com/opentdf/platform/service/pkg/auth"
@@ -79,10 +80,8 @@ type Service struct {
 	agentStatus agentstatus.Checker
 	// publishing withholds arkavo-creator from suspended creators; nil is off.
 	publishing publishingstatus.Checker
-	// caps maps a device class to the value FQNs it is capped to.
-	caps   map[string]map[string]bool
-	now    func() time.Time
-	logger *logger.Logger
+	now        func() time.Time
+	logger     *logger.Logger
 }
 
 // New builds the resolver from the sources and verifiers already built from
@@ -107,16 +106,6 @@ func New(cfg Config, verifiers map[string]claimsVerifier, sources []configuredSo
 	for _, id := range cfg.Evidence.ClaimsChainPEPs {
 		peps[id] = true
 	}
-	caps := make(map[string]map[string]bool, len(cfg.Constraints.DeviceClassCaps))
-	for class, fqns := range cfg.Constraints.DeviceClassCaps {
-		allowed := make(map[string]bool, len(fqns))
-		for _, raw := range fqns {
-			if fqn, ok := source.ParseFQN(raw); ok {
-				allowed[fqn.String()] = true
-			}
-		}
-		caps[class] = allowed
-	}
 	return &Service{
 		cfg:         cfg,
 		verifiers:   verifiers,
@@ -124,7 +113,6 @@ func New(cfg Config, verifiers map[string]claimsVerifier, sources []configuredSo
 		sealKeys:    keys,
 		peps:        peps,
 		agentStatus: checker,
-		caps:        caps,
 		now:         time.Now,
 		logger:      log,
 	}, nil
@@ -134,7 +122,8 @@ func New(cfg Config, verifiers map[string]claimsVerifier, sources []configuredSo
 // rewrap routes and returns one chain per token, holding one subject entity:
 // the resolution, sealed as arkavo_evidence. A token that is not a verified
 // CWT seals an evidence with no grants, so it is denied rather than failing
-// the decision.
+// the decision. A device token is split into its person and the person's
+// device (see resolveToken), still one subject entity.
 func (s *Service) CreateEntityChainsFromTokens(
 	ctx context.Context,
 	req *connect.Request[entityresolutionV2.CreateEntityChainsFromTokensRequest],
@@ -158,37 +147,82 @@ func (s *Service) CreateEntityChainsFromTokens(
 //   - A claims entity carrying arkavo_evidence is judged by its seal alone:
 //     the opened evidence is the representation, whoever the caller. One
 //     that does not open grants nothing and is never read as a PEP's claims.
+//   - A claims entity carrying arkavo_device_token is a device, judged by
+//     the token's signature alone, whoever the caller (see
+//     deviceTokenEntity). It holds no grants. It must be an environment
+//     entity: the PDP would read one of any other category as a co-subject
+//     with no grants, which denies every decision while the person's
+//     entitlements still list its grants, so such a request is refused
+//     before anything is resolved.
 //   - Any other claims entity is a PEP's assertion. It counts only from a
 //     client ID on claims_chain_peps, and only pep_assertable sources read
 //     it.
 //   - Everything else, an unsealed chain from any other caller included, is
 //     a subject with no trust: the sources see no claims.
+//
+// The request is one chain, so once every entity is resolved each device is
+// bound to the chain's subjects, or not (see bindDevices), and carries a
+// marker saying which (see chaindevice). The PDP partitions the chain by
+// representation ID, so a request in which two entities share an ID is
+// refused before anything is resolved: binding would otherwise see fewer
+// subjects than the PDP narrows.
 func (s *Service) ResolveEntities(
 	ctx context.Context,
 	req *connect.Request[entityresolutionV2.ResolveEntitiesRequest],
 ) (*connect.Response[entityresolutionV2.ResolveEntitiesResponse], error) {
 	ctx, span := s.Start(ctx, "ResolveEntities")
 	defer span.End()
+	ids, dup := entityIDs(req.Msg.GetEntities())
+	if dup != "" {
+		s.logger.WarnContext(
+			ctx, "composite: two entities of the request share an ID; it is refused",
+			slog.String("entity_id", dup),
+		)
+		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("composite: entity ID %q is used by two entities", dup))
+	}
+	if id, category := misplacedDeviceToken(req.Msg.GetEntities(), ids); id != "" {
+		s.logger.WarnContext(
+			ctx, "composite: a device token in an entity that is not an environment entity; the request is refused",
+			slog.String("entity_id", id),
+			slog.String("category", category.String()),
+		)
+		return nil, connect.NewError(connect.CodeInvalidArgument,
+			fmt.Errorf("composite: entity %q carries %s but is not an environment entity", id, chaindevice.TokenClaim))
+	}
 	// The request names no resources, so sources answer subject-wide.
 	q := source.Query{Action: defaultAction}
-	reps := make([]*entityresolutionV2.EntityRepresentation, 0, len(req.Msg.GetEntities()))
+	entries := make([]resolvedEntry, 0, len(req.Msg.GetEntities()))
 	for i, e := range req.Msg.GetEntities() {
-		id := e.GetEphemeralId()
-		if id == "" {
-			id = ent.EntityIDPrefix + strconv.Itoa(i)
-		}
-		ev, err := s.resolveEntity(ctx, id, e, q)
+		id := ids[i]
+		ev, device, err := s.resolveEntity(ctx, id, e, q)
 		if err != nil {
-			s.logger.WarnContext(ctx, "composite: cannot read claims entity",
+			s.logger.WarnContext(
+				ctx, "composite: cannot read claims entity",
 				slog.String("entity_id", id),
 				slog.Any("error", err),
 			)
 			return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("composite: unpack claims: %w", err))
 		}
-		rep, err := representation(id, ev)
+		entries = append(entries, resolvedEntry{
+			id:       id,
+			category: e.GetCategory(),
+			ev:       ev,
+			device:   device,
+			iss:      ev.Iss,
+			account:  ev.AccountID,
+		})
+	}
+	bindDevices(entries)
+	reps := make([]*entityresolutionV2.EntityRepresentation, 0, len(entries))
+	for _, entry := range entries {
+		if entry.device != nil && !entry.device.Bound {
+			s.logUnbound(ctx, entry, entries)
+		}
+		rep, err := representation(entry.id, entry.ev, entry.device)
 		if err != nil {
-			s.logger.ErrorContext(ctx, "composite: cannot build entity representation",
-				slog.String("entity_id", id),
+			s.logger.ErrorContext(
+				ctx, "composite: cannot build entity representation",
+				slog.String("entity_id", entry.id),
 				slog.Any("error", err),
 			)
 			return nil, connect.NewError(connect.CodeInternal, fmt.Errorf("composite: entity representation: %w", err))
@@ -196,6 +230,46 @@ func (s *Service) ResolveEntities(
 		reps = append(reps, rep)
 	}
 	return connect.NewResponse(&entityresolutionV2.ResolveEntitiesResponse{EntityRepresentations: reps}), nil
+}
+
+// entityIDs names each entity as its representation is named, and as the PDP
+// names it: its ephemeral ID, or EntityIDPrefix and its index when it has
+// none. It also returns the first ID two entities share, or "".
+func entityIDs(entities []*entity.Entity) ([]string, string) {
+	ids := make([]string, len(entities))
+	seen := make(map[string]bool, len(entities))
+	for i, e := range entities {
+		id := e.GetEphemeralId()
+		if id == "" {
+			id = ent.EntityIDPrefix + strconv.Itoa(i)
+		}
+		if seen[id] {
+			return nil, id
+		}
+		seen[id] = true
+		ids[i] = id
+	}
+	return ids, ""
+}
+
+// misplacedDeviceToken returns the ID, as entityIDs names it, and the
+// category of the first entity that carries chaindevice.TokenClaim in its
+// claims but is not an environment entity, whatever else it carries, or "".
+// Claims that do not unpack are left to resolveEntity to refuse.
+func misplacedDeviceToken(entities []*entity.Entity, ids []string) (string, entity.Entity_Category) {
+	for i, e := range entities {
+		if e.GetCategory() == entity.Entity_CATEGORY_ENVIRONMENT || e.GetClaims() == nil {
+			continue
+		}
+		var st structpb.Struct
+		if err := e.GetClaims().UnmarshalTo(&st); err != nil {
+			continue
+		}
+		if _, carried := st.GetFields()[chaindevice.TokenClaim]; carried {
+			return ids[i], e.GetCategory()
+		}
+	}
+	return "", entity.Entity_CATEGORY_UNSPECIFIED
 }
 
 // subjectEntity seals ev into a chain's subject entity.
@@ -230,6 +304,15 @@ func subjectEphemeralID(sub string) string {
 // resolveToken verifies raw and resolves its subject until the token
 // expires. Anything but a verified CWT with an exp still ahead resolves to
 // no grants, recorded as an invalid token, for invalidEvidenceTTL.
+//
+// A verified token that KindOf judges a device's (a DeviceCheck token, which
+// iOS presents at KAS rewrap) carries a person and the person's device, and is
+// split. The sources resolve the person from personClaims, as any person
+// token. The device, as deviceFromClaims reads it, is sealed beside the
+// person's grants; ResolveEntities binds it as it binds any device, so in a
+// chain of its subject alone it is that subject's own. A device never grants:
+// device rules in the policy file narrow the person's grants by it. A token
+// with an agent marker is an agent's, never a device's, so it is not split.
 func (s *Service) resolveToken(ctx context.Context, raw string, q source.Query) evidence {
 	claims, exp, err := s.verifyToken(ctx, raw)
 	if err != nil {
@@ -240,12 +323,25 @@ func (s *Service) resolveToken(ctx context.Context, raw string, q source.Query) 
 			Outcomes: map[string]source.Outcome{tokenOutcome: source.OutcomeInvalid},
 		}
 	}
+	var device *sealedDevice
+	if source.KindOf(claims) == source.KindDevice {
+		// Seal only what deviceFromClaims read, so the class is one the PDP
+		// knows, and an attested device's attestation expiry, so it lapses
+		// when the evidence is opened after it.
+		d := deviceFromClaims(claims, true, s.now())
+		device = &sealedDevice{Class: d.Class, AppIDHash: d.AppIDHash, AppEnv: d.AppEnv}
+		if d.Class == chaindevice.ClassAttested {
+			device.AttestationExpiry = attestationExpiry(claims)
+		}
+		claims = personClaims(claims)
+	}
 	accountID, _ := claims[claimAccountID].(string)
 	ev := s.resolveSubject(ctx, source.Subject{
 		Claims:    claims,
 		AccountID: accountID,
 		Trust:     source.TrustVerified,
 	}, q, exp)
+	ev.Device = device
 	ev.Outcomes[tokenOutcome] = source.OutcomeComplete
 	return ev
 }
@@ -281,30 +377,48 @@ func (s *Service) verifyToken(ctx context.Context, raw string) (map[string]any, 
 }
 
 // resolveEntity resolves one entity of a ResolveEntities request (see
-// there); id names it in logs. Only claims that do not unpack are an error.
-func (s *Service) resolveEntity(ctx context.Context, id string, e *entity.Entity, q source.Query) (evidence, error) {
+// there); id names it in logs. It also returns the device the entity is, if
+// any, still unbound: the device sealed in its evidence, the device its
+// device token describes, or, for a PEP's claims that KindOf judges a
+// device's, an unverified device. A PEP's claims make a device only from a
+// caller on claims_chain_peps. Only claims that do not unpack are an error.
+func (s *Service) resolveEntity(ctx context.Context, id string, e *entity.Entity, q source.Query) (evidence, *chaindevice.Device, error) {
 	anonymous := source.Subject{Trust: source.TrustNone}
 	if _, isClaims := e.GetEntityType().(*entity.Entity_Claims); !isClaims {
-		return s.resolveSubject(ctx, anonymous, q, s.now()), nil
+		return s.resolveSubject(ctx, anonymous, q, s.now()), nil, nil
 	}
 	var st structpb.Struct
 	if err := e.GetClaims().UnmarshalTo(&st); err != nil {
-		return evidence{}, err
+		return evidence{}, nil, err
 	}
 	claims := st.AsMap()
 	if sealed, carried := claims[evidenceClaim]; carried {
-		return s.openSealed(ctx, id, sealed), nil
+		ev := s.openSealed(ctx, id, sealed)
+		return ev, sealedDeviceOf(ev, s.now()), nil
+	}
+	// A token that is present but not a string is an unverified device, never
+	// a PEP's claims.
+	if token, carried := claims[chaindevice.TokenClaim]; carried {
+		ev, device := s.deviceTokenEntity(ctx, id, token)
+		return ev, device, nil
 	}
 	clientID, allowlisted := callerClientID(ctx, s.peps)
 	if !allowlisted {
-		s.logger.WarnContext(ctx, "composite: unsealed claims chain from a caller not on claims_chain_peps",
+		s.logger.WarnContext(
+			ctx, "composite: unsealed claims chain from a caller not on claims_chain_peps",
 			slog.String("entity_id", id),
 			slog.String("client_id", clientID),
 		)
-		return s.resolveSubject(ctx, anonymous, q, s.now()), nil
+		return s.resolveSubject(ctx, anonymous, q, s.now()), nil, nil
+	}
+	// A PEP's word for a device's class is not trusted.
+	var device *chaindevice.Device
+	if source.KindOf(claims) == source.KindDevice {
+		d := deviceFromClaims(claims, false, s.now())
+		device = &d
 	}
 	accountID, _ := claims[claimAccountID].(string)
-	return s.resolveSubject(ctx, source.Subject{Claims: claims, AccountID: accountID, Trust: source.TrustPEP}, q, s.now()), nil
+	return s.resolveSubject(ctx, source.Subject{Claims: claims, AccountID: accountID, Trust: source.TrustPEP}, q, s.now()), device, nil
 }
 
 // openSealed opens the arkavo_evidence of the claims entity id. Whatever does
@@ -336,9 +450,10 @@ func (s *Service) logSealRefusal(ctx context.Context, id string, err error, extr
 	s.logger.LogAttrs(ctx, slog.LevelWarn, "composite: arkavo_evidence does not open; it grants nothing", attrs...)
 }
 
-// resolveSubject runs every source that admits subj, keeps what each
-// source's capability allows, unions it and applies the constraints. The
-// evidence expires at exp. A subject with no trust keeps no claims. The kind
+// resolveSubject runs every source that admits subj, unless the agent gate
+// withholds it, keeps what each source's capability allows and unions it. The
+// evidence expires at exp and records the subject's iss and account ID. A
+// subject with no trust keeps no claims, so it records neither. The kind
 // is always judged from the claims the sources see, never taken from the
 // caller, so discarded claims cannot make a subject a device or an agent,
 // and a device cannot pass as a person.
@@ -348,7 +463,15 @@ func (s *Service) resolveSubject(ctx context.Context, subj source.Subject, q sou
 	}
 	subj.Kind = source.KindOf(subj.Claims)
 	sub, _ := subj.Claims["sub"].(string)
-	ev := evidence{V: evidenceVersion, Sub: sub, Exp: exp.Unix(), Outcomes: map[string]source.Outcome{}}
+	iss, _ := subj.Claims["iss"].(string)
+	ev := evidence{
+		V:         evidenceVersion,
+		Sub:       sub,
+		Iss:       iss,
+		AccountID: subj.AccountID,
+		Exp:       exp.Unix(),
+		Outcomes:  map[string]source.Outcome{},
+	}
 	if s.withheldAgent(ctx, subj) {
 		return ev
 	}
@@ -362,7 +485,8 @@ func (s *Service) resolveSubject(ctx context.Context, subj source.Subject, q sou
 		run := runs[i]
 		ev.Outcomes[cs.id] = run.outcome
 		if run.err != nil {
-			s.logger.WarnContext(ctx, "composite: source unavailable; it contributes nothing",
+			s.logger.WarnContext(
+				ctx, "composite: source unavailable; it contributes nothing",
 				slog.String("source_id", cs.id),
 				slog.Any("error", run.err),
 			)
@@ -378,7 +502,7 @@ func (s *Service) resolveSubject(ctx context.Context, subj source.Subject, q sou
 			ev.Props[cs.propsKey] = safeProperties(run.res.Properties)
 		}
 	}
-	ev.Grants = s.withholdSuspendedPublishing(ctx, subj, capGrants(s.caps, subj, sortedGrants(merged)))
+	ev.Grants = s.withholdSuspendedPublishing(ctx, subj, sortedGrants(merged))
 	return ev
 }
 
@@ -395,7 +519,8 @@ func (s *Service) mergeGrants(ctx context.Context, merged map[string]*sealedGran
 			g.Actions = cs.cap.actions
 		}
 		if !cs.cap.allows(g) {
-			s.logger.WarnContext(ctx, "composite: dropped a grant outside its capability",
+			s.logger.WarnContext(
+				ctx, "composite: dropped a grant outside its capability",
 				slog.String("source_id", cs.id),
 				slog.String("fqn", g.FQN),
 				slog.Any("actions", g.Actions),
@@ -408,7 +533,8 @@ func (s *Service) mergeGrants(ctx context.Context, merged map[string]*sealedGran
 		if !g.ExpiresAt.IsZero() {
 			exp = g.ExpiresAt.Unix()
 			if exp <= now.Unix() {
-				s.logger.DebugContext(ctx, "composite: dropped an expired grant",
+				s.logger.DebugContext(
+					ctx, "composite: dropped an expired grant",
 					slog.String("source_id", cs.id),
 					slog.String("fqn", key),
 					slog.Time("expires_at", g.ExpiresAt),
@@ -502,8 +628,12 @@ func callerClientID(ctx context.Context, peps map[string]bool) (string, bool) {
 
 // representation is the EntityRepresentation of ev: its grants as direct
 // entitlements and its properties, each under its properties key, in one
-// struct, omitted when there are none. Nothing else of the entity counts.
-func representation(id string, ev evidence) (*entityresolutionV2.EntityRepresentation, error) {
+// struct, omitted when there are none. A device also carries its marker
+// under chaindevice.PropKey, which only the composite writes: properties
+// under that key are dropped (Validate refuses it as a properties_key, but
+// evidence sealed under an older config could carry it). Nothing else of the
+// entity counts.
+func representation(id string, ev evidence, device *chaindevice.Device) (*entityresolutionV2.EntityRepresentation, error) {
 	rep := &entityresolutionV2.EntityRepresentation{OriginalId: id}
 	for _, g := range ev.Grants {
 		rep.DirectEntitlements = append(rep.DirectEntitlements, &entityresolutionV2.DirectEntitlement{
@@ -511,12 +641,18 @@ func representation(id string, ev evidence) (*entityresolutionV2.EntityRepresent
 			Actions:           slices.Clone(g.Actions),
 		})
 	}
-	if len(ev.Props) == 0 {
-		return rep, nil
-	}
-	props := make(map[string]any, len(ev.Props))
+	props := make(map[string]any, len(ev.Props)+1)
 	for key, p := range ev.Props {
+		if key == chaindevice.PropKey {
+			continue
+		}
 		props[key] = p
+	}
+	if device != nil {
+		props[chaindevice.PropKey] = device.Props()
+	}
+	if len(props) == 0 {
+		return rep, nil
 	}
 	st, err := structpb.NewStruct(props)
 	if err != nil {
