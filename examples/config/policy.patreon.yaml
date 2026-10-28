@@ -1,9 +1,9 @@
 # Patreon-backed policy snapshot.
 #
-# Defines two attribute axes for data tagging plus three Patreon-sourced
-# subject attributes (tier, campaign, status) with subject mappings keyed off
-# the claim shape produced by the Patreon entity resolution provider
-# (service/entityresolution/patreon).
+# Defines the attribute axes for data tagging plus the Patreon-sourced
+# campaign and campaign-tier attributes, which the composite entity
+# resolver's patreon source grants from the token's arkavo_entitlements
+# (service/entityresolution/patreon/v2). There are no subject mappings.
 #
 # Reference this file from opentdf.yaml as:
 #
@@ -116,126 +116,9 @@ attributes:
       - id: kas-arkavo
     values: []
 
-subject_mappings:
-  # Campaign and campaign-tier gating is NOT done with subject mappings —
-  # the composite ERS's patreon source grants those as direct entitlements
-  # from arkavo_entitlements, so there are no per-creator entries here. The mappings below
-  # are creator-agnostic vocabularies (status, benefit-derived entitlements).
-
-  # status: surface the Patreon membership lifecycle so policies can revoke
-  # access when payments fail.
-  - attribute_value_fqn: https://patreon.arkavo.com/attr/status/value/active
-    inline_condition_set:
-      subject_sets:
-        - condition_groups:
-            - boolean_operator: AND
-              conditions:
-                - subject_external_selector_value: .patreon.status
-                  operator: IN
-                  subject_external_values:
-                    - active
-    actions:
-      - name: read
-        standard: TRANSMIT
-
-  - attribute_value_fqn: https://patreon.arkavo.com/attr/status/value/declined
-    inline_condition_set:
-      subject_sets:
-        - condition_groups:
-            - boolean_operator: AND
-              conditions:
-                - subject_external_selector_value: .patreon.status
-                  operator: IN
-                  subject_external_values:
-                    - declined
-    actions:
-      - name: read
-        standard: TRANSMIT
-
-  - attribute_value_fqn: https://patreon.arkavo.com/attr/status/value/former
-    inline_condition_set:
-      subject_sets:
-        - condition_groups:
-            - boolean_operator: AND
-              conditions:
-                - subject_external_selector_value: .patreon.status
-                  operator: IN
-                  subject_external_values:
-                    - former
-
-    actions:
-      - name: read
-        standard: TRANSMIT
-
-  # Entitlement mappings derived from Patreon benefits. The Patreon ERS
-  # surfaces benefit slugs in patreon.benefits[]; the allOf rule means data
-  # tagged with several entitlements requires the subject to hold all of them.
-  - attribute_value_fqn: https://patreon.arkavo.com/attr/entitlement/value/exclusive-content
-    inline_condition_set:
-      subject_sets:
-        - condition_groups:
-            - boolean_operator: AND
-              conditions:
-                - subject_external_selector_value: .patreon.benefits[]
-                  operator: IN
-                  subject_external_values:
-                    - exclusive-content
-    actions:
-      - name: read
-        standard: TRANSMIT
-
-  - attribute_value_fqn: https://patreon.arkavo.com/attr/entitlement/value/early-access
-    inline_condition_set:
-      subject_sets:
-        - condition_groups:
-            - boolean_operator: AND
-              conditions:
-                - subject_external_selector_value: .patreon.benefits[]
-                  operator: IN
-                  subject_external_values:
-                    - early-access
-    actions:
-      - name: read
-        standard: TRANSMIT
-
-  - attribute_value_fqn: https://patreon.arkavo.com/attr/entitlement/value/behind-the-scenes
-    inline_condition_set:
-      subject_sets:
-        - condition_groups:
-            - boolean_operator: AND
-              conditions:
-                - subject_external_selector_value: .patreon.benefits[]
-                  operator: IN
-                  subject_external_values:
-                    - behind-the-scenes
-    actions:
-      - name: read
-        standard: TRANSMIT
-
-  - attribute_value_fqn: https://patreon.arkavo.com/attr/entitlement/value/live-stream
-    inline_condition_set:
-      subject_sets:
-        - condition_groups:
-            - boolean_operator: AND
-              conditions:
-                - subject_external_selector_value: .patreon.benefits[]
-                  operator: IN
-                  subject_external_values:
-                    - live-stream
-    actions:
-      - name: read
-        standard: TRANSMIT
-
-  - attribute_value_fqn: https://patreon.arkavo.com/attr/entitlement/value/discord
-    inline_condition_set:
-      subject_sets:
-        - condition_groups:
-            - boolean_operator: AND
-              conditions:
-                - subject_external_selector_value: .patreon.benefits[]
-                  operator: IN
-                  subject_external_values:
-                    - discord
-    actions:
-      - name: read
-        standard: TRANSMIT
+# No subject mappings. Campaign and campaign-tier are granted as direct
+# entitlements from arkavo_entitlements by the composite ERS's patreon source.
+# The status and entitlement mappings, which read the .patreon properties, were
+# dropped (opentdf-platform#69): nothing grants those two definitions now, so
+# content tagged with them is denied.
+subject_mappings: []
