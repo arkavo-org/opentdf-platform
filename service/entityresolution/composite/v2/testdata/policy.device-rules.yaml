@@ -4,7 +4,10 @@
 #   - the arkavo-creator attribute, whose publish value the ERS config's
 #     identity-core source grants a creator (the production example does not
 #     declare it, so a rule naming it would fail the load);
-#   - the device_rules section at the end.
+#   - the device_rules section at the end;
+#   - the status and entitlement subject mappings, which the example dropped
+#     (opentdf-platform#69). They stay here so the device rules tests cover
+#     values granted by subject mappings.
 # The production example gets no rules.
 #
 # Patreon-backed policy snapshot.
