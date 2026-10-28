@@ -99,6 +99,18 @@ services:
         actions: [publish]
         pep_assertable: true
 
+      # A creator's own value, creator/value/<arkavo account id>, which lets a
+      # creator with no Patreon campaign open their own content and catalog
+      # (opentdf-platform#64). pep_assertable like patreon: the catalog node
+      # decides GET /v2/catalogs/<sub> on the claims chain it verified.
+      - id: creator
+        type: token-claims
+        issuer: https://identity.arkavo.net
+        claim: arkavo_entitlements
+        grants:
+          - https://arkavo.net/attr/creator
+        pep_assertable: true
+
     # constraints: agent_status is unset, so every agent subject is withheld.
     # Device rules (what a device may do for a person) are not set here: they
     # are the policy file's device_rules section.
