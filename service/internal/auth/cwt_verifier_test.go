@@ -467,3 +467,61 @@ func TestDecodeClaimsFromToken_JOSEThenCWT(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "neither JWT nor CWT")
 }
+
+// A COSE content type marks a token minted for one verifier (the owner-KAS
+// token, a game-server token). It is refused wherever the header sits, even
+// when the signature, issuer and audience are all good.
+func TestCWTVerifier_RejectsContentType(t *testing.T) {
+	priv, kid := newP256(t)
+	srv := keySetServer(t, coseKeySetFromPub(t, &priv.PublicKey, kid))
+	defer srv.Close()
+
+	v, err := NewCWTVerifier(context.Background(), CWTVerifierConfig{
+		COSEKeysURL: srv.URL,
+		Issuer:      "https://idp.example",
+		Audience:    "opentdf-platform",
+		Algorithm:   "ES256",
+		CacheTTL:    time.Minute,
+	}, nil)
+	require.NoError(t, err)
+
+	payload := map[any]any{}
+	for k, val := range standardClaims("https://idp.example", "opentdf-platform", "user-1", time.Hour) {
+		payload[k] = val
+	}
+	payloadCBOR, err := cbor.Marshal(payload)
+	require.NoError(t, err)
+	signer, err := cose.NewSigner(cose.AlgorithmES256, priv)
+	require.NoError(t, err)
+
+	mint := func(protected cose.ProtectedHeader, unprotected cose.UnprotectedHeader) string {
+		protected[cose.HeaderLabelAlgorithm] = cose.AlgorithmES256
+		protected[cose.HeaderLabelKeyID] = kid
+		msg := cose.Sign1Message{
+			Headers: cose.Headers{Protected: protected, Unprotected: unprotected},
+			Payload: payloadCBOR,
+		}
+		require.NoError(t, msg.Sign(rand.Reader, nil, signer))
+		raw, err := msg.MarshalCBOR()
+		require.NoError(t, err)
+		return base64.RawURLEncoding.EncodeToString(raw)
+	}
+
+	// Control: the same token with no content type verifies.
+	_, err = v.VerifyCWTClaims(context.Background(), mint(cose.ProtectedHeader{}, nil))
+	require.NoError(t, err)
+
+	typed := map[string]string{
+		"protected": mint(cose.ProtectedHeader{cose.HeaderLabelContentType: "application/owner-kas+cwt"}, nil),
+		"unprotected": mint(cose.ProtectedHeader{},
+			cose.UnprotectedHeader{cose.HeaderLabelContentType: "application/owner-kas+cwt"}),
+	}
+	for name, token := range typed {
+		t.Run(name, func(t *testing.T) {
+			_, err := v.VerifyCWTClaims(context.Background(), token)
+			require.ErrorContains(t, err, "content type")
+			_, err = v.VerifyAccessToken(context.Background(), token)
+			require.ErrorContains(t, err, "content type")
+		})
+	}
+}

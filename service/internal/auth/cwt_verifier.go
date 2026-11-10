@@ -204,6 +204,15 @@ func (v *CWTVerifier) VerifyCWTClaims(ctx context.Context, token string) (map[st
 		return nil, err
 	}
 
+	// A content type marks a token minted for one verifier (the owner-KAS
+	// token, a game-server token). Identity's verifier refuses any; so does
+	// this one, so audience is never the only thing keeping a typed token out.
+	_, typedProtected := msg.Headers.Protected[cose.HeaderLabelContentType]
+	_, typedUnprotected := msg.Headers.Unprotected[cose.HeaderLabelContentType]
+	if typedProtected || typedUnprotected {
+		return nil, errors.New("cwt: token carries a content type; typed tokens are not accepted")
+	}
+
 	keys, err := v.keys(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("cwt: cannot fetch COSE Key Set: %w", err)
